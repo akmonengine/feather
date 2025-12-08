@@ -1,4 +1,12 @@
 # Feather
+![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/akmonengine/feather)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Go Reference](https://img.shields.io/badge/reference-%23007D9C?logo=go&logoColor=white&labelColor=gray)](https://pkg.go.dev/github.com/akmonengine/feather)
+[![Go Report Card](https://goreportcard.com/badge/github.com/akmonengine/feather)](https://goreportcard.com/report/github.com/akmonengine/feather)
+![Tests](https://img.shields.io/github/actions/workflow/status/akmonengine/feather/code_coverage.yml?label=tests)
+![Codecov](https://img.shields.io/codecov/c/github/akmonengine/feather)
+![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/akmonengine/feather)
+![GitHub Issues or Pull Requests](https://img.shields.io/github/issues-pr/akmonengine/feather)
 
 A Go physic library, based on the XPBD solver algorithm.
 
