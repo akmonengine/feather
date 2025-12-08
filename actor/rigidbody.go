@@ -112,7 +112,7 @@ func (rb *RigidBody) TrySleep(dt float64, timethreshold float64, velocityThresho
 			rb.Sleep()
 		}
 	} else {
-		rb.Awake()
+		rb.WakeUp()
 	}
 }
 
@@ -126,7 +126,7 @@ func (rb *RigidBody) Sleep() {
 	rb.AngularVelocity = mgl64.Vec3{}
 }
 
-func (rb *RigidBody) Awake() {
+func (rb *RigidBody) WakeUp() {
 	rb.IsSleeping = false
 	rb.SleepTimer = 0.0
 }
@@ -190,7 +190,7 @@ func (rb *RigidBody) Update(dt float64) {
 // AddForce in 1000N (1000 * kg⋅m/s²)
 func (rb *RigidBody) AddForce(force mgl64.Vec3) {
 	if rb.BodyType != BodyTypeStatic {
-		rb.Awake()
+		rb.WakeUp()
 
 		rb.accumulatedForce = rb.accumulatedForce.Add(force.Mul(1000))
 	}
@@ -199,7 +199,7 @@ func (rb *RigidBody) AddForce(force mgl64.Vec3) {
 // AddTorque in 1000N⋅m
 func (rb *RigidBody) AddTorque(torque mgl64.Vec3) {
 	if rb.BodyType != BodyTypeStatic {
-		rb.Awake()
+		rb.WakeUp()
 
 		rb.accumulatedTorque = rb.accumulatedTorque.Add(torque.Mul(1000))
 	}
