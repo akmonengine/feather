@@ -100,6 +100,7 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 
 	rb.InertiaLocal = shape.ComputeInertia(rb.Material.mass)
 	rb.InverseInertiaLocal = rb.InertiaLocal.Inv()
+	rb.Shape.ComputeAABB(rb.Transform)
 
 	return rb
 }
@@ -119,6 +120,7 @@ func (rb *RigidBody) Sleep() {
 	rb.IsSleeping = true
 	rb.SleepTimer = 0.0
 
+	rb.Shape.ComputeAABB(rb.Transform)
 	rb.ClearForces()
 	rb.Velocity = mgl64.Vec3{}
 	rb.AngularVelocity = mgl64.Vec3{}
@@ -165,6 +167,7 @@ func (rb *RigidBody) Integrate(dt float64, gravity mgl64.Vec3) {
 	rb.PresolveVelocity = rb.Velocity
 	rb.PresolveAngularVelocity = rb.AngularVelocity
 
+	rb.Shape.ComputeAABB(rb.Transform)
 	rb.ClearForces()
 }
 

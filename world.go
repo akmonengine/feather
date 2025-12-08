@@ -41,10 +41,6 @@ func (w *World) Step(dt float64) {
 		for _, body := range w.Bodies {
 			body.Integrate(h, w.Gravity)
 		}
-		//Phase pre-2.0: compute all aabbs once per substep
-		for _, body := range w.Bodies {
-			body.Shape.ComputeAABB(body.Transform)
-		}
 
 		// Phase 2.0: Collision pair finding - Broad phase
 		collisionPairs := BroadPhase(w.Bodies)
@@ -68,7 +64,7 @@ func (w *World) Step(dt float64) {
 		}
 
 		for _, body := range w.Bodies {
-			body.TrySleep(h, 10*h, 1e-2) // Seuil de vitesse pour le sleeping
+			body.TrySleep(h, 0.3, 0.05) // Seuil de vitesse pour le sleeping
 		}
 	}
 }
