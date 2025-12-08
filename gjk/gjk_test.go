@@ -421,15 +421,6 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 
 func TestGJK_TetrahedronFaceNormal(t *testing.T) {
 	t.Run("origin nearly on face (distance < 1e-12)", func(t *testing.T) {
-		// Create a tetrahedron where origin is extremely close to face ABC but still outside
-		simplex := Simplex{
-			{0, 0, 0}, // D
-			{1, 0, 0}, // C
-			{0, 1, 0}, // B
-			{0, 0, 1}, // A
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
 		// Move origin extremely close to the face (ABC) but outside
 		// The face ABC is the triangle with points A, B, C
 		// The normal should point away from D (0,0,0)
@@ -437,13 +428,13 @@ func TestGJK_TetrahedronFaceNormal(t *testing.T) {
 		// so origin is near face ABC but not inside
 
 		// Create a tetrahedron with face ABC at z=1e-12 and origin at (0,0,0)
-		simplex = Simplex{
+		simplex := Simplex{
 			{1, 1, -1e-12}, // D
 			{1, 0, 1e-12},  // C
 			{0, 1, 1e-12},  // B
 			{0, 0, 1e-12},  // A
 		}
-		direction = mgl64.Vec3{0, 0, 1}
+		direction := mgl64.Vec3{0, 0, 1}
 
 		result := tetrahedron(&simplex, &direction)
 		if result {

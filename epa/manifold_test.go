@@ -16,15 +16,6 @@ func vec3Equal(a, b mgl64.Vec3, tolerance float64) bool {
 		math.Abs(a.Z()-b.Z()) < tolerance
 }
 
-func containsPoint(points []mgl64.Vec3, target mgl64.Vec3, tolerance float64) bool {
-	for _, p := range points {
-		if vec3Equal(p, target, tolerance) {
-			return true
-		}
-	}
-	return false
-}
-
 // TestComputeCenter tests the centroid calculation
 func TestComputeCenter(t *testing.T) {
 	tests := []struct {
