@@ -1,0 +1,533 @@
+package feather
+
+import (
+	"testing"
+
+	"github.com/akmonengine/feather/actor"
+	"github.com/go-gl/mathgl/mgl64"
+)
+
+// Test helper functions
+func createBox(position mgl64.Vec3, halfExtents mgl64.Vec3, bodyType actor.BodyType) *actor.RigidBody {
+	return actor.NewRigidBody(
+		actor.Transform{Position: position, Rotation: mgl64.QuatIdent()},
+		&actor.Box{HalfExtents: halfExtents},
+		bodyType,
+		1.0,
+	)
+}
+
+func createSphere(position mgl64.Vec3, radius float64, bodyType actor.BodyType) *actor.RigidBody {
+	return actor.NewRigidBody(
+		actor.Transform{Position: position, Rotation: mgl64.QuatIdent()},
+		&actor.Sphere{Radius: radius},
+		bodyType,
+		1.0,
+	)
+}
+
+func createPlane(normal mgl64.Vec3, distance float64) *actor.RigidBody {
+	return actor.NewRigidBody(
+		actor.Transform{Position: mgl64.Vec3{0, 0, 0}, Rotation: mgl64.QuatIdent()},
+		&actor.Plane{Normal: normal, Distance: distance},
+		actor.BodyTypeStatic,
+		0.0,
+	)
+}
+
+// TestComplianceConstants verifies that compliance constants are defined
+func TestComplianceConstants(t *testing.T) {
+	constants := map[string]float64{
+		"CONCRETE_COMPLIANCE": CONCRETE_COMPLIANCE,
+		"WOOD_COMPLIANCE":     WOOD_COMPLIANCE,
+		"LEATHER_COMPLIANCE":  LEATHER_COMPLIANCE,
+		"TENDON_COMPLIANCE":   TENDON_COMPLIANCE,
+		"RUBBER_COMPLIANCE":   RUBBER_COMPLIANCE,
+		"MUSCLE_COMPLIANCE":   MUSCLE_COMPLIANCE,
+		"FAT_COMPLIANCE":      FAT_COMPLIANCE,
+		"STIFF_COMPLIANCE":    STIFF_COMPLIANCE,
+	}
+
+	for name, value := range constants {
+		if value <= 0 {
+			t.Errorf("%s should be positive, got %v", name, value)
+		}
+	}
+
+	// STIFF_COMPLIANCE should equal CONCRETE_COMPLIANCE
+	if STIFF_COMPLIANCE != CONCRETE_COMPLIANCE {
+		t.Errorf("STIFF_COMPLIANCE = %v, want %v (CONCRETE_COMPLIANCE)", STIFF_COMPLIANCE, CONCRETE_COMPLIANCE)
+	}
+
+	// Verify ordering: concrete < wood < tendon < leather < rubber < muscle < fat
+	if !(CONCRETE_COMPLIANCE < WOOD_COMPLIANCE) {
+		t.Error("CONCRETE_COMPLIANCE should be less than WOOD_COMPLIANCE")
+	}
+	if !(WOOD_COMPLIANCE < TENDON_COMPLIANCE) {
+		t.Error("WOOD_COMPLIANCE should be less than TENDON_COMPLIANCE")
+	}
+	if !(TENDON_COMPLIANCE < LEATHER_COMPLIANCE) {
+		t.Error("TENDON_COMPLIANCE should be less than LEATHER_COMPLIANCE")
+	}
+	if !(LEATHER_COMPLIANCE < RUBBER_COMPLIANCE) {
+		t.Error("LEATHER_COMPLIANCE should be less than RUBBER_COMPLIANCE")
+	}
+	if !(RUBBER_COMPLIANCE < MUSCLE_COMPLIANCE) {
+		t.Error("RUBBER_COMPLIANCE should be less than MUSCLE_COMPLIANCE")
+	}
+	if !(MUSCLE_COMPLIANCE < FAT_COMPLIANCE) {
+		t.Error("MUSCLE_COMPLIANCE should be less than FAT_COMPLIANCE")
+	}
+}
+
+// TestBroadPhaseNoBodies tests broad phase with no bodies
+func TestBroadPhaseNoBodies(t *testing.T) {
+	bodies := []*actor.RigidBody{}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 0 {
+		t.Errorf("BroadPhase with no bodies returned %d pairs, want 0", len(pairs))
+	}
+}
+
+// TestBroadPhaseSingleBody tests broad phase with a single body
+func TestBroadPhaseSingleBody(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 0 {
+		t.Errorf("BroadPhase with single body returned %d pairs, want 0", len(pairs))
+	}
+}
+
+// TestBroadPhaseTwoBodiesOverlapping tests two overlapping bodies
+func TestBroadPhaseTwoBodiesOverlapping(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+		createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 1 {
+		t.Errorf("BroadPhase with overlapping bodies returned %d pairs, want 1", len(pairs))
+	}
+
+	if len(pairs) > 0 {
+		if pairs[0].BodyA != bodies[0] || pairs[0].BodyB != bodies[1] {
+			t.Error("Collision pair bodies don't match expected bodies")
+		}
+	}
+}
+
+// TestBroadPhaseTwoBodiesNotOverlapping tests two non-overlapping bodies
+func TestBroadPhaseTwoBodiesNotOverlapping(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+		createBox(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	bodies[0].Shape.ComputeAABB(bodies[0].Transform)
+	bodies[1].Shape.ComputeAABB(bodies[1].Transform)
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 0 {
+		t.Errorf("BroadPhase with non-overlapping bodies returned %d pairs, want 0", len(pairs))
+	}
+}
+
+// TestBroadPhaseTwoStaticBodies tests two static bodies (should be skipped)
+func TestBroadPhaseTwoStaticBodies(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic),
+		createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	// Static-static collisions should be skipped
+	if len(pairs) != 0 {
+		t.Errorf("BroadPhase with two static bodies returned %d pairs, want 0 (should skip static-static)", len(pairs))
+	}
+}
+
+// TestBroadPhaseStaticDynamicOverlapping tests static and dynamic bodies
+func TestBroadPhaseStaticDynamicOverlapping(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic),
+		createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 1 {
+		t.Errorf("BroadPhase with static-dynamic overlapping returned %d pairs, want 1", len(pairs))
+	}
+}
+
+// TestBroadPhaseMultipleBodies tests multiple bodies with various overlaps
+func TestBroadPhaseMultipleBodies(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),   // 0
+		createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic), // 1 - overlaps with 0
+		createBox(mgl64.Vec3{3, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),   // 2 - overlaps with 1
+		createBox(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),  // 3 - no overlaps
+	}
+
+	bodies[0].Shape.ComputeAABB(bodies[0].Transform)
+	bodies[1].Shape.ComputeAABB(bodies[1].Transform)
+	bodies[2].Shape.ComputeAABB(bodies[2].Transform)
+	bodies[3].Shape.ComputeAABB(bodies[3].Transform)
+	pairs := BroadPhase(bodies)
+
+	// Expected pairs: (0,1), (1,2)
+	expectedPairs := 2
+	if len(pairs) != expectedPairs {
+		t.Errorf("BroadPhase returned %d pairs, want %d", len(pairs), expectedPairs)
+	}
+
+	// Verify that we have the right pairs
+	pairMap := make(map[string]bool)
+	for _, pair := range pairs {
+		// Create a key from body indices
+		var key string
+		for i, body := range bodies {
+			if body == pair.BodyA {
+				for j, bodyB := range bodies {
+					if bodyB == pair.BodyB {
+						if i < j {
+							key = string(rune('0'+i)) + string(rune('0'+j))
+						}
+					}
+				}
+			}
+		}
+		if key != "" {
+			pairMap[key] = true
+		}
+	}
+
+	if len(pairMap) != expectedPairs {
+		t.Logf("Found pairs: %v", pairMap)
+	}
+}
+
+// TestBroadPhaseSpheresOverlapping tests overlapping spheres
+func TestBroadPhaseSpheresOverlapping(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic),
+		createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 1 {
+		t.Errorf("BroadPhase with overlapping spheres returned %d pairs, want 1", len(pairs))
+	}
+}
+
+// TestBroadPhaseSpheresNotOverlapping tests non-overlapping spheres
+func TestBroadPhaseSpheresNotOverlapping(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic),
+		createSphere(mgl64.Vec3{3, 0, 0}, 1.0, actor.BodyTypeDynamic),
+	}
+
+	bodies[0].Shape.ComputeAABB(bodies[0].Transform)
+	bodies[1].Shape.ComputeAABB(bodies[1].Transform)
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 0 {
+		t.Errorf("BroadPhase with non-overlapping spheres returned %d pairs, want 0", len(pairs))
+	}
+}
+
+// TestBroadPhaseMixedShapes tests boxes and spheres together
+func TestBroadPhaseMixedShapes(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+		createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) != 1 {
+		t.Errorf("BroadPhase with box-sphere overlapping returned %d pairs, want 1", len(pairs))
+	}
+}
+
+// TestBroadPhaseWithPlane tests bodies overlapping with a plane
+func TestBroadPhaseWithPlane(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createPlane(mgl64.Vec3{0, 1, 0}, 0), // Ground plane at y=0
+		createBox(mgl64.Vec3{0, 0.5, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	pairs := BroadPhase(bodies)
+
+	// The box should overlap with the plane's AABB
+	if len(pairs) != 1 {
+		t.Errorf("BroadPhase with plane-box returned %d pairs, want 1", len(pairs))
+	}
+}
+
+// TestNarrowPhaseNoPairs tests narrow phase with no pairs
+func TestNarrowPhaseNoPairs(t *testing.T) {
+	pairs := []CollisionPair{}
+
+	contacts := NarrowPhase(pairs)
+
+	if len(contacts) != 0 {
+		t.Errorf("NarrowPhase with no pairs returned %d contacts, want 0", len(contacts))
+	}
+}
+
+// TestNarrowPhaseOverlappingBoxes tests narrow phase with overlapping boxes
+func TestNarrowPhaseOverlappingBoxes(t *testing.T) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect collision
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase with overlapping boxes returned no contacts, expected at least 1")
+	}
+}
+
+// TestNarrowPhaseNonOverlappingBoxes tests narrow phase with non-overlapping boxes
+func TestNarrowPhaseNonOverlappingBoxes(t *testing.T) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createBox(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should not detect collision
+	if len(contacts) != 0 {
+		t.Errorf("NarrowPhase with non-overlapping boxes returned %d contacts, want 0", len(contacts))
+	}
+}
+
+// TestNarrowPhaseOverlappingSpheres tests narrow phase with overlapping spheres
+func TestNarrowPhaseOverlappingSpheres(t *testing.T) {
+	bodyA := createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic)
+	bodyB := createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect collision
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase with overlapping spheres returned no contacts, expected at least 1")
+	}
+}
+
+// TestNarrowPhaseNonOverlappingSpheres tests narrow phase with non-overlapping spheres
+func TestNarrowPhaseNonOverlappingSpheres(t *testing.T) {
+	bodyA := createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic)
+	bodyB := createSphere(mgl64.Vec3{5, 0, 0}, 1.0, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should not detect collision
+	if len(contacts) != 0 {
+		t.Errorf("NarrowPhase with non-overlapping spheres returned %d contacts, want 0", len(contacts))
+	}
+}
+
+// TestNarrowPhaseBoxSphere tests narrow phase with box and sphere
+func TestNarrowPhaseBoxSphere(t *testing.T) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect collision
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase with overlapping box-sphere returned no contacts, expected at least 1")
+	}
+}
+
+// TestNarrowPhaseSphereOnPlane tests narrow phase with sphere resting on plane
+func TestNarrowPhaseSphereOnPlane(t *testing.T) {
+	bodyA := createPlane(mgl64.Vec3{0, 1, 0}, 0)
+	bodyB := createSphere(mgl64.Vec3{0, 0.5, 0}, 1.0, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect collision (sphere penetrating plane)
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase with sphere on plane returned no contacts, expected at least 1")
+	}
+}
+
+// TestNarrowPhaseBoxOnPlane tests narrow phase with box resting on plane
+func TestNarrowPhaseBoxOnPlane(t *testing.T) {
+	bodyA := createPlane(mgl64.Vec3{0, 1, 0}, 0)
+	bodyB := createBox(mgl64.Vec3{0, 0.5, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB},
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect collision (box penetrating plane)
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase with box on plane returned no contacts, expected at least 1")
+	}
+}
+
+// TestNarrowPhaseMultiplePairs tests narrow phase with multiple collision pairs
+func TestNarrowPhaseMultiplePairs(t *testing.T) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyC := createSphere(mgl64.Vec3{3, 0, 0}, 1.0, actor.BodyTypeDynamic)
+	bodyD := createSphere(mgl64.Vec3{4, 0, 0}, 1.0, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{
+		{BodyA: bodyA, BodyB: bodyB}, // Should collide
+		{BodyA: bodyC, BodyB: bodyD}, // Should collide
+	}
+
+	contacts := NarrowPhase(pairs)
+
+	// Should detect both collisions
+	if len(contacts) < 2 {
+		t.Errorf("NarrowPhase with 2 overlapping pairs returned %d contacts, want at least 2", len(contacts))
+	}
+}
+
+// TestCollisionPairStruct tests the CollisionPair struct
+func TestCollisionPairStruct(t *testing.T) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+
+	pair := CollisionPair{
+		BodyA: bodyA,
+		BodyB: bodyB,
+	}
+
+	if pair.BodyA != bodyA {
+		t.Error("CollisionPair.BodyA doesn't match expected body")
+	}
+	if pair.BodyB != bodyB {
+		t.Error("CollisionPair.BodyB doesn't match expected body")
+	}
+}
+
+// TestIntegrationBroadAndNarrowPhase tests the complete collision detection pipeline
+func TestIntegrationBroadAndNarrowPhase(t *testing.T) {
+	bodies := []*actor.RigidBody{
+		createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+		createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+		createBox(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic),
+	}
+
+	// Broad phase
+	pairs := BroadPhase(bodies)
+
+	if len(pairs) == 0 {
+		t.Fatal("BroadPhase returned no pairs, expected at least 1")
+	}
+
+	// Narrow phase
+	contacts := NarrowPhase(pairs)
+
+	if len(contacts) == 0 {
+		t.Error("NarrowPhase returned no contacts, expected at least 1")
+	}
+
+	// Verify number of contacts matches number of actual collisions
+	// bodies[0] and bodies[1] should collide
+	// bodies[2] is far away and should not collide
+	if len(contacts) != 1 {
+		t.Errorf("Expected 1 contact from integration test, got %d", len(contacts))
+	}
+}
+
+// Benchmark tests
+func BenchmarkBroadPhase10Bodies(b *testing.B) {
+	bodies := make([]*actor.RigidBody, 10)
+	for i := 0; i < 10; i++ {
+		bodies[i] = createBox(
+			mgl64.Vec3{float64(i) * 2, 0, 0},
+			mgl64.Vec3{1, 1, 1},
+			actor.BodyTypeDynamic,
+		)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		BroadPhase(bodies)
+	}
+}
+
+func BenchmarkBroadPhase50Bodies(b *testing.B) {
+	bodies := make([]*actor.RigidBody, 50)
+	for i := 0; i < 50; i++ {
+		bodies[i] = createBox(
+			mgl64.Vec3{float64(i) * 2, 0, 0},
+			mgl64.Vec3{1, 1, 1},
+			actor.BodyTypeDynamic,
+		)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		BroadPhase(bodies)
+	}
+}
+
+func BenchmarkNarrowPhaseSinglePair(b *testing.B) {
+	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+	bodyB := createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+
+	pairs := []CollisionPair{{BodyA: bodyA, BodyB: bodyB}}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		NarrowPhase(pairs)
+	}
+}
+
+func BenchmarkNarrowPhaseMultiplePairs(b *testing.B) {
+	pairs := make([]CollisionPair, 10)
+	for i := 0; i < 10; i++ {
+		bodyA := createBox(mgl64.Vec3{float64(i) * 3, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+		bodyB := createBox(mgl64.Vec3{float64(i)*3 + 1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
+		pairs[i] = CollisionPair{BodyA: bodyA, BodyB: bodyB}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		NarrowPhase(pairs)
+	}
+}
