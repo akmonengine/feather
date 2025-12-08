@@ -371,7 +371,6 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 // Degenerate simplex cases
 func TestGJK_DegenerateSimplex(t *testing.T) {
 	t.Run("colinear points in tetrahedron", func(t *testing.T) {
-		t.SkipNow()
 		simplex := Simplex{
 			{0, 0, 0},
 			{1, 0, 0},
@@ -404,7 +403,6 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 	})
 
 	t.Run("zero-length edge in line", func(t *testing.T) {
-		t.SkipNow()
 		simplex := Simplex{
 			{1e-15, 0, 0},
 			{1e-15, 1e-15, 0},
@@ -548,7 +546,6 @@ func TestLine(t *testing.T) {
 	})
 
 	t.Run("origin behind point A", func(t *testing.T) {
-		t.SkipNow()
 		simplex := Simplex{
 			{3, 0, 0}, // B
 			{1, 0, 0}, // A

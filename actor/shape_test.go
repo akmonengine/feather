@@ -496,7 +496,6 @@ func TestPlaneComputeAABB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.SkipNow()
 			tt.plane.ComputeAABB(tt.transform)
 			aabb := tt.plane.GetAABB()
 
@@ -555,7 +554,6 @@ func TestPlaneGetContactFeature(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.SkipNow()
 			features := tt.plane.GetContactFeature(tt.direction)
 
 			// Doit retourner exactement 4 points pour un plan
