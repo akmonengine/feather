@@ -2,6 +2,7 @@ package actor
 
 import (
 	"math"
+	"sync"
 
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -13,6 +14,26 @@ const (
 	ShapeTypeSphere ShapeType = iota
 	ShapeTypeBox
 	ShapeTypePlane
+)
+
+var (
+	vec3Pool = sync.Pool{
+		New: func() interface{} {
+			return &mgl64.Vec3{}
+		},
+	}
+	vec3SlicePool4 = sync.Pool{
+		New: func() interface{} {
+			s := make([]*mgl64.Vec3, 4)
+			return &s
+		},
+	}
+	vec3SlicePool24 = sync.Pool{
+		New: func() interface{} {
+			s := make([]*mgl64.Vec3, 24)
+			return &s
+		},
+	}
 )
 
 // ShapeInterface is the interface that all collision shapes must implement
@@ -118,93 +139,77 @@ func (b *Box) Support(direction mgl64.Vec3) mgl64.Vec3 {
 
 func (b *Box) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
 	dir := direction.Normalize()
+	hx, hy, hz := b.HalfExtents.X(), b.HalfExtents.Y(), b.HalfExtents.Z()
 
-	// Trouver la face la plus parallèle à la direction
-	// (celle dont la normale pointe le plus dans la direction)
-	bestDot := -math.MaxFloat64
-	var bestFace []mgl64.Vec3
-
-	hx := b.HalfExtents.X()
-	hy := b.HalfExtents.Y()
-	hz := b.HalfExtents.Z()
-
-	// Les 6 faces avec leurs vertices (ordre CCW vu de l'extérieur)
-	faces := []struct {
-		normal   mgl64.Vec3
-		vertices []mgl64.Vec3
-	}{
-		// +X face
-		{
-			normal: mgl64.Vec3{1, 0, 0},
-			vertices: []mgl64.Vec3{
-				{hx, -hy, -hz},
-				{hx, -hy, hz},
-				{hx, hy, hz},
-				{hx, hy, -hz},
-			},
-		},
-		// -X face
-		{
-			normal: mgl64.Vec3{-1, 0, 0},
-			vertices: []mgl64.Vec3{
-				{-hx, -hy, hz},
-				{-hx, -hy, -hz},
-				{-hx, hy, -hz},
-				{-hx, hy, hz},
-			},
-		},
-		// +Y face
-		{
-			normal: mgl64.Vec3{0, 1, 0},
-			vertices: []mgl64.Vec3{
-				{-hx, hy, -hz},
-				{-hx, hy, hz},
-				{hx, hy, hz},
-				{hx, hy, -hz},
-			},
-		},
-		// -Y face
-		{
-			normal: mgl64.Vec3{0, -1, 0},
-			vertices: []mgl64.Vec3{
-				{-hx, -hy, hz},
-				{hx, -hy, hz},
-				{hx, -hy, -hz},
-				{-hx, -hy, -hz},
-			},
-		},
-		// +Z face
-		{
-			normal: mgl64.Vec3{0, 0, 1},
-			vertices: []mgl64.Vec3{
-				{-hx, -hy, hz},
-				{-hx, hy, hz},
-				{hx, hy, hz},
-				{hx, -hy, hz},
-			},
-		},
-		// -Z face
-		{
-			normal: mgl64.Vec3{0, 0, -1},
-			vertices: []mgl64.Vec3{
-				{hx, -hy, -hz},
-				{hx, hy, -hz},
-				{-hx, hy, -hz},
-				{-hx, -hy, -hz},
-			},
-		},
+	allVerticesPtr := vec3SlicePool24.Get().(*[]*mgl64.Vec3)
+	allVertices := *allVerticesPtr
+	for i := 0; i < 24; i++ {
+		allVertices[i] = vec3Pool.Get().(*mgl64.Vec3)
 	}
 
-	// Trouver la meilleure face
-	for _, face := range faces {
-		dot := dir.Dot(face.normal)
+	// +X face
+	allVertices[0][0], allVertices[0][1], allVertices[0][2] = hx, -hy, -hz
+	allVertices[1][0], allVertices[1][1], allVertices[1][2] = hx, -hy, hz
+	allVertices[2][0], allVertices[2][1], allVertices[2][2] = hx, hy, hz
+	allVertices[3][0], allVertices[3][1], allVertices[3][2] = hx, hy, -hz
+	// -X face
+	allVertices[4][0], allVertices[4][1], allVertices[4][2] = -hx, -hy, hz
+	allVertices[5][0], allVertices[5][1], allVertices[5][2] = -hx, -hy, -hz
+	allVertices[6][0], allVertices[6][1], allVertices[6][2] = -hx, hy, -hz
+	allVertices[7][0], allVertices[7][1], allVertices[7][2] = -hx, hy, hz
+	// +Y face
+	allVertices[8][0], allVertices[8][1], allVertices[8][2] = -hx, hy, -hz
+	allVertices[9][0], allVertices[9][1], allVertices[9][2] = -hx, hy, hz
+	allVertices[10][0], allVertices[10][1], allVertices[10][2] = hx, hy, hz
+	allVertices[11][0], allVertices[11][1], allVertices[11][2] = hx, hy, -hz
+	// -Y face
+	allVertices[12][0], allVertices[12][1], allVertices[12][2] = -hx, -hy, hz
+	allVertices[13][0], allVertices[13][1], allVertices[13][2] = hx, -hy, hz
+	allVertices[14][0], allVertices[14][1], allVertices[14][2] = hx, -hy, -hz
+	allVertices[15][0], allVertices[15][1], allVertices[15][2] = -hx, -hy, -hz
+	// +Z face
+	allVertices[16][0], allVertices[16][1], allVertices[16][2] = -hx, -hy, hz
+	allVertices[17][0], allVertices[17][1], allVertices[17][2] = -hx, hy, hz
+	allVertices[18][0], allVertices[18][1], allVertices[18][2] = hx, hy, hz
+	allVertices[19][0], allVertices[19][1], allVertices[19][2] = hx, -hy, hz
+	// -Z face
+	allVertices[20][0], allVertices[20][1], allVertices[20][2] = hx, -hy, -hz
+	allVertices[21][0], allVertices[21][1], allVertices[21][2] = hx, hy, -hz
+	allVertices[22][0], allVertices[22][1], allVertices[22][2] = -hx, hy, -hz
+	allVertices[23][0], allVertices[23][1], allVertices[23][2] = -hx, -hy, -hz
+
+	bestDot := -math.MaxFloat64
+	bestFaceIdx := 0
+	faceNormals := []mgl64.Vec3{
+		{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+	}
+	for i := 0; i < 6; i++ {
+		dot := dir.Dot(faceNormals[i])
 		if dot > bestDot {
 			bestDot = dot
-			bestFace = face.vertices
+			bestFaceIdx = i
 		}
 	}
 
-	return bestFace
+	resultSlicePtr := vec3SlicePool4.Get().(*[]*mgl64.Vec3)
+	resultSlice := *resultSlicePtr
+	startIdx := bestFaceIdx * 4
+	for i := 0; i < 4; i++ {
+		resultSlice[i] = allVertices[startIdx+i]
+	}
+
+	result := make([]mgl64.Vec3, 4)
+	for i := 0; i < 4; i++ {
+		result[i] = *resultSlice[i]
+	}
+
+	for i := 0; i < 24; i++ {
+		vec3Pool.Put(allVertices[i])
+	}
+	vec3SlicePool24.Put(allVerticesPtr)
+	vec3SlicePool4.Put(resultSlicePtr)
+
+	return result
 }
 
 // Sphere represents a spherical collision shape
@@ -253,7 +258,15 @@ func (s *Sphere) Support(direction mgl64.Vec3) mgl64.Vec3 {
 }
 
 func (s *Sphere) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
-	return []mgl64.Vec3{s.Support(direction)}
+	vecPtr := vec3Pool.Get().(*mgl64.Vec3)
+	*vecPtr = s.Support(direction) // Met à jour la valeur
+
+	slicePtr := vec3SlicePool4.Get().(*[]mgl64.Vec3)
+	(*slicePtr)[0] = *vecPtr // Copie la valeur
+
+	vec3SlicePool4.Put(vecPtr)
+
+	return *slicePtr
 }
 
 // Plane represents an infinite plane collision shape
@@ -355,17 +368,45 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
 
 	// Find two tangent vectors to the plane
 	tangent1, tangent2 := getTangentBasis(p.Normal)
-
-	// Large size to cover contacts
 	size := 1000.0
 
-	// Points in local plane space (not transformed)
-	return []mgl64.Vec3{
-		tangent1.Mul(-size).Add(tangent2.Mul(-size)),
-		tangent1.Mul(-size).Add(tangent2.Mul(size)),
-		tangent1.Mul(size).Add(tangent2.Mul(size)),
-		tangent1.Mul(size).Add(tangent2.Mul(-size)),
+	// Récupère 4 Vec3 depuis le pool
+	vecs := make([]*mgl64.Vec3, 4)
+	for i := 0; i < 4; i++ {
+		vecs[i] = vec3SlicePool4.Get().(*mgl64.Vec3)
 	}
+
+	// Récupère une slice depuis le pool
+	slicePtr := vec3SlicePool4.Get().(*[]mgl64.Vec3)
+	result := *slicePtr
+
+	// Calcule les 4 points en réutilisant les Vec3
+	// Point 1: tangent1.Mul(-size).Add(tangent2.Mul(-size))
+	*vecs[0] = tangent1.Mul(-size)
+	*vecs[0] = vecs[0].Add(tangent2.Mul(-size))
+	result[0] = *vecs[0]
+
+	// Point 2: tangent1.Mul(-size).Add(tangent2.Mul(size))
+	*vecs[1] = tangent1.Mul(-size)
+	*vecs[1] = vecs[1].Add(tangent2.Mul(size))
+	result[1] = *vecs[1]
+
+	// Point 3: tangent1.Mul(size).Add(tangent2.Mul(size))
+	*vecs[2] = tangent1.Mul(size)
+	*vecs[2] = vecs[2].Add(tangent2.Mul(size))
+	result[2] = *vecs[2]
+
+	// Point 4: tangent1.Mul(size).Add(tangent2.Mul(-size))
+	*vecs[3] = tangent1.Mul(size)
+	*vecs[3] = vecs[3].Add(tangent2.Mul(-size))
+	result[3] = *vecs[3]
+
+	// Libère les Vec3 (mais pas la slice, car on la retourne)
+	for i := 0; i < 4; i++ {
+		vec3Pool.Put(vecs[i])
+	}
+
+	return result
 }
 
 // Helper to generate the tangent basis
