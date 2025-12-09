@@ -32,7 +32,7 @@ func createFaceOutward(a, b, c, oppositePoint mgl64.Vec3) Face {
 		face.Distance = 0.0001
 		return face
 	}
-	normal = normal.Mul(1.0 / normalLength)
+	normal = normal.Normalize()
 
 	// === CRITICAL PART: Ensure normal points OUTWARD ===
 
