@@ -156,6 +156,7 @@ func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64
 
 	output := incident
 
+	var edge, clipNormal, toCenter, center mgl64.Vec3
 	// Clip against each edge of the reference
 	for i := 0; i < len(reference); i++ {
 		if len(output) == 0 {
@@ -167,13 +168,13 @@ func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64
 		v2 := reference[(i+1)%len(reference)]
 
 		// Clipping plane normal (perpendicular to the edge, pointing inward)
-		edge := v2.Sub(v1)
-		clipNormal := edge.Cross(normal).Normalize()
+		edge = v2.Sub(v1)
+		clipNormal = edge.Cross(normal).Normalize()
 
 		// Verify that the normal points inward
 		// (toward the center of the reference feature)
-		center := computeCenter(reference)
-		toCenter := center.Sub(v1)
+		center = computeCenter(reference)
+		toCenter = center.Sub(v1)
 		if toCenter.Dot(clipNormal) < 0 {
 			clipNormal = clipNormal.Mul(-1)
 		}
@@ -192,7 +193,7 @@ func clipPolygonAgainstPlane(polygon []mgl64.Vec3, planePoint, planeNormal mgl64
 	}
 
 	var output []mgl64.Vec3
-
+	var intersection mgl64.Vec3
 	for i := 0; i < len(polygon); i++ {
 		current := polygon[i]
 		next := polygon[(i+1)%len(polygon)]
@@ -208,13 +209,13 @@ func clipPolygonAgainstPlane(polygon []mgl64.Vec3, planePoint, planeNormal mgl64
 
 			// Next is outside → add intersection
 			if nextDist < -tolerance {
-				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
+				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
 				output = append(output, intersection)
 			}
 		} else {
 			// Current is outside, next is inside → add intersection
 			if nextDist >= -tolerance {
-				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
+				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
 				output = append(output, intersection)
 			}
 		}

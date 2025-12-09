@@ -88,6 +88,10 @@ func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstra
 	// Step 1: Build initial polytope faces from the tetrahedron simplex
 	faces := buildInitialFaces(simplex)
 
+	var closestFaceIndex int
+	var closestFace Face
+	var support mgl64.Vec3
+	var distance float64
 	// Step 2: Iteratively expand polytope toward origin
 	for i := 0; i < EPAMaxIterations; i++ {
 		if len(faces) == 0 {
@@ -97,8 +101,8 @@ func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstra
 
 		// Step 3: Find the face closest to the origin
 		// This face's normal and distance give us the current best MTV estimate
-		closestFaceIndex := findClosestFaceIndex(faces)
-		closestFace := faces[closestFaceIndex]
+		closestFaceIndex = findClosestFaceIndex(faces)
+		closestFace = faces[closestFaceIndex]
 
 		// Skip faces that are too close to or behind the origin (degenerate)
 		if closestFace.Distance < EPAMinFaceDistance {
@@ -108,8 +112,8 @@ func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstra
 		}
 
 		// Step 4: Get support point in the direction of the closest face's normal
-		support := gjk.MinkowskiSupport(a, b, closestFace.Normal)
-		distance := support.Dot(closestFace.Normal)
+		support = gjk.MinkowskiSupport(a, b, closestFace.Normal)
+		distance = support.Dot(closestFace.Normal)
 
 		// Step 5: Check for convergence
 		// If the new support point doesn't significantly improve the distance,
