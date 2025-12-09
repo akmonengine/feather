@@ -150,6 +150,11 @@ func addPointAndRebuildFaces(faces *[]*Face, support mgl64.Vec3, closestIndex in
 
 	// Find boundary edges
 	edges := findBoundaryEdges(*faces, visibleFaces)
+	defer func() {
+		for _, edge := range edges {
+			edgePool.Put(edge)
+		}
+	}()
 
 	// Remove visible faces
 	for i := len(visibleFaces) - 1; i >= 0; i-- {
@@ -176,38 +181,41 @@ func addPointAndRebuildFaces(faces *[]*Face, support mgl64.Vec3, closestIndex in
 	}
 }
 
-func findBoundaryEdges(faces []*Face, visibleIndices []int) []Edge {
-	// Create a set of visible face indices for quick lookup
-	visibleSet := make(map[int]bool)
-	for _, idx := range visibleIndices {
-		visibleSet[idx] = true
-	}
+func findBoundaryEdges(faces []*Face, visibleIndices []int) []*Edge {
+	// Map pour compter les occurrences de chaque edge
+	edgeCount := make(map[[2]mgl64.Vec3]int)
 
-	// Count how many times each edge appears in visible faces
-	edgeCount := make(map[Edge]int)
-
+	// Compter les edges des faces visibles
 	for _, idx := range visibleIndices {
 		face := faces[idx]
-
-		// Each triangular face has 3 edges
-		edges := [3]Edge{
-			{face.Points[0], face.Points[1]},
-			{face.Points[1], face.Points[2]},
-			{face.Points[2], face.Points[0]},
+		// Réutilise 3 edges pour éviter des allocations
+		edges := [3]*Edge{
+			edgePool.Get().(*Edge),
+			edgePool.Get().(*Edge),
+			edgePool.Get().(*Edge),
 		}
+		edges[0].A, edges[0].B = face.Points[0], face.Points[1]
+		edges[1].A, edges[1].B = face.Points[1], face.Points[2]
+		edges[2].A, edges[2].B = face.Points[2], face.Points[0]
 
 		for _, edge := range edges {
-			// Normalize edge (ensure consistent ordering)
-			normalizedEdge := normalizeEdge(edge)
-			edgeCount[normalizedEdge]++
+			// Normaliser l'edge pour éviter les doublons (A < B)
+			key := [2]mgl64.Vec3{edge.A, edge.B}
+			if compareVec3(edge.A, edge.B) > 0 {
+				key = [2]mgl64.Vec3{edge.B, edge.A}
+			}
+			edgeCount[key]++
+			edgePool.Put(edge) // Libère l'edge temporaire
 		}
 	}
 
-	// Boundary edges appear exactly once (shared with only one visible face)
-	var boundaryEdges []Edge
+	// Collecter les edges frontières (qui apparaissent une seule fois)
+	var boundaryEdges []*Edge
 	for edge, count := range edgeCount {
 		if count == 1 {
-			boundaryEdges = append(boundaryEdges, edge)
+			e := edgePool.Get().(*Edge)
+			e.A, e.B = edge[0], edge[1] // Initialise avec les bonnes valeurs
+			boundaryEdges = append(boundaryEdges, e)
 		}
 	}
 

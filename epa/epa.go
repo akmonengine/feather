@@ -65,6 +65,11 @@ var (
 			return &Face{}
 		},
 	}
+	edgePool = sync.Pool{
+		New: func() interface{} {
+			return &Edge{}
+		},
+	}
 )
 
 // EPA computes penetration depth and contact information for overlapping convex shapes.
