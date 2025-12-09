@@ -19,6 +19,7 @@ package epa
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -58,6 +59,14 @@ const (
 	DegeneratePenetrationEstimate = 0.01
 )
 
+var (
+	facePool = sync.Pool{
+		New: func() interface{} {
+			return &Face{}
+		},
+	}
+)
+
 // EPA computes penetration depth and contact information for overlapping convex shapes.
 //
 // Algorithm overview:
@@ -88,8 +97,14 @@ func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstra
 	// Step 1: Build initial polytope faces from the tetrahedron simplex
 	faces := buildInitialFaces(simplex)
 
+	defer func() {
+		for _, face := range faces {
+			facePool.Put(face)
+		}
+	}()
+
 	var closestFaceIndex int
-	var closestFace Face
+	var closestFace *Face
 	var support mgl64.Vec3
 	var distance float64
 	// Step 2: Iteratively expand polytope toward origin

@@ -12,10 +12,9 @@ type Face struct {
 	Distance float64       // Distance de l'origine au plan de la face
 }
 
-func createFaceOutward(a, b, c, oppositePoint mgl64.Vec3) Face {
-	face := Face{
-		Points: [3]mgl64.Vec3{a, b, c},
-	}
+func createFaceOutward(a, b, c, oppositePoint mgl64.Vec3) *Face {
+	face := facePool.Get().(*Face)
+	face.Points = [3]mgl64.Vec3{a, b, c}
 
 	// Calculate two edges of the triangle
 	ab := b.Sub(a)
@@ -66,15 +65,12 @@ func createFaceOutward(a, b, c, oppositePoint mgl64.Vec3) Face {
 	return face
 }
 
-func buildInitialFaces(simplex []mgl64.Vec3) []Face {
-	a := simplex[0]
-	b := simplex[1]
-	c := simplex[2]
-	d := simplex[3]
+func buildInitialFaces(simplex []mgl64.Vec3) []*Face {
+	a, b, c, d := simplex[0], simplex[1], simplex[2], simplex[3]
 
 	// Create the 4 triangular faces
 	// Each face is defined by 3 points + the opposite point for reference
-	candidateFaces := []Face{
+	candidateFaces := []*Face{
 		createFaceOutward(a, b, c, d), // Face ABC, opposite point is D
 		createFaceOutward(a, c, d, b), // Face ACD, opposite point is B
 		createFaceOutward(a, d, b, c), // Face ADB, opposite point is C
@@ -82,10 +78,12 @@ func buildInitialFaces(simplex []mgl64.Vec3) []Face {
 	}
 
 	// Filter out degenerate faces (too close to origin)
-	var faces []Face
+	var faces []*Face
 	for _, face := range candidateFaces {
 		if face.Distance >= 0.0001 {
 			faces = append(faces, face)
+		} else {
+			facePool.Put(face) // Libère les faces invalides
 		}
 	}
 
@@ -97,7 +95,7 @@ func buildInitialFaces(simplex []mgl64.Vec3) []Face {
 	return faces
 }
 
-func findClosestFaceIndex(faces []Face) int {
+func findClosestFaceIndex(faces []*Face) int {
 	closestIndex := 0
 	minDistance := faces[0].Distance
 
@@ -115,7 +113,7 @@ type Edge struct {
 	A, B mgl64.Vec3
 }
 
-func addPointAndRebuildFaces(faces *[]Face, support mgl64.Vec3, closestIndex int) {
+func addPointAndRebuildFaces(faces *[]*Face, support mgl64.Vec3, closestIndex int) {
 	// Calculate the centroid of the current polytope (average of all points)
 	var centroid mgl64.Vec3
 	pointSet := make(map[mgl64.Vec3]bool)
@@ -156,6 +154,7 @@ func addPointAndRebuildFaces(faces *[]Face, support mgl64.Vec3, closestIndex int
 	// Remove visible faces
 	for i := len(visibleFaces) - 1; i >= 0; i-- {
 		index := visibleFaces[i]
+		facePool.Put((*faces)[index])
 		*faces = append((*faces)[:index], (*faces)[index+1:]...)
 	}
 
@@ -167,7 +166,7 @@ func addPointAndRebuildFaces(faces *[]Face, support mgl64.Vec3, closestIndex int
 
 	// Safety check
 	if len(*faces) == 0 {
-		*faces = []Face{
+		*faces = []*Face{
 			{
 				Points:   [3]mgl64.Vec3{support, support, support},
 				Normal:   mgl64.Vec3{0, 1, 0},
@@ -177,7 +176,7 @@ func addPointAndRebuildFaces(faces *[]Face, support mgl64.Vec3, closestIndex int
 	}
 }
 
-func findBoundaryEdges(faces []Face, visibleIndices []int) []Edge {
+func findBoundaryEdges(faces []*Face, visibleIndices []int) []Edge {
 	// Create a set of visible face indices for quick lookup
 	visibleSet := make(map[int]bool)
 	for _, idx := range visibleIndices {
