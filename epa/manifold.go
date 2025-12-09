@@ -2,6 +2,7 @@ package epa
 
 import (
 	"math"
+	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -121,6 +122,14 @@ func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth fl
 	return contactPoints
 }
 
+var (
+	clipBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]mgl64.Vec3, 0, 8)
+		},
+	}
+)
+
 // clipIncidentAgainstReference performs Sutherland-Hodgman polygon clipping.
 //
 // Clips the incident feature (polygon) against the side planes of the reference feature.
@@ -154,10 +163,10 @@ func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64
 		return incident
 	}
 
-	// Pre-allocate buffer large enough for worst case (each clip can at most double vertices)
-	// Worst case: every edge generates an intersection → 2*len(incident)
-	buf1 := make([]mgl64.Vec3, 0, len(incident)*2)
-	buf2 := make([]mgl64.Vec3, 0, len(incident)*2)
+	buf1 := clipBufferPool.Get().([]mgl64.Vec3)
+	buf2 := clipBufferPool.Get().([]mgl64.Vec3)
+	buf1 = buf1[:0]
+	buf2 = buf2[:0]
 
 	// Start with incident polygon
 	current := incident
@@ -190,6 +199,9 @@ func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64
 		next = clipPolygonAgainstPlaneBuffer(current, v1, clipNormal, buf1, buf2)
 		current = next
 	}
+
+	clipBufferPool.Put(buf1)
+	clipBufferPool.Put(buf2)
 
 	return current
 }
