@@ -6,7 +6,7 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const WORKERS = 64
+const WORKERS = 10
 
 type World struct {
 	// List of all rigid bodies in the world
@@ -96,10 +96,10 @@ func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstr
 	})
 }
 
+// trySleep sets the body to sleep if its velocity is lower than the threshold, for a given duration
+// this method is too simple to use a task, it slows down in multiple goroutines
 func (w *World) trySleep(h float64) {
-	task(WORKERS, len(w.Bodies), func(start, end int) {
-		for i := start; i < end; i++ {
-			w.Bodies[i].TrySleep(h, 0.3, 0.05) // Seuil de vitesse pour le sleeping
-		}
-	})
+	for _, body := range w.Bodies {
+		body.TrySleep(h, 0.3, 0.05) // Seuil de vitesse pour le sleeping
+	}
 }

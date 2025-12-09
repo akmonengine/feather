@@ -34,7 +34,7 @@ type CollisionPair struct {
 
 func BroadPhase(bodies []*actor.RigidBody) <-chan CollisionPair {
 	// Brute force: test all pairs
-	checkingPairs := make(chan CollisionPair, 64)
+	checkingPairs := make(chan CollisionPair, WORKERS*4)
 
 	var wg sync.WaitGroup
 	n := len(bodies)
@@ -128,7 +128,7 @@ func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
 				for pair := range p {
 					contact, err := epa.EPA(pair.BodyA, pair.BodyB, pair.simplex)
 					if err != nil {
-						return
+						continue
 					}
 					ch <- &contact
 				}
