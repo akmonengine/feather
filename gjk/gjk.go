@@ -70,7 +70,8 @@ func GJK(a, b *actor.RigidBody) (bool, Simplex) {
 	}
 
 	// Get first point of the simplex in the Minkowski difference
-	simplex := Simplex{MinkowskiSupport(a, b, direction)}
+	simplex := make(Simplex, 0, 4)
+	simplex = append(simplex, MinkowskiSupport(a, b, direction))
 
 	// New direction towards the origin from this first point
 	direction = simplex[0].Mul(-1)
