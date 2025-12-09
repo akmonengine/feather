@@ -1,6 +1,8 @@
 package feather
 
 import (
+	"sync"
+
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
 	"github.com/akmonengine/feather/epa"
@@ -21,60 +23,120 @@ const (
 
 // CollisionPair represents a pair of rigid bodies that potentially collide
 type CollisionPair struct {
-	BodyA *actor.RigidBody
-	BodyB *actor.RigidBody
+	BodyA   *actor.RigidBody
+	BodyB   *actor.RigidBody
+	simplex gjk.Simplex
 }
 
 // BroadPhase performs broad-phase collision detection using AABB overlap tests
 // It returns pairs of bodies whose AABBs overlap and might be colliding
 // This is an O(n²) brute-force approach suitable for small numbers of bodies
-func BroadPhase(bodies []*actor.RigidBody) []CollisionPair {
-	pairs := make([]CollisionPair, 0)
 
+func BroadPhase(bodies []*actor.RigidBody) <-chan CollisionPair {
 	// Brute force: test all pairs
-	for i := 0; i < len(bodies); i++ {
-		for j := i + 1; j < len(bodies); j++ {
-			bodyA := bodies[i]
-			bodyB := bodies[j]
+	checkingPairs := make(chan CollisionPair, 64)
 
-			// Skip if both bodies are static (static-static collisions don't matter)
-			if bodyA.BodyType == actor.BodyTypeStatic && bodyB.BodyType == actor.BodyTypeStatic {
-				continue
-			}
-			if bodyA.IsSleeping && bodyB.IsSleeping {
-				continue
-			}
+	var wg sync.WaitGroup
+	n := len(bodies)
+	chunkSize := (n + WORKERS - 1) / WORKERS
 
-			// Compute AABBs for both bodies
-			aabbA := bodyA.Shape.GetAABB()
-			aabbB := bodyB.Shape.GetAABB()
+	for workerID := 0; workerID < WORKERS; workerID++ {
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				bodyA := bodies[i]
 
-			// Check if AABBs overlap
-			if aabbA.Overlaps(aabbB) {
-				pairs = append(pairs, CollisionPair{bodyA, bodyB})
+				for j := i + 1; j < n; j++ {
+					bodyB := bodies[j]
+
+					// Skip if both bodies are static (static-static collisions don't matter)
+					if bodyA.BodyType == actor.BodyTypeStatic && bodyB.BodyType == actor.BodyTypeStatic {
+						continue
+					}
+					if bodyA.IsSleeping && bodyB.IsSleeping {
+						continue
+					}
+
+					aabbA := bodyA.Shape.GetAABB()
+					aabbB := bodyB.Shape.GetAABB()
+					if aabbA.Overlaps(aabbB) {
+						checkingPairs <- CollisionPair{BodyA: bodyA, BodyB: bodyB}
+					}
+				}
 			}
-		}
+		}(workerID*chunkSize, min((workerID+1)*chunkSize, n))
 	}
 
-	return pairs
+	go func() {
+		wg.Wait()
+		close(checkingPairs)
+	}()
+
+	return checkingPairs
 }
 
-func NarrowPhase(pairs []CollisionPair) []constraint.ContactConstraint {
-	contacts := make([]constraint.ContactConstraint, 0)
+func NarrowPhase(pairs <-chan CollisionPair) []*constraint.ContactConstraint {
+	collisionPair := GJK(pairs)
+	contactsChan := EPA(collisionPair)
 
-	for _, pair := range pairs {
-		if collision, simplex := gjk.GJK(pair.BodyA, pair.BodyB); collision {
-			// Use EPA to get detailed contact information
-			contact, err := epa.EPA(pair.BodyA, pair.BodyB, simplex)
-			if err != nil {
-				continue
-			}
-
-			//fmt.Printf("Contact normal: %v\n", contact.Normal)
-			//fmt.Printf("Contact penetration: %.6f\n", contact.Point.Penetration)
-			contacts = append(contacts, contact)
-		}
+	contacts := make([]*constraint.ContactConstraint, 0)
+	for c := range contactsChan {
+		contacts = append(contacts, c)
 	}
-
 	return contacts
+}
+
+func GJK(pairChan <-chan CollisionPair) <-chan CollisionPair {
+	collisionChan := make(chan CollisionPair, WORKERS)
+
+	go func() {
+		var wg sync.WaitGroup
+		defer close(collisionChan)
+
+		for range WORKERS {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				for p := range pairChan {
+					if collision, simplex := gjk.GJK(p.BodyA, p.BodyB); collision {
+						p.simplex = simplex
+						collisionChan <- p
+					}
+				}
+			}()
+
+		}
+		wg.Wait()
+	}()
+
+	return collisionChan
+}
+
+func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
+	ch := make(chan *constraint.ContactConstraint, WORKERS)
+
+	go func() {
+		var wg sync.WaitGroup
+		defer close(ch)
+
+		for range WORKERS {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for pair := range p {
+					contact, err := epa.EPA(pair.BodyA, pair.BodyB, pair.simplex)
+					if err != nil {
+						return
+					}
+					ch <- &contact
+				}
+			}()
+		}
+
+		wg.Wait()
+	}()
+
+	return ch
 }

@@ -33,6 +33,11 @@ func (c *ContactConstraint) SolvePosition(dt float64) {
 	bodyA := c.BodyA
 	bodyB := c.BodyB
 
+	bodyA.Mutex.Lock()
+	bodyB.Mutex.Lock()
+	defer bodyA.Mutex.Unlock()
+	defer bodyB.Mutex.Unlock()
+
 	// ========== 1. Calculate total effective weight ==========
 	invMassA := 1.0 / bodyA.Material.GetMass()
 	invMassB := 1.0 / bodyB.Material.GetMass()
@@ -135,6 +140,11 @@ func (c *ContactConstraint) SolveVelocity(dt float64) {
 
 	bodyA := c.BodyA
 	bodyB := c.BodyB
+
+	bodyA.Mutex.Lock()
+	bodyB.Mutex.Lock()
+	defer bodyA.Mutex.Unlock()
+	defer bodyB.Mutex.Unlock()
 
 	invMassA := 1.0 / bodyA.Material.GetMass()
 	invMassB := 1.0 / bodyB.Material.GetMass()

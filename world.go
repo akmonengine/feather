@@ -2,8 +2,11 @@ package feather
 
 import (
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/constraint"
 	"github.com/go-gl/mathgl/mgl64"
 )
+
+const WORKERS = 64
 
 type World struct {
 	// List of all rigid bodies in the world
@@ -36,35 +39,67 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 func (w *World) Step(dt float64) {
 	h := dt / float64(w.Substeps)
 
+	cs := make([]*constraint.ContactConstraint, 0)
+
 	for range w.Substeps {
-		// Phase 1: Integrate new position
-		for _, body := range w.Bodies {
-			body.Integrate(h, w.Gravity)
-		}
+		w.integrate(h)
 
 		// Phase 2.0: Collision pair finding - Broad phase
-		collisionPairs := BroadPhase(w.Bodies)
 		// Phase 2.1: Collision pair finding - narrow phase
-		constraints := NarrowPhase(collisionPairs)
+		constraints := NarrowPhase(BroadPhase(w.Bodies))
 
 		// Phase 3: Solver, only one iteration is required thanks to substeps
-		for _, c := range constraints {
-			c.SolvePosition(h)
-		}
+		w.solvePosition(h, constraints)
 
 		// Phase 4: Update Position & Velocity
 		// Calculate final velocities and commit positions
-		for _, body := range w.Bodies {
-			body.Update(h)
-		}
+		w.update(h)
 
 		// Phase 5: Velocity
-		for _, c := range constraints {
-			c.SolveVelocity(h)
-		}
+		w.solveVelocity(h, constraints)
 
-		for _, body := range w.Bodies {
-			body.TrySleep(h, 0.3, 0.05) // Seuil de vitesse pour le sleeping
-		}
+		w.trySleep(h)
+
+		cs = cs[:0]
 	}
+}
+
+func (w *World) integrate(h float64) {
+	task(WORKERS, len(w.Bodies), func(start, end int) {
+		for i := start; i < end; i++ {
+			w.Bodies[i].Integrate(h, w.Gravity)
+		}
+	})
+}
+
+func (w *World) solvePosition(h float64, constraints []*constraint.ContactConstraint) {
+	task(WORKERS, len(constraints), func(start, end int) {
+		for i := start; i < end; i++ {
+			constraints[i].SolvePosition(h)
+		}
+	})
+}
+
+func (w *World) update(h float64) {
+	task(WORKERS, len(w.Bodies), func(start, end int) {
+		for i := start; i < end; i++ {
+			w.Bodies[i].Update(h)
+		}
+	})
+}
+
+func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstraint) {
+	task(WORKERS, len(constraints), func(start, end int) {
+		for i := start; i < end; i++ {
+			constraints[i].SolveVelocity(h)
+		}
+	})
+}
+
+func (w *World) trySleep(h float64) {
+	task(WORKERS, len(w.Bodies), func(start, end int) {
+		for i := start; i < end; i++ {
+			w.Bodies[i].TrySleep(h, 0.3, 0.05) // Seuil de vitesse pour le sleeping
+		}
+	})
 }

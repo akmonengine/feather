@@ -2,6 +2,7 @@ package actor
 
 import (
 	"math"
+	"sync"
 
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -63,6 +64,8 @@ type RigidBody struct {
 
 	// Collision shape
 	Shape ShapeInterface // The collision shape
+
+	Mutex sync.Mutex
 }
 
 // NewRigidBody creates a new rigid body with the given properties
