@@ -258,15 +258,7 @@ func (s *Sphere) Support(direction mgl64.Vec3) mgl64.Vec3 {
 }
 
 func (s *Sphere) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
-	vecPtr := vec3Pool.Get().(*mgl64.Vec3)
-	*vecPtr = s.Support(direction) // Met à jour la valeur
-
-	slicePtr := vec3SlicePool4.Get().(*[]mgl64.Vec3)
-	(*slicePtr)[0] = *vecPtr // Copie la valeur
-
-	vec3SlicePool4.Put(vecPtr)
-
-	return *slicePtr
+	return []mgl64.Vec3{s.Support(direction)}
 }
 
 // Plane represents an infinite plane collision shape
@@ -368,45 +360,17 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
 
 	// Find two tangent vectors to the plane
 	tangent1, tangent2 := getTangentBasis(p.Normal)
+
+	// Large size to cover contacts
 	size := 1000.0
 
-	// Récupère 4 Vec3 depuis le pool
-	vecs := make([]*mgl64.Vec3, 4)
-	for i := 0; i < 4; i++ {
-		vecs[i] = vec3SlicePool4.Get().(*mgl64.Vec3)
+	// Points in local plane space (not transformed)
+	return []mgl64.Vec3{
+		tangent1.Mul(-size).Add(tangent2.Mul(-size)),
+		tangent1.Mul(-size).Add(tangent2.Mul(size)),
+		tangent1.Mul(size).Add(tangent2.Mul(size)),
+		tangent1.Mul(size).Add(tangent2.Mul(-size)),
 	}
-
-	// Récupère une slice depuis le pool
-	slicePtr := vec3SlicePool4.Get().(*[]mgl64.Vec3)
-	result := *slicePtr
-
-	// Calcule les 4 points en réutilisant les Vec3
-	// Point 1: tangent1.Mul(-size).Add(tangent2.Mul(-size))
-	*vecs[0] = tangent1.Mul(-size)
-	*vecs[0] = vecs[0].Add(tangent2.Mul(-size))
-	result[0] = *vecs[0]
-
-	// Point 2: tangent1.Mul(-size).Add(tangent2.Mul(size))
-	*vecs[1] = tangent1.Mul(-size)
-	*vecs[1] = vecs[1].Add(tangent2.Mul(size))
-	result[1] = *vecs[1]
-
-	// Point 3: tangent1.Mul(size).Add(tangent2.Mul(size))
-	*vecs[2] = tangent1.Mul(size)
-	*vecs[2] = vecs[2].Add(tangent2.Mul(size))
-	result[2] = *vecs[2]
-
-	// Point 4: tangent1.Mul(size).Add(tangent2.Mul(-size))
-	*vecs[3] = tangent1.Mul(size)
-	*vecs[3] = vecs[3].Add(tangent2.Mul(-size))
-	result[3] = *vecs[3]
-
-	// Libère les Vec3 (mais pas la slice, car on la retourne)
-	for i := 0; i < 4; i++ {
-		vec3Pool.Put(vecs[i])
-	}
-
-	return result
 }
 
 // Helper to generate the tangent basis
