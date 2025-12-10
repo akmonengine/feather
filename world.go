@@ -92,6 +92,6 @@ func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstr
 // this method is too simple to use a task, it slows down in multiple goroutines
 func (w *World) trySleep(h float64) {
 	task(1, w.Bodies, func(body *actor.RigidBody) {
-		body.TrySleep(h, 0.15, 0.05) // Seuil de vitesse pour le sleeping
+		body.TrySleep(h, 0.1, 0.05) // Seuil de vitesse pour le sleeping
 	})
 }
