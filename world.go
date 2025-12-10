@@ -65,41 +65,33 @@ func (w *World) Step(dt float64) {
 }
 
 func (w *World) integrate(h float64) {
-	task(WORKERS, len(w.Bodies), func(start, end int) {
-		for i := start; i < end; i++ {
-			w.Bodies[i].Integrate(h, w.Gravity)
-		}
+	task(WORKERS, w.Bodies, func(body *actor.RigidBody) {
+		body.Integrate(h, w.Gravity)
 	})
 }
 
 func (w *World) solvePosition(h float64, constraints []*constraint.ContactConstraint) {
-	task(WORKERS, len(constraints), func(start, end int) {
-		for i := start; i < end; i++ {
-			constraints[i].SolvePosition(h)
-		}
+	task(WORKERS, constraints, func(constraint *constraint.ContactConstraint) {
+		constraint.SolvePosition(h)
 	})
 }
 
 func (w *World) update(h float64) {
-	task(WORKERS, len(w.Bodies), func(start, end int) {
-		for i := start; i < end; i++ {
-			w.Bodies[i].Update(h)
-		}
+	task(WORKERS, w.Bodies, func(body *actor.RigidBody) {
+		body.Update(h)
 	})
 }
 
 func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstraint) {
-	task(WORKERS, len(constraints), func(start, end int) {
-		for i := start; i < end; i++ {
-			constraints[i].SolveVelocity(h)
-		}
+	task(WORKERS, constraints, func(constraint *constraint.ContactConstraint) {
+		constraint.SolveVelocity(h)
 	})
 }
 
 // trySleep sets the body to sleep if its velocity is lower than the threshold, for a given duration
 // this method is too simple to use a task, it slows down in multiple goroutines
 func (w *World) trySleep(h float64) {
-	for _, body := range w.Bodies {
+	task(1, w.Bodies, func(body *actor.RigidBody) {
 		body.TrySleep(h, 0.15, 0.05) // Seuil de vitesse pour le sleeping
-	}
+	})
 }
