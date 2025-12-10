@@ -2,7 +2,6 @@ package epa
 
 import (
 	"math"
-	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -122,15 +121,6 @@ func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth fl
 	return contactPoints
 }
 
-var (
-	clipBufferPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]mgl64.Vec3, 0, 8)
-			return &buf
-		},
-	}
-)
-
 // clipIncidentAgainstReference performs Sutherland-Hodgman polygon clipping.
 //
 // Clips the incident feature (polygon) against the side planes of the reference feature.
@@ -153,109 +143,84 @@ var (
 // Returns:
 //
 //	Clipped polygon vertices (0-N points, typically 1-4 for boxes)
-//
-// clipIncidentAgainstReference performs Sutherland-Hodgman polygon clipping.
 func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64.Vec3) []mgl64.Vec3 {
-	// Early exits
+	// If reference is a large plane (Plane), no lateral clipping is necessary
 	if isLargePlane(reference) {
 		return incident
 	}
+
+	// If reference has less than 2 points, clipping is not possible
 	if len(reference) < 2 {
 		return incident
 	}
 
-	// Pre-allocate buffer large enough for worst case (each clip can at most double vertices)
-	// Worst case: every edge generates an intersection → 2*len(incident)
-	buf1 := clipBufferPool.Get().(*[]mgl64.Vec3)
-	buf2 := clipBufferPool.Get().(*[]mgl64.Vec3)
-	*buf1 = (*buf1)[:0]
-	*buf2 = (*buf2)[:0]
+	output := incident
 
-	// Start with incident polygon
-	current := incident
-	var next []mgl64.Vec3
-
-	// Reusable vectors to avoid allocations
-	var edge, clipNormal, toCenter, center, v1, v2 mgl64.Vec3
-
+	var edge, clipNormal, toCenter, center mgl64.Vec3
+	// Clip against each edge of the reference
 	for i := 0; i < len(reference); i++ {
-		if len(current) == 0 {
+		if len(output) == 0 {
 			break
 		}
 
-		// Get current edge
-		v1 = reference[i]
-		v2 = reference[(i+1)%len(reference)]
+		// Current edge
+		v1 := reference[i]
+		v2 := reference[(i+1)%len(reference)]
 
-		// Compute plane normal (perpendicular to edge, inward)
+		// Clipping plane normal (perpendicular to the edge, pointing inward)
 		edge = v2.Sub(v1)
 		clipNormal = edge.Cross(normal).Normalize()
 
-		// Ensure normal points inward
+		// Verify that the normal points inward
+		// (toward the center of the reference feature)
 		center = computeCenter(reference)
 		toCenter = center.Sub(v1)
 		if toCenter.Dot(clipNormal) < 0 {
 			clipNormal = clipNormal.Mul(-1)
 		}
 
-		// Clip current polygon against this plane → write into next
-		next = clipPolygonAgainstPlaneBuffer(current, v1, clipNormal, *buf1, *buf2)
-		current = next
+		// Clip against this plane
+		output = clipPolygonAgainstPlane(output, v1, clipNormal)
 	}
 
-	result := make([]mgl64.Vec3, len(current))
-	copy(result, current)
-
-	// Libère les buffers
-	clipBufferPool.Put(buf1)
-	clipBufferPool.Put(buf2)
-
-	return result
+	return output
 }
 
-// clipPolygonAgainstPlaneBuffer clips a polygon against a plane, writing output to a pre-allocated buffer.
-// Uses two buffers: input and output. Swaps them on each call.
-// Returns the slice pointing to the output buffer (which may be buf1 or buf2).
-func clipPolygonAgainstPlaneBuffer(polygon []mgl64.Vec3, planePoint, planeNormal mgl64.Vec3, buf1, buf2 []mgl64.Vec3) []mgl64.Vec3 {
+// clipPolygonAgainstPlane implements Sutherland-Hodgman for a single plane
+func clipPolygonAgainstPlane(polygon []mgl64.Vec3, planePoint, planeNormal mgl64.Vec3) []mgl64.Vec3 {
 	if len(polygon) == 0 {
-		return polygon[:0]
+		return polygon
 	}
 
-	// Choisit le buffer avec assez de capacité
 	var output []mgl64.Vec3
-	if cap(buf1) >= len(polygon)*2 {
-		output = buf1[:0] // Réutilise buf1
-	} else {
-		output = buf2[:0] // Réutilise buf2
-	}
-
-	const tolerance = 1e-6
-	prev := polygon[len(polygon)-1]
-	prevDist := prev.Sub(planePoint).Dot(planeNormal)
-	prevInside := prevDist >= -tolerance
-
-	// Réutilise une variable pour l'intersection
 	var intersection mgl64.Vec3
-
 	for i := 0; i < len(polygon); i++ {
 		current := polygon[i]
-		currentDist := current.Sub(planePoint).Dot(planeNormal)
-		currentInside := currentDist >= -tolerance
+		next := polygon[(i+1)%len(polygon)]
 
-		if currentInside {
-			if !prevInside {
-				// Calcule l'intersection dans une variable réutilisée
-				intersection = lineIntersectPlane(prev, current, planePoint, planeNormal)
+		currentDist := current.Sub(planePoint).Dot(planeNormal)
+		nextDist := next.Sub(planePoint).Dot(planeNormal)
+
+		const tolerance = 1e-6
+
+		// Current is inside
+		if currentDist >= -tolerance {
+			output = append(output, current)
+
+			// Next is outside → add intersection
+			if nextDist < -tolerance {
+				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
 				output = append(output, intersection)
 			}
-			output = append(output, current)
-		} else if prevInside {
-			intersection = lineIntersectPlane(prev, current, planePoint, planeNormal)
-			output = append(output, intersection)
+		} else {
+			// Current is outside, next is inside → add intersection
+			if nextDist >= -tolerance {
+				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
+				output = append(output, intersection)
+			}
 		}
-		prev = current
-		prevInside = currentInside
 	}
+
 	return output
 }
 
