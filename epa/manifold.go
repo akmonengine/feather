@@ -2,6 +2,7 @@ package epa
 
 import (
 	"math"
+	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -186,14 +187,27 @@ func clipIncidentAgainstReference(incident, reference []mgl64.Vec3, normal mgl64
 	return output
 }
 
+// Pool global de buffers pour le clipping
+var vertexBufferPool = sync.Pool{
+	New: func() interface{} {
+		// Préalloue pour 8 vertices (largement suffisant pour des polygones)
+		buf := make([]mgl64.Vec3, 0, 8)
+		return &buf
+	},
+}
+
 // clipPolygonAgainstPlane implements Sutherland-Hodgman for a single plane
 func clipPolygonAgainstPlane(polygon []mgl64.Vec3, planePoint, planeNormal mgl64.Vec3) []mgl64.Vec3 {
 	if len(polygon) == 0 {
 		return polygon
 	}
 
-	var output []mgl64.Vec3
-	var intersection mgl64.Vec3
+	// Récupérer un buffer du pool
+	bufPtr := vertexBufferPool.Get().(*[]mgl64.Vec3)
+	output := (*bufPtr)[:0] // Reset length mais garde capacity
+
+	const tolerance = 1e-6
+
 	for i := 0; i < len(polygon); i++ {
 		current := polygon[i]
 		next := polygon[(i+1)%len(polygon)]
@@ -201,27 +215,32 @@ func clipPolygonAgainstPlane(polygon []mgl64.Vec3, planePoint, planeNormal mgl64
 		currentDist := current.Sub(planePoint).Dot(planeNormal)
 		nextDist := next.Sub(planePoint).Dot(planeNormal)
 
-		const tolerance = 1e-6
-
 		// Current is inside
 		if currentDist >= -tolerance {
 			output = append(output, current)
 
 			// Next is outside → add intersection
 			if nextDist < -tolerance {
-				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
+				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
 				output = append(output, intersection)
 			}
 		} else {
 			// Current is outside, next is inside → add intersection
 			if nextDist >= -tolerance {
-				intersection = lineIntersectPlane(current, next, planePoint, planeNormal)
+				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
 				output = append(output, intersection)
 			}
 		}
 	}
 
-	return output
+	// Copier le résultat dans un slice final
+	result := make([]mgl64.Vec3, len(output))
+	copy(result, output)
+
+	// Remettre le buffer dans le pool
+	vertexBufferPool.Put(bufPtr)
+
+	return result
 }
 
 // lineIntersectPlane calculates the intersection between a line segment and a plane
