@@ -9,37 +9,77 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-// ManifoldBuilder - Contient TOUS les buffers de travail avec arrays fixes
-type ManifoldBuilder struct {
-	// Arrays fixes pour éviter les allocations
-	localFeatureA [8]mgl64.Vec3
-	localFeatureB [8]mgl64.Vec3
-	worldFeatureA [8]mgl64.Vec3
-	worldFeatureB [8]mgl64.Vec3
-	clipBuffer1   [8]mgl64.Vec3
-	clipBuffer2   [8]mgl64.Vec3
-	clippedResult [8]mgl64.Vec3 // NOUVEAU : buffer dédié pour le résultat final du clipping
-	tempPoints    [8]constraint.ContactPoint
+// Manifold generation configuration constants
+const (
+	// maxContactPoints is the maximum number of contact points in a manifold.
+	// Limited to 4 for constraint solver stability (see Erin Catto, GDC 2007).
+	maxContactPoints = 4
 
-	// Compteurs
+	// maxBufferSize is the size of pre-allocated working buffers.
+	// Must be >= maxContactPoints * 2 to handle worst-case Sutherland-Hodgman clipping.
+	maxBufferSize = 8
+
+	// planeCornerSize defines the size of generated corners for infinite planes.
+	// Used to create a 4-corner feature large enough to cover most collision scenarios
+	// with plane shapes.
+	planeCornerSize = 1000.0
+
+	// largePlaneThreshold is the distance threshold to detect a "large plane".
+	// If two points in a feature are farther than this value apart,
+	// the feature is considered a large plane.
+	largePlaneThreshold = 100.0
+)
+
+// Numerical tolerance constants for geometric computation stability
+const (
+	// epsilonColinear is the tolerance for detecting colinear edges.
+	// If |edge.Cross(normal)| < epsilonColinear, the edge is parallel to the normal.
+	epsilonColinear = 1e-6
+
+	// epsilonDistance is the distance tolerance for Sutherland-Hodgman clipping.
+	// Points at distance >= -epsilonDistance from the plane are considered "inside".
+	epsilonDistance = 1e-6
+
+	// epsilonParallel is the tolerance for detecting a line parallel to a plane.
+	// If |direction.Dot(planeNormal)| < epsilonParallel, the line is parallel.
+	epsilonParallel = 1e-10
+
+	// tangentBasisThreshold determines which axis to use for building the tangent basis.
+	// If |normal.X()| > tangentBasisThreshold, use Y instead of X as the first tangent.
+	tangentBasisThreshold = 0.9
+)
+
+// ManifoldBuilder contains all working buffers with fixed-size arrays to avoid allocations.
+type ManifoldBuilder struct {
+	// Fixed-size arrays to avoid allocations
+	localFeatureA [maxBufferSize]mgl64.Vec3
+	localFeatureB [maxBufferSize]mgl64.Vec3
+	worldFeatureA [maxBufferSize]mgl64.Vec3
+	worldFeatureB [maxBufferSize]mgl64.Vec3
+	clipBuffer1   [maxBufferSize]mgl64.Vec3
+	clipBuffer2   [maxBufferSize]mgl64.Vec3
+	clippedResult [maxBufferSize]mgl64.Vec3 // Dedicated buffer for final clipping result
+	tempPoints    [maxBufferSize]constraint.ContactPoint
+
+	// Counters
 	localFeatureACount int
 	localFeatureBCount int
 	worldFeatureACount int
 	worldFeatureBCount int
 	clipBuffer1Count   int
 	clipBuffer2Count   int
-	clippedResultCount int // NOUVEAU
+	clippedResultCount int
 	tempPointsCount    int
 }
 
-// Pool de builders
+// Pool of builders for reuse
 var manifoldBuilderPool = sync.Pool{
 	New: func() interface{} {
 		return &ManifoldBuilder{}
 	},
 }
 
-// Reset - Prépare le builder pour une nouvelle utilisation
+// Reset prepares the builder for a new use
 func (b *ManifoldBuilder) Reset() {
 	b.localFeatureACount = 0
 	b.localFeatureBCount = 0
@@ -51,7 +91,7 @@ func (b *ManifoldBuilder) Reset() {
 	b.tempPointsCount = 0
 }
 
-// GenerateManifold - Point d'entrée principal (API publique)
+// GenerateManifold is the main entry point
 func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) []constraint.ContactPoint {
 	builder := manifoldBuilderPool.Get().(*ManifoldBuilder)
 	defer manifoldBuilderPool.Put(builder)
@@ -61,17 +101,17 @@ func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth fl
 	return builder.Generate(bodyA, bodyB, normal, depth)
 }
 
-// Generate - Génère le manifold en utilisant les buffers internes
+// Generate generates the manifold using internal buffers
 func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) []constraint.ContactPoint {
-	// Convertir la normale en espace local
+	// Convert normal to local space
 	localNormalA := bodyA.Transform.Rotation.Conjugate().Rotate(normal)
 	localNormalB := bodyB.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))
 
-	// Get features DANS les buffers
+	// Get features into buffers
 	bodyA.Shape.GetContactFeature(localNormalA, &b.localFeatureA, &b.localFeatureACount)
 	bodyB.Shape.GetContactFeature(localNormalB, &b.localFeatureB, &b.localFeatureBCount)
 
-	// Transform DANS les buffers
+	// Transform into buffers
 	b.transformFeature(&b.localFeatureA, b.localFeatureACount, bodyA.Transform, bodyA.Shape, &b.worldFeatureA, &b.worldFeatureACount)
 	b.transformFeature(&b.localFeatureB, b.localFeatureBCount, bodyB.Transform, bodyB.Shape, &b.worldFeatureB, &b.worldFeatureBCount)
 
@@ -93,7 +133,7 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 		referenceCount = b.worldFeatureBCount
 	}
 
-	// Cas trivial : single incident point
+	// Trivial case: single incident point
 	if incidentCount == 1 {
 		b.tempPoints[0] = constraint.ContactPoint{
 			Position:    incident[0],
@@ -103,10 +143,10 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 		return b.buildResult()
 	}
 
-	// Clip incident against reference - résultat dans clippedResult
+	// Clip incident against reference
 	clippedCount := b.clipIncidentAgainstReference(incident, incidentCount, reference, referenceCount, normal)
 
-	// Clip final contre le plan de référence
+	// Final clip against reference plane
 	if clippedCount > 0 && referenceCount > 0 {
 		b.clipAgainstReferencePlane(clippedCount, reference, referenceCount, normal, depth)
 	}
@@ -121,33 +161,32 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 		b.tempPointsCount = 1
 	}
 
-	// Limit to 4 points
-	if b.tempPointsCount > 4 {
+	// Limit to maxContactPoints
+	if b.tempPointsCount > maxContactPoints {
 		b.reduceTo4Points(normal)
 	}
 
 	return b.buildResult()
 }
 
-// transformFeature - Transforme vers world space
+// transformFeature transforms features to world space
 func (b *ManifoldBuilder) transformFeature(input *[8]mgl64.Vec3, inputCount int, transform actor.Transform, shape actor.ShapeInterface, output *[8]mgl64.Vec3, outputCount *int) {
 	*outputCount = 0
 
-	// Cas spécial : plan
+	// Special case: plane
 	if plane, ok := shape.(*actor.Plane); ok {
 		tangent1, tangent2 := getTangentBasis(plane.Normal)
 		center := plane.Normal.Mul(-plane.Distance)
-		const size = 1000.0
 
-		output[0] = center.Add(tangent1.Mul(-size)).Add(tangent2.Mul(-size))
-		output[1] = center.Add(tangent1.Mul(-size)).Add(tangent2.Mul(size))
-		output[2] = center.Add(tangent1.Mul(size)).Add(tangent2.Mul(size))
-		output[3] = center.Add(tangent1.Mul(size)).Add(tangent2.Mul(-size))
-		*outputCount = 4
+		output[0] = center.Add(tangent1.Mul(-planeCornerSize)).Add(tangent2.Mul(-planeCornerSize))
+		output[1] = center.Add(tangent1.Mul(-planeCornerSize)).Add(tangent2.Mul(planeCornerSize))
+		output[2] = center.Add(tangent1.Mul(planeCornerSize)).Add(tangent2.Mul(planeCornerSize))
+		output[3] = center.Add(tangent1.Mul(planeCornerSize)).Add(tangent2.Mul(-planeCornerSize))
+		*outputCount = maxContactPoints
 		return
 	}
 
-	// Transform normal
+	// Normal transform
 	for i := 0; i < inputCount; i++ {
 		rotated := transform.Rotation.Rotate(input[i])
 		output[i] = transform.Position.Add(rotated)
@@ -155,11 +194,12 @@ func (b *ManifoldBuilder) transformFeature(input *[8]mgl64.Vec3, inputCount int,
 	*outputCount = inputCount
 }
 
-// clipIncidentAgainstReference - MODIFIÉ pour toujours retourner dans clipBuffer1
+// clipIncidentAgainstReference clips the incident feature against the reference feature.
+// Always returns the result in clipBuffer1 for consistent downstream consumption.
 func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, incidentCount int, reference *[8]mgl64.Vec3, referenceCount int, normal mgl64.Vec3) int {
-	// Check si c'est un grand plan
+	// Check if it's a large plane
 	if b.isLargePlane(reference, referenceCount) {
-		// Copier incident dans clipBuffer1
+		// Copy incident to clipBuffer1
 		for i := 0; i < incidentCount; i++ {
 			b.clipBuffer1[i] = incident[i]
 		}
@@ -175,7 +215,7 @@ func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, 
 		return incidentCount
 	}
 
-	// Copier incident dans clipBuffer1
+	// Copy incident to clipBuffer1
 	for i := 0; i < incidentCount; i++ {
 		b.clipBuffer1[i] = incident[i]
 	}
@@ -184,7 +224,7 @@ func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, 
 
 	useBuffer1 := true
 
-	// Clip contre chaque edge
+	// Clip against each edge
 	for i := 0; i < referenceCount; i++ {
 		var inputBuffer *[8]mgl64.Vec3
 		var inputCount int
@@ -215,17 +255,15 @@ func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, 
 		edge := v2.Sub(v1)
 		edgeCrossNormal := edge.Cross(normal)
 
-		// ========== FIX : Skip si edge est colinéaire avec normal ==========
+		// Skip if edge is colinear with normal (no lateral clipping needed)
 		edgeCrossLen := edgeCrossNormal.Len()
-		if edgeCrossLen < 1e-6 {
-			// Edge et normal sont colinéaires, skip cet edge
-			// (pas de clipping latéral nécessaire)
+		if edgeCrossLen < epsilonColinear {
 			continue
 		}
 
 		clipNormal := edgeCrossNormal.Mul(1.0 / edgeCrossLen)
 
-		// Vérifier direction
+		// Verify direction
 		center := b.computeCenter(reference, referenceCount)
 		toCenter := center.Sub(v1)
 		if toCenter.Dot(clipNormal) < 0 {
@@ -238,13 +276,13 @@ func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, 
 		useBuffer1 = !useBuffer1
 	}
 
-	// ========== FIX : Toujours mettre le résultat dans clipBuffer1 ==========
+	// Always put the result in clipBuffer1
 	var finalCount int
 	if useBuffer1 {
-		// Résultat déjà dans clipBuffer1
+		// Result already in clipBuffer1
 		finalCount = b.clipBuffer1Count
 	} else {
-		// Résultat dans clipBuffer2, copier vers clipBuffer1
+		// Result in clipBuffer2, copy to clipBuffer1
 		finalCount = b.clipBuffer2Count
 		for i := 0; i < finalCount; i++ {
 			b.clipBuffer1[i] = b.clipBuffer2[i]
@@ -255,7 +293,7 @@ func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, 
 	return finalCount
 }
 
-// clipPolygonAgainstPlane - Sutherland-Hodgman pour un plan
+// clipPolygonAgainstPlane clips a polygon against a plane using the Sutherland-Hodgman algorithm
 func (b *ManifoldBuilder) clipPolygonAgainstPlane(input *[8]mgl64.Vec3, inputCount int, planePoint, planeNormal mgl64.Vec3, output *[8]mgl64.Vec3, outputCount *int) {
 	if inputCount == 0 {
 		*outputCount = 0
@@ -263,7 +301,6 @@ func (b *ManifoldBuilder) clipPolygonAgainstPlane(input *[8]mgl64.Vec3, inputCou
 	}
 
 	*outputCount = 0
-	const tolerance = 1e-6
 
 	for i := 0; i < inputCount; i++ {
 		current := input[i]
@@ -272,19 +309,19 @@ func (b *ManifoldBuilder) clipPolygonAgainstPlane(input *[8]mgl64.Vec3, inputCou
 		currentDist := current.Sub(planePoint).Dot(planeNormal)
 		nextDist := next.Sub(planePoint).Dot(planeNormal)
 
-		if currentDist >= -tolerance {
-			if *outputCount < 8 {
+		if currentDist >= -epsilonDistance {
+			if *outputCount < maxBufferSize {
 				output[*outputCount] = current
 				*outputCount++
 			}
 
-			if nextDist < -tolerance && *outputCount < 8 {
+			if nextDist < -epsilonDistance && *outputCount < maxBufferSize {
 				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
 				output[*outputCount] = intersection
 				*outputCount++
 			}
 		} else {
-			if nextDist >= -tolerance && *outputCount < 8 {
+			if nextDist >= -epsilonDistance && *outputCount < maxBufferSize {
 				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
 				output[*outputCount] = intersection
 				*outputCount++
@@ -293,12 +330,12 @@ func (b *ManifoldBuilder) clipPolygonAgainstPlane(input *[8]mgl64.Vec3, inputCou
 	}
 }
 
-// clipAgainstReferencePlane - Clip final (utilise clippedResult directement)
-// clipAgainstReferencePlane - SIMPLIFIÉ : toujours lire clipBuffer1
+// clipAgainstReferencePlane performs final clipping against the reference plane.
+// Reads from clipBuffer1 and writes results to tempPoints.
 func (b *ManifoldBuilder) clipAgainstReferencePlane(clippedCount int, reference *[8]mgl64.Vec3, referenceCount int, normal mgl64.Vec3, depth float64) {
 	b.tempPointsCount = 0
 
-	// Calculer normale de référence
+	// Compute reference normal
 	edge1 := reference[1].Sub(reference[0])
 	edge2 := reference[2].Sub(reference[0])
 	refNormal := edge1.Cross(edge2).Normalize()
@@ -310,9 +347,9 @@ func (b *ManifoldBuilder) clipAgainstReferencePlane(clippedCount int, reference 
 	refPoint := reference[0]
 	offset := refPoint.Dot(refNormal)
 
-	// ========== FIX : Toujours lire clipBuffer1 ==========
-	for i := 0; i < clippedCount && b.tempPointsCount < 8; i++ {
-		point := b.clipBuffer1[i] // Toujours clipBuffer1
+	// Always read from clipBuffer1
+	for i := 0; i < clippedCount && b.tempPointsCount < maxBufferSize; i++ {
+		point := b.clipBuffer1[i]
 		distance := point.Dot(refNormal) - offset
 
 		if distance <= 0.0 {
@@ -325,9 +362,9 @@ func (b *ManifoldBuilder) clipAgainstReferencePlane(clippedCount int, reference 
 	}
 }
 
-// reduceTo4Points - Réduit à 4 points maximum
+// reduceTo4Points reduces the contact points to maxContactPoints by keeping the 4 extreme points
 func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
-	if b.tempPointsCount <= 4 {
+	if b.tempPointsCount <= maxContactPoints {
 		return
 	}
 
@@ -356,11 +393,11 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 		}
 	}
 
-	// Collecter les indices uniques
-	indices := [4]int{minX, maxX, minY, maxY}
-	seen := [8]bool{}
+	// Collect unique indices
+	indices := [maxContactPoints]int{minX, maxX, minY, maxY}
+	seen := [maxBufferSize]bool{}
 
-	// Compacter vers le début du buffer
+	// Compact to the beginning of the buffer
 	newCount := 0
 	for _, idx := range indices {
 		if !seen[idx] {
@@ -373,7 +410,7 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 	b.tempPointsCount = newCount
 }
 
-// buildResult - SEULE fonction qui alloue (copie finale)
+// buildResult is the ONLY function that allocates (final copy)
 func (b *ManifoldBuilder) buildResult() []constraint.ContactPoint {
 	result := make([]constraint.ContactPoint, b.tempPointsCount)
 	for i := 0; i < b.tempPointsCount; i++ {
@@ -382,16 +419,15 @@ func (b *ManifoldBuilder) buildResult() []constraint.ContactPoint {
 	return result
 }
 
-// ========== Fonctions helper ==========
-
+// isLargePlane detects if a feature represents a large plane (4 points with distance > largePlaneThreshold)
 func (b *ManifoldBuilder) isLargePlane(feature *[8]mgl64.Vec3, count int) bool {
-	if count != 4 {
+	if count != maxContactPoints {
 		return false
 	}
 
 	for i := 0; i < count; i++ {
 		for j := i + 1; j < count; j++ {
-			if feature[i].Sub(feature[j]).Len() > 100 {
+			if feature[i].Sub(feature[j]).Len() > largePlaneThreshold {
 				return true
 			}
 		}
@@ -399,6 +435,7 @@ func (b *ManifoldBuilder) isLargePlane(feature *[8]mgl64.Vec3, count int) bool {
 	return false
 }
 
+// computeCenter computes the centroid of a set of points
 func (b *ManifoldBuilder) computeCenter(points *[8]mgl64.Vec3, count int) mgl64.Vec3 {
 	if count == 0 {
 		return mgl64.Vec3{0, 0, 0}
@@ -411,12 +448,14 @@ func (b *ManifoldBuilder) computeCenter(points *[8]mgl64.Vec3, count int) mgl64.
 	return sum.Mul(1.0 / float64(count))
 }
 
+// lineIntersectPlane computes the intersection point between a line segment and a plane.
+// Returns p1 if the line is parallel to the plane. Clamps t to [0,1].
 func lineIntersectPlane(p1, p2, planePoint, planeNormal mgl64.Vec3) mgl64.Vec3 {
 	dir := p2.Sub(p1)
 	dist := p1.Sub(planePoint).Dot(planeNormal)
 	denom := dir.Dot(planeNormal)
 
-	if math.Abs(denom) < 1e-10 {
+	if math.Abs(denom) < epsilonParallel {
 		return p1
 	}
 
@@ -426,9 +465,11 @@ func lineIntersectPlane(p1, p2, planePoint, planeNormal mgl64.Vec3) mgl64.Vec3 {
 	return p1.Add(dir.Mul(t))
 }
 
+// getTangentBasis constructs an orthonormal tangent basis from a normal vector.
+// Returns two tangent vectors perpendicular to the normal and to each other.
 func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
 	tangent1 := mgl64.Vec3{1, 0, 0}
-	if math.Abs(normal.X()) > 0.9 {
+	if math.Abs(normal.X()) > tangentBasisThreshold {
 		tangent1 = mgl64.Vec3{0, 1, 0}
 	}
 
