@@ -93,12 +93,6 @@ func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth fl
 
 // Generate generates the manifold using internal buffers
 func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) []constraint.ContactPoint {
-	// Early plane detection - handle infinite planes with specialized analytical path
-	if result, isPlane := b.planeDetection(bodyA, bodyB, normal, depth); isPlane {
-		return result
-	}
-
-	// Generic shape-shape path (no planes involved)
 	// Convert normal to local space
 	localNormalA := bodyA.Transform.Rotation.Conjugate().Rotate(normal)
 	localNormalB := bodyB.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))
@@ -165,99 +159,7 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 	return b.buildResult()
 }
 
-func (b *ManifoldBuilder) planeDetection(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) ([]constraint.ContactPoint, bool) {
-	planeA, isPlaneA := isPlaneShape(bodyA.Shape)
-	planeB, isPlaneB := isPlaneShape(bodyB.Shape)
-
-	// Handle plane collisions with specialized path
-	if isPlaneA && !isPlaneB {
-		// PlaneA vs ShapeB: flip normal direction (normal points from A to B)
-		return b.generatePlaneManifold(planeA, bodyB, normal, depth), true
-	}
-	if isPlaneB && !isPlaneA {
-		// ShapeA vs PlaneB: normal already correct (points from A to B)
-		return b.generatePlaneManifold(planeB, bodyA, normal, depth), true
-	}
-	if isPlaneA && isPlaneB {
-		// Plane-Plane collision: degenerate case, use fallback
-		b.tempPoints[0] = constraint.ContactPoint{
-			Position:    bodyB.SupportWorld(normal.Mul(-1)),
-			Penetration: depth,
-		}
-		b.tempPointsCount = 1
-		return b.buildResult(), true
-	}
-
-	return nil, false
-}
-
-// generatePlaneManifold generates contacts for plane-shape collisions using analytical projection.
-// This handles infinite planes without artificial size limitations by directly projecting
-// the incident shape's feature points onto the plane surface.
-// Parameters:
-//   - plane: The plane shape
-//   - planeBody: RigidBody containing the plane (unused but kept for API consistency)
-//   - otherShape: The non-plane shape
-//   - otherBody: RigidBody containing the other shape
-//   - normal: Collision normal (from plane to other)
-//   - depth: Penetration depth
-func (b *ManifoldBuilder) generatePlaneManifold(
-	plane *actor.Plane,
-	body *actor.RigidBody,
-	normal mgl64.Vec3,
-	depth float64,
-) []constraint.ContactPoint {
-
-	// Get the contact feature from the non-plane shape
-	localNormal := body.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))
-	body.Shape.GetContactFeature(localNormal, &b.localFeatureA, &b.localFeatureACount)
-
-	// Transform to world space
-	b.transformFeature(&b.localFeatureA, b.localFeatureACount, body.Transform, body.Shape, &b.worldFeatureA, &b.worldFeatureACount)
-
-	// Plane properties in world space (planes are already in world space)
-	planeNormal := plane.Normal
-	planeDistance := plane.Distance
-
-	// Project each incident point onto the plane and check penetration
-	b.tempPointsCount = 0
-	for i := 0; i < b.worldFeatureACount && b.tempPointsCount < maxBufferSize; i++ {
-		point := b.worldFeatureA[i]
-
-		// Signed distance from point to plane: positive = above plane, negative = below
-		signedDist := point.Dot(planeNormal) - planeDistance
-
-		// Only keep points penetrating the plane (below surface)
-		if signedDist <= 0.0 {
-			b.tempPoints[b.tempPointsCount] = constraint.ContactPoint{
-				Position:    point,
-				Penetration: depth,
-			}
-			b.tempPointsCount++
-		}
-	}
-
-	// Fallback: if no points penetrate (shouldn't happen with correct EPA output)
-	if b.tempPointsCount == 0 {
-		// Use support point along collision normal
-		deepest := body.SupportWorld(normal.Mul(-1))
-		b.tempPoints[0] = constraint.ContactPoint{
-			Position:    deepest,
-			Penetration: depth,
-		}
-		b.tempPointsCount = 1
-	}
-
-	// Reduce to max contact points if necessary
-	if b.tempPointsCount > maxContactPoints {
-		b.reduceTo4Points(normal)
-	}
-
-	return b.buildResult()
-}
-
 // transformFeature transforms features to world space
-// Note: Planes are no longer handled here - they use the specialized generatePlaneManifold() path
 func (b *ManifoldBuilder) transformFeature(input *[8]mgl64.Vec3, inputCount int, transform actor.Transform, shape actor.ShapeInterface, output *[8]mgl64.Vec3, outputCount *int) {
 	*outputCount = 0
 
@@ -527,10 +429,4 @@ func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
 	tangent2 := normal.Cross(tangent1).Normalize()
 
 	return tangent1, tangent2
-}
-
-// isPlaneShape checks if a shape is a Plane and returns it with type safety
-func isPlaneShape(shape actor.ShapeInterface) (*actor.Plane, bool) {
-	plane, ok := shape.(*actor.Plane)
-	return plane, ok
 }

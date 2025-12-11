@@ -7,6 +7,7 @@ import (
 	"github.com/akmonengine/feather/constraint"
 	"github.com/akmonengine/feather/epa"
 	"github.com/akmonengine/feather/gjk"
+	"github.com/go-gl/mathgl/mgl64"
 )
 
 const STIFF_COMPLIANCE = CONCRETE_COMPLIANCE
@@ -58,6 +59,13 @@ func BroadPhase(bodies []*actor.RigidBody) <-chan CollisionPair {
 						continue
 					}
 
+					_, aIsPlane := bodyA.Shape.(*actor.Plane)
+					_, bIsPlane := bodyB.Shape.(*actor.Plane)
+					if aIsPlane || bIsPlane {
+						checkingPairs <- CollisionPair{BodyA: bodyA, BodyB: bodyB}
+						continue
+					}
+
 					aabbA := bodyA.Shape.GetAABB()
 					aabbB := bodyB.Shape.GetAABB()
 					if aabbA.Overlaps(aabbB) {
@@ -77,11 +85,59 @@ func BroadPhase(bodies []*actor.RigidBody) <-chan CollisionPair {
 }
 
 func NarrowPhase(pairs <-chan CollisionPair) []*constraint.ContactConstraint {
-	collisionPair := GJK(pairs)
-	contactsChan := EPA(collisionPair)
+	// Dispatcher: separate pairs with planes, and normal convex objects
+	planePairs := make(chan CollisionPair, WORKERS)
+	gjkPairs := make(chan CollisionPair, WORKERS)
 
+	go func() {
+		defer close(planePairs)
+		defer close(gjkPairs)
+
+		for pair := range pairs {
+			_, aIsPlane := pair.BodyA.Shape.(*actor.Plane)
+			_, bIsPlane := pair.BodyB.Shape.(*actor.Plane)
+
+			if aIsPlane || bIsPlane {
+				planePairs <- pair
+			} else {
+				gjkPairs <- pair
+			}
+		}
+	}()
+
+	// Canal pour collecter tous les contacts
+	allContacts := make(chan *constraint.ContactConstraint, WORKERS*2)
+	var wg sync.WaitGroup
+	// Path 1: GJK/EPA for convex objects
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		collisionPairs := GJK(gjkPairs)
+		contactsChan := EPA(collisionPairs)
+		for contact := range contactsChan {
+			allContacts <- contact
+		}
+	}()
+
+	// Path 2: analytic collisions with planes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		contactsChan := collidePlane(planePairs)
+		for contact := range contactsChan {
+			allContacts <- contact
+		}
+	}()
+
+	// Fermer le canal de sortie quand tout est fini
+	go func() {
+		wg.Wait()
+		close(allContacts)
+	}()
+
+	// Collecter tous les contacts
 	contacts := make([]*constraint.ContactConstraint, 0)
-	for c := range contactsChan {
+	for c := range allContacts {
 		contacts = append(contacts, c)
 	}
 	return contacts
@@ -131,6 +187,70 @@ func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
 						continue
 					}
 					ch <- &contact
+				}
+			}()
+		}
+
+		wg.Wait()
+	}()
+
+	return ch
+}
+
+func collidePlane(pairs <-chan CollisionPair) <-chan *constraint.ContactConstraint {
+	ch := make(chan *constraint.ContactConstraint, WORKERS)
+
+	go func() {
+		var wg sync.WaitGroup
+		defer close(ch)
+
+		for range WORKERS {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for pair := range pairs {
+					// Identifier quel body est le plan
+					var plane *actor.Plane
+					var object *actor.RigidBody
+					var planeBody *actor.RigidBody
+					var contactNormal mgl64.Vec3
+
+					if p, ok := pair.BodyA.Shape.(*actor.Plane); ok {
+						plane = p
+						planeBody = pair.BodyA
+						object = pair.BodyB
+						contactNormal = plane.Normal
+					} else if p, ok := pair.BodyB.Shape.(*actor.Plane); ok {
+						plane = p
+						planeBody = pair.BodyB
+						object = pair.BodyA
+						contactNormal = plane.Normal.Mul(-1)
+					} else {
+						continue // No plane (should not happen, the data is prefiltered in NarrowPhase)
+					}
+
+					collision, result := object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform)
+
+					if !collision {
+						continue
+					}
+
+					var points []constraint.ContactPoint
+					for _, point := range result {
+						points = append(points, constraint.ContactPoint{Position: point.Position, Penetration: point.Penetration})
+					}
+
+					// Créer la contrainte
+					contact := &constraint.ContactConstraint{
+						BodyA:       planeBody,
+						BodyB:       object,
+						Normal:      contactNormal,
+						Points:      points,
+						Compliance:  CONCRETE_COMPLIANCE,
+						Restitution: constraint.ComputeRestitution(planeBody.Material, object.Material),
+					}
+
+					ch <- contact
 				}
 			}()
 		}

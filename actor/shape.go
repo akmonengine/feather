@@ -2,7 +2,6 @@ package actor
 
 import (
 	"math"
-	"sync"
 
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -16,25 +15,12 @@ const (
 	ShapeTypePlane
 )
 
-var (
-	vec3Pool = sync.Pool{
-		New: func() interface{} {
-			return &mgl64.Vec3{}
-		},
-	}
-	vec3SlicePool4 = sync.Pool{
-		New: func() interface{} {
-			s := make([]*mgl64.Vec3, 4)
-			return &s
-		},
-	}
-	vec3SlicePool24 = sync.Pool{
-		New: func() interface{} {
-			s := make([]*mgl64.Vec3, 24)
-			return &s
-		},
-	}
-)
+type ContactPoint struct {
+	Position    mgl64.Vec3
+	Penetration float64
+}
+
+type PlaneContact []ContactPoint
 
 // ShapeInterface is the interface that all collision shapes must implement
 type ShapeInterface interface {
@@ -47,6 +33,7 @@ type ShapeInterface interface {
 	ComputeInertia(mass float64) mgl64.Mat3
 	Support(direction mgl64.Vec3) mgl64.Vec3
 	GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int)
+	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact)
 }
 
 // Box represents an oriented box collision shape
@@ -190,6 +177,52 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	}
 }
 
+// CollideWithPlane - Collision Box/Plane
+func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+	h := b.HalfExtents
+	localVertices := [8]mgl64.Vec3{
+		{-h.X(), -h.Y(), -h.Z()},
+		{-h.X(), -h.Y(), h.Z()},
+		{-h.X(), h.Y(), -h.Z()},
+		{-h.X(), h.Y(), h.Z()},
+		{h.X(), -h.Y(), -h.Z()},
+		{h.X(), -h.Y(), h.Z()},
+		{h.X(), h.Y(), -h.Z()},
+		{h.X(), h.Y(), h.Z()},
+	}
+
+	var contactPoints []ContactPoint
+	maxDepth := 0.0
+
+	for _, vertex := range localVertices {
+		worldVertex := myTransform.Rotation.Rotate(vertex).Add(myTransform.Position)
+		distance := worldVertex.Sub(planeNormal.Mul(-planeDistance)).Dot(planeNormal)
+
+		if distance < 0 {
+			depth := -distance
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+			pointOnPlane := worldVertex.Sub(planeNormal.Mul(distance))
+
+			contactPoints = append(contactPoints, ContactPoint{
+				Position:    pointOnPlane,
+				Penetration: depth,
+			})
+		}
+	}
+
+	if len(contactPoints) == 0 {
+		return false, PlaneContact{}
+	}
+
+	if len(contactPoints) > 4 {
+		contactPoints = reduceTo4ContactPoints(contactPoints, planeNormal)
+	}
+
+	return true, contactPoints
+}
+
 // Sphere represents a spherical collision shape
 type Sphere struct {
 	Radius float64
@@ -240,6 +273,24 @@ func (s *Sphere) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, 
 	*count = 1
 }
 
+func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+	center := myTransform.Position
+	distance := center.Sub(planeNormal.Mul(-planeDistance)).Dot(planeNormal)
+	depth := s.Radius - distance
+
+	if depth <= 0 {
+		return false, PlaneContact{}
+	}
+
+	contactPoint := center.Sub(planeNormal.Mul(distance))
+
+	return true, []ContactPoint{{
+		Position:    contactPoint,
+		Penetration: depth,
+	},
+	}
+}
+
 // Plane represents an infinite plane collision shape
 // The plane is defined by the equation: Normal · p + Distance = 0
 // where Normal is the plane's normal vector (must be normalized)
@@ -250,9 +301,11 @@ type Plane struct {
 	aabb     AABB
 }
 
+// This method is bypassed, because planes are automatically included from the broad phase to the narrow phase
+// We use specific functions for plane / convex shapes collision
 func (p *Plane) ComputeAABB(transform Transform) {
-	const thickness = 1.0 // épaisseur de détection du plan
-	const infinity = 1e10 // grande valeur pour les dimensions infinies
+	const thickness = 0.0            // épaisseur de détection du plan
+	const infinity = math.MaxFloat64 // grande valeur pour les dimensions infinies
 
 	// Point on the plane closest to the origin
 	// Assumes p.Normal is normalized
@@ -307,36 +360,18 @@ func (p *Plane) ComputeInertia(mass float64) mgl64.Mat3 {
 
 // For simplicity, we use a 10000 width/height box. Can obviously break for bigger planes
 func (p *Plane) Support(direction mgl64.Vec3) mgl64.Vec3 {
-	boxHalfWidth := 1000.0
-	boxHalfHeight := 0.5
-	boxHalfDepth := 1000.0
-
-	return mgl64.Vec3{
-		func() float64 {
-			if direction.X() < 0 {
-				return -boxHalfWidth
-			}
-			return boxHalfWidth
-		}(),
-		func() float64 {
-			if direction.Y() > 0 {
-				return 0.0
-			}
-			return -boxHalfHeight
-		}(),
-		func() float64 {
-			if direction.Z() < 0 {
-				return -boxHalfDepth
-			}
-			return boxHalfDepth
-		}(),
-	}
+	return mgl64.Vec3{}
 }
 
 // The Manifold has specific code path for planes, this should not be called
 func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
 	output[0] = mgl64.Vec3{0, 0, 0}
 	*count = 1
+}
+
+// CollideWithPlane - Plane/Plane collision (not supported)
+func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+	return false, PlaneContact{}
 }
 
 // Helper to generate the tangent basis
@@ -352,4 +387,43 @@ func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
 	tangent2 := normal.Cross(tangent1).Normalize()
 
 	return tangent1, tangent2
+}
+
+func reduceTo4ContactPoints(points []ContactPoint, normal mgl64.Vec3) []ContactPoint {
+	tangent1, tangent2 := getTangentBasis(normal)
+
+	minX, maxX, minY, maxY := 0, 0, 0, 0
+	minXval, maxXval := math.Inf(1), math.Inf(-1)
+	minYval, maxYval := math.Inf(1), math.Inf(-1)
+
+	for i, p := range points {
+		x := p.Position.Dot(tangent1)
+		y := p.Position.Dot(tangent2)
+
+		if x < minXval {
+			minXval, minX = x, i
+		}
+		if x > maxXval {
+			maxXval, maxX = x, i
+		}
+		if y < minYval {
+			minYval, minY = y, i
+		}
+		if y > maxYval {
+			maxYval, maxY = y, i
+		}
+	}
+
+	indices := [4]int{minX, maxX, minY, maxY}
+	seen := make(map[int]bool)
+	result := make([]ContactPoint, 0, 4)
+
+	for _, idx := range indices {
+		if !seen[idx] {
+			seen[idx] = true
+			result = append(result, points[idx])
+		}
+	}
+
+	return result
 }
