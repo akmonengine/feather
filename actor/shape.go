@@ -333,6 +333,7 @@ func (p *Plane) Support(direction mgl64.Vec3) mgl64.Vec3 {
 	}
 }
 
+// The Manifold has specific code path for planes, this should not be called
 func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
 	output[0] = mgl64.Vec3{0, 0, 0}
 	*count = 1
