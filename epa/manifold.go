@@ -330,52 +330,108 @@ func (b *ManifoldBuilder) clipAgainstReferencePlane(clippedCount int, reference 
 	}
 }
 
-// reduceTo4Points reduces the contact points to maxContactPoints by keeping the 4 extreme points
+// reduceTo4Points reduces contact points to maxContactPoints, using Farthest Point Sampling (FPS).
+//
+// Valid manifold sizes before reduction: 1, 2, 3, or 4 points
+// - 1 point: Sphere-sphere, point-face contacts
+// - 2 points: Edge-face contacts
+// - 3 points: Triangular contact region (asymmetric clipping of quadrilateral)
+// - 4 points: Face-face contacts (full quadrilateral overlap)
+//
+// This reduction only applies when tempPointsCount > 4, preserving 3-point manifolds.
 func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 	if b.tempPointsCount <= maxContactPoints {
 		return
 	}
 
-	tangent1, tangent2 := getTangentBasis(normal)
-
-	minX, maxX, minY, maxY := 0, 0, 0, 0
-	minXval, maxXval := math.Inf(1), math.Inf(-1)
-	minYval, maxYval := math.Inf(1), math.Inf(-1)
-
+	// 1. Initialisation : choisir le point le plus éloigné du centre de masse
+	center := mgl64.Vec3{0, 0, 0}
 	for i := 0; i < b.tempPointsCount; i++ {
-		p := b.tempPoints[i]
-		x := p.Position.Dot(tangent1)
-		y := p.Position.Dot(tangent2)
+		center = center.Add(b.tempPoints[i].Position)
+	}
+	center = center.Mul(1.0 / float64(b.tempPointsCount))
 
-		if x < minXval {
-			minXval, minX = x, i
-		}
-		if x > maxXval {
-			maxXval, maxX = x, i
-		}
-		if y < minYval {
-			minYval, minY = y, i
-		}
-		if y > maxYval {
-			maxYval, maxY = y, i
+	// Trouver le point le plus éloigné du centre
+	maxDistSq := -1.0
+	firstIdx := 0
+	for i := 0; i < b.tempPointsCount; i++ {
+		diff := b.tempPoints[i].Position.Sub(center)
+		distSq := diff.Dot(diff)
+		if distSq > maxDistSq {
+			maxDistSq = distSq
+			firstIdx = i
 		}
 	}
 
-	// Collect unique indices
-	indices := [maxContactPoints]int{minX, maxX, minY, maxY}
-	seen := [maxBufferSize]bool{}
+	// 2. Farthest Point Sampling (FPS)
+	selectedIndices := [maxContactPoints]int{firstIdx}
+	selectedCount := 1
 
-	// Compact to the beginning of the buffer
-	newCount := 0
-	for _, idx := range indices {
-		if !seen[idx] {
-			seen[idx] = true
-			b.tempPoints[newCount] = b.tempPoints[idx]
-			newCount++
+	// Tableau pour stocker les distances minimales au carré
+	var minDistSq [8]float64
+	for i := 0; i < b.tempPointsCount; i++ {
+		diff := b.tempPoints[i].Position.Sub(b.tempPoints[firstIdx].Position)
+		minDistSq[i] = diff.Dot(diff)
+	}
+
+	// Itérer jusqu'à avoir 4 points
+	for selectedCount < maxContactPoints {
+		// Trouver le point avec la plus grande distance minimale
+		maxMinDistSq := -1.0
+		nextIdx := -1
+		for i := 0; i < b.tempPointsCount; i++ {
+			if minDistSq[i] > maxMinDistSq {
+				// Vérifier si le point n'est pas déjà sélectionné
+				isSelected := false
+				for j := 0; j < selectedCount; j++ {
+					if selectedIndices[j] == i {
+						isSelected = true
+						break
+					}
+				}
+				if !isSelected {
+					maxMinDistSq = minDistSq[i]
+					nextIdx = i
+				}
+			}
+		}
+
+		if nextIdx == -1 {
+			break // Cas de sécurité (ne devrait pas arriver)
+		}
+
+		// Ajouter le point sélectionné
+		selectedIndices[selectedCount] = nextIdx
+		selectedCount++
+
+		// Mettre à jour les distances minimales
+		for i := 0; i < b.tempPointsCount; i++ {
+			diff := b.tempPoints[i].Position.Sub(b.tempPoints[nextIdx].Position)
+			distSq := diff.Dot(diff)
+			if distSq < minDistSq[i] {
+				minDistSq[i] = distSq
+			}
 		}
 	}
 
-	b.tempPointsCount = newCount
+	// 3. Copier les points sélectionnés dans un buffer temporaire
+	// Utiliser un buffer temporaire pour éviter d'écraser les données originales
+	var tempPoints [maxContactPoints]constraint.ContactPoint
+	for i := 0; i < maxContactPoints; i++ {
+		if i < selectedCount {
+			tempPoints[i] = b.tempPoints[selectedIndices[i]]
+		} else {
+			// Fallback (ne devrait pas arriver)
+			tempPoints[i] = b.tempPoints[0]
+		}
+	}
+
+	// 4. Copier les points du buffer temporaire vers b.tempPoints
+	for i := 0; i < maxContactPoints; i++ {
+		b.tempPoints[i] = tempPoints[i]
+	}
+
+	b.tempPointsCount = maxContactPoints
 }
 
 // buildResult is the ONLY function that allocates (final copy)
