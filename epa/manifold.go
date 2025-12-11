@@ -68,8 +68,8 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 	localNormalB := bodyB.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))
 
 	// Get features DANS les buffers
-	b.getContactFeature(bodyA.Shape, localNormalA, &b.localFeatureA, &b.localFeatureACount)
-	b.getContactFeature(bodyB.Shape, localNormalB, &b.localFeatureB, &b.localFeatureBCount)
+	bodyA.Shape.GetContactFeature(localNormalA, &b.localFeatureA, &b.localFeatureACount)
+	bodyB.Shape.GetContactFeature(localNormalB, &b.localFeatureB, &b.localFeatureBCount)
 
 	// Transform DANS les buffers
 	b.transformFeature(&b.localFeatureA, b.localFeatureACount, bodyA.Transform, bodyA.Shape, &b.worldFeatureA, &b.worldFeatureACount)
@@ -127,75 +127,6 @@ func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.V
 	}
 
 	return b.buildResult()
-}
-
-// getContactFeature - Écrit dans le buffer fourni
-func (b *ManifoldBuilder) getContactFeature(shape actor.ShapeInterface, direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
-	*count = 0
-
-	switch s := shape.(type) {
-	case *actor.Box:
-		// Trouver la face la plus alignée
-		axes := [3]mgl64.Vec3{
-			{1, 0, 0}, {0, 1, 0}, {0, 0, 1},
-		}
-
-		// ========== FIX : Comparer les valeurs absolues directement ==========
-		maxAbsDot := 0.0 // Commence à 0, pas -∞
-		bestAxisIdx := 0
-		sign := 1.0
-
-		for i, axis := range axes {
-			dot := direction.Dot(axis)
-			absDot := math.Abs(dot)
-
-			if absDot > maxAbsDot {
-				maxAbsDot = absDot
-				bestAxisIdx = i
-				if dot > 0 {
-					sign = 1
-				} else {
-					sign = -1
-				}
-			}
-		}
-
-		halfSize := s.HalfExtents
-
-		// Générer les 4 coins selon la face
-		if bestAxisIdx == 0 { // Face X
-			x := sign * halfSize.X()
-			output[0] = mgl64.Vec3{x, -halfSize.Y(), -halfSize.Z()}
-			output[1] = mgl64.Vec3{x, -halfSize.Y(), halfSize.Z()}
-			output[2] = mgl64.Vec3{x, halfSize.Y(), halfSize.Z()}
-			output[3] = mgl64.Vec3{x, halfSize.Y(), -halfSize.Z()}
-			*count = 4
-		} else if bestAxisIdx == 1 { // Face Y
-			y := sign * halfSize.Y()
-			output[0] = mgl64.Vec3{-halfSize.X(), y, -halfSize.Z()}
-			output[1] = mgl64.Vec3{-halfSize.X(), y, halfSize.Z()}
-			output[2] = mgl64.Vec3{halfSize.X(), y, halfSize.Z()}
-			output[3] = mgl64.Vec3{halfSize.X(), y, -halfSize.Z()}
-			*count = 4
-		} else { // Face Z
-			z := sign * halfSize.Z()
-			output[0] = mgl64.Vec3{-halfSize.X(), -halfSize.Y(), z}
-			output[1] = mgl64.Vec3{halfSize.X(), -halfSize.Y(), z}
-			output[2] = mgl64.Vec3{halfSize.X(), halfSize.Y(), z}
-			output[3] = mgl64.Vec3{-halfSize.X(), halfSize.Y(), z}
-			*count = 4
-		}
-
-	case *actor.Sphere:
-		// Point unique
-		output[0] = direction.Normalize().Mul(s.Radius)
-		*count = 1
-
-	case *actor.Plane:
-		// Marqueur pour plan (sera étendu dans transform)
-		output[0] = mgl64.Vec3{0, 0, 0}
-		*count = 1
-	}
 }
 
 // transformFeature - Transforme vers world space

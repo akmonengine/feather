@@ -46,7 +46,7 @@ type ShapeInterface interface {
 	ComputeMass(density float64) float64
 	ComputeInertia(mass float64) mgl64.Mat3
 	Support(direction mgl64.Vec3) mgl64.Vec3
-	GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3
+	GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int)
 }
 
 // Box represents an oriented box collision shape
@@ -137,79 +137,57 @@ func (b *Box) Support(direction mgl64.Vec3) mgl64.Vec3 {
 	return mgl64.Vec3{hx, hy, hz}
 }
 
-func (b *Box) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
-	dir := direction.Normalize()
-	hx, hy, hz := b.HalfExtents.X(), b.HalfExtents.Y(), b.HalfExtents.Z()
-
-	allVerticesPtr := vec3SlicePool24.Get().(*[]*mgl64.Vec3)
-	allVertices := *allVerticesPtr
-	for i := 0; i < 24; i++ {
-		allVertices[i] = vec3Pool.Get().(*mgl64.Vec3)
+func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
+	// Trouver la face la plus alignée
+	axes := [3]mgl64.Vec3{
+		{1, 0, 0}, {0, 1, 0}, {0, 0, 1},
 	}
 
-	// +X face
-	allVertices[0][0], allVertices[0][1], allVertices[0][2] = hx, -hy, -hz
-	allVertices[1][0], allVertices[1][1], allVertices[1][2] = hx, -hy, hz
-	allVertices[2][0], allVertices[2][1], allVertices[2][2] = hx, hy, hz
-	allVertices[3][0], allVertices[3][1], allVertices[3][2] = hx, hy, -hz
-	// -X face
-	allVertices[4][0], allVertices[4][1], allVertices[4][2] = -hx, -hy, hz
-	allVertices[5][0], allVertices[5][1], allVertices[5][2] = -hx, -hy, -hz
-	allVertices[6][0], allVertices[6][1], allVertices[6][2] = -hx, hy, -hz
-	allVertices[7][0], allVertices[7][1], allVertices[7][2] = -hx, hy, hz
-	// +Y face
-	allVertices[8][0], allVertices[8][1], allVertices[8][2] = -hx, hy, -hz
-	allVertices[9][0], allVertices[9][1], allVertices[9][2] = -hx, hy, hz
-	allVertices[10][0], allVertices[10][1], allVertices[10][2] = hx, hy, hz
-	allVertices[11][0], allVertices[11][1], allVertices[11][2] = hx, hy, -hz
-	// -Y face
-	allVertices[12][0], allVertices[12][1], allVertices[12][2] = -hx, -hy, hz
-	allVertices[13][0], allVertices[13][1], allVertices[13][2] = hx, -hy, hz
-	allVertices[14][0], allVertices[14][1], allVertices[14][2] = hx, -hy, -hz
-	allVertices[15][0], allVertices[15][1], allVertices[15][2] = -hx, -hy, -hz
-	// +Z face
-	allVertices[16][0], allVertices[16][1], allVertices[16][2] = -hx, -hy, hz
-	allVertices[17][0], allVertices[17][1], allVertices[17][2] = -hx, hy, hz
-	allVertices[18][0], allVertices[18][1], allVertices[18][2] = hx, hy, hz
-	allVertices[19][0], allVertices[19][1], allVertices[19][2] = hx, -hy, hz
-	// -Z face
-	allVertices[20][0], allVertices[20][1], allVertices[20][2] = hx, -hy, -hz
-	allVertices[21][0], allVertices[21][1], allVertices[21][2] = hx, hy, -hz
-	allVertices[22][0], allVertices[22][1], allVertices[22][2] = -hx, hy, -hz
-	allVertices[23][0], allVertices[23][1], allVertices[23][2] = -hx, -hy, -hz
+	// ========== FIX : Comparer les valeurs absolues directement ==========
+	maxAbsDot := 0.0 // Commence à 0, pas -∞
+	bestAxisIdx := 0
+	sign := 1.0
 
-	bestDot := -math.MaxFloat64
-	bestFaceIdx := 0
-	faceNormals := []mgl64.Vec3{
-		{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
-	}
-	for i := 0; i < 6; i++ {
-		dot := dir.Dot(faceNormals[i])
-		if dot > bestDot {
-			bestDot = dot
-			bestFaceIdx = i
+	for i, axis := range axes {
+		dot := direction.Dot(axis)
+		absDot := math.Abs(dot)
+
+		if absDot > maxAbsDot {
+			maxAbsDot = absDot
+			bestAxisIdx = i
+			if dot > 0 {
+				sign = 1
+			} else {
+				sign = -1
+			}
 		}
 	}
 
-	resultSlicePtr := vec3SlicePool4.Get().(*[]*mgl64.Vec3)
-	resultSlice := *resultSlicePtr
-	startIdx := bestFaceIdx * 4
-	for i := 0; i < 4; i++ {
-		resultSlice[i] = allVertices[startIdx+i]
-	}
+	halfSize := b.HalfExtents
 
-	result := make([]mgl64.Vec3, 4)
-	for i := 0; i < 4; i++ {
-		result[i] = *resultSlice[i]
+	// Générer les 4 coins selon la face
+	if bestAxisIdx == 0 { // Face X
+		x := sign * halfSize.X()
+		output[0] = mgl64.Vec3{x, -halfSize.Y(), -halfSize.Z()}
+		output[1] = mgl64.Vec3{x, -halfSize.Y(), halfSize.Z()}
+		output[2] = mgl64.Vec3{x, halfSize.Y(), halfSize.Z()}
+		output[3] = mgl64.Vec3{x, halfSize.Y(), -halfSize.Z()}
+		*count = 4
+	} else if bestAxisIdx == 1 { // Face Y
+		y := sign * halfSize.Y()
+		output[0] = mgl64.Vec3{-halfSize.X(), y, -halfSize.Z()}
+		output[1] = mgl64.Vec3{-halfSize.X(), y, halfSize.Z()}
+		output[2] = mgl64.Vec3{halfSize.X(), y, halfSize.Z()}
+		output[3] = mgl64.Vec3{halfSize.X(), y, -halfSize.Z()}
+		*count = 4
+	} else { // Face Z
+		z := sign * halfSize.Z()
+		output[0] = mgl64.Vec3{-halfSize.X(), -halfSize.Y(), z}
+		output[1] = mgl64.Vec3{halfSize.X(), -halfSize.Y(), z}
+		output[2] = mgl64.Vec3{halfSize.X(), halfSize.Y(), z}
+		output[3] = mgl64.Vec3{-halfSize.X(), halfSize.Y(), z}
+		*count = 4
 	}
-
-	for i := 0; i < 24; i++ {
-		vec3Pool.Put(allVertices[i])
-	}
-	vec3SlicePool24.Put(allVerticesPtr)
-	vec3SlicePool4.Put(resultSlicePtr)
-
-	return result
 }
 
 // Sphere represents a spherical collision shape
@@ -257,8 +235,9 @@ func (s *Sphere) Support(direction mgl64.Vec3) mgl64.Vec3 {
 	return direction.Normalize().Mul(s.Radius)
 }
 
-func (s *Sphere) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
-	return []mgl64.Vec3{s.Support(direction)}
+func (s *Sphere) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
+	output[0] = s.Support(direction)
+	*count = 1
 }
 
 // Plane represents an infinite plane collision shape
@@ -354,23 +333,9 @@ func (p *Plane) Support(direction mgl64.Vec3) mgl64.Vec3 {
 	}
 }
 
-func (p *Plane) GetContactFeature(direction mgl64.Vec3) []mgl64.Vec3 {
-	// For a plane, return 4 points forming a large square
-	// IN LOCAL SPACE (centered on the plane origin)
-
-	// Find two tangent vectors to the plane
-	tangent1, tangent2 := getTangentBasis(p.Normal)
-
-	// Large size to cover contacts
-	size := 1000.0
-
-	// Points in local plane space (not transformed)
-	return []mgl64.Vec3{
-		tangent1.Mul(-size).Add(tangent2.Mul(-size)),
-		tangent1.Mul(-size).Add(tangent2.Mul(size)),
-		tangent1.Mul(size).Add(tangent2.Mul(size)),
-		tangent1.Mul(size).Add(tangent2.Mul(-size)),
-	}
+func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
+	output[0] = mgl64.Vec3{0, 0, 0}
+	*count = 1
 }
 
 // Helper to generate the tangent basis
