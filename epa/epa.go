@@ -43,13 +43,6 @@ const (
 	// Faces very close to or behind the origin are likely degenerate.
 	EPAMinFaceDistance = 0.0001
 
-	// DefaultCompliance controls soft constraint stiffness for contact resolution.
-	// Lower values = stiffer contacts (less penetration, potential jitter)
-	// Higher values = softer contacts (more penetration, smoother)
-	// Typical range: 1e-10 (very stiff) to 1e-6 (soft)
-	// See PHYSICS_GUIDE.md for tuning guidelines.
-	DefaultCompliance = 1e-7
-
 	// NormalSnapThreshold is used to clamp nearly-zero normal components to exactly zero.
 	// This helps with numerical stability and axis-aligned collisions.
 	NormalSnapThreshold = 1e-8
@@ -159,12 +152,10 @@ func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex) (constraint.ContactConstra
 			manifoldPoints := GenerateManifold(a, b, closestFace.Normal, closestFace.Distance)
 
 			return constraint.ContactConstraint{
-				BodyA:       a,
-				BodyB:       b,
-				Points:      manifoldPoints,
-				Normal:      closestFace.Normal,
-				Compliance:  DefaultCompliance,
-				Restitution: constraint.ComputeRestitution(a.Material, b.Material),
+				BodyA:  a,
+				BodyB:  b,
+				Points: manifoldPoints,
+				Normal: closestFace.Normal,
 			}, nil
 		}
 
@@ -211,12 +202,10 @@ func handleDegenerateSimplex(bodyA, bodyB *actor.RigidBody, simplex *gjk.Simplex
 		manifoldPoints := GenerateManifold(bodyA, bodyB, normal, penetration)
 
 		return constraint.ContactConstraint{
-			BodyA:       bodyA,
-			BodyB:       bodyB,
-			Points:      manifoldPoints,
-			Normal:      normal,
-			Compliance:  DefaultCompliance,
-			Restitution: constraint.ComputeRestitution(bodyA.Material, bodyB.Material),
+			BodyA:  bodyA,
+			BodyB:  bodyB,
+			Points: manifoldPoints,
+			Normal: normal,
 		}
 	}
 
@@ -240,12 +229,10 @@ func handleDegenerateSimplex(bodyA, bodyB *actor.RigidBody, simplex *gjk.Simplex
 
 	// Return fallback contact constraint
 	return constraint.ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Points:      manifoldPoints,
-		Normal:      normal,
-		Compliance:  DefaultCompliance,
-		Restitution: constraint.ComputeRestitution(bodyA.Material, bodyB.Material),
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Points: manifoldPoints,
+		Normal: normal,
 	}
 }
 

@@ -248,12 +248,10 @@ func collidePlane(pairs <-chan CollisionPair) <-chan *constraint.ContactConstrai
 
 					// Créer la contrainte
 					contact := &constraint.ContactConstraint{
-						BodyA:       planeBody,
-						BodyB:       object,
-						Normal:      contactNormal,
-						Points:      points,
-						Compliance:  CONCRETE_COMPLIANCE,
-						Restitution: constraint.ComputeRestitution(planeBody.Material, object.Material),
+						BodyA:  planeBody,
+						BodyB:  object,
+						Normal: contactNormal,
+						Points: points,
 					}
 
 					ch <- contact

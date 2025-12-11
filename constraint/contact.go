@@ -7,18 +7,25 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
+const (
+	// DefaultCompliance controls soft constraint stiffness for contact resolution.
+	// Lower values = stiffer contacts (less penetration, potential jitter)
+	// Higher values = softer contacts (more penetration, smoother)
+	// Typical range: 1e-10 (very stiff) to 1e-6 (soft)
+	// See PHYSICS_GUIDE.md for tuning guidelines.
+	DefaultCompliance = 1e-7
+)
+
 type ContactPoint struct {
 	Position    mgl64.Vec3
 	Penetration float64
 }
 
 type ContactConstraint struct {
-	BodyA       *actor.RigidBody
-	BodyB       *actor.RigidBody
-	Points      []ContactPoint
-	Normal      mgl64.Vec3
-	Compliance  float64
-	Restitution float64
+	BodyA  *actor.RigidBody
+	BodyB  *actor.RigidBody
+	Points []ContactPoint
+	Normal mgl64.Vec3
 }
 
 // SolvePosition resolves penetration (PBD style, no lambda accumulation)
@@ -75,7 +82,8 @@ func (c *ContactConstraint) SolvePosition(dt float64) {
 		return
 	}
 
-	alphaTilde := c.Compliance / (dt * dt)
+	compliance := DefaultCompliance
+	alphaTilde := compliance / (dt * dt)
 	deltaLambda := -totalPenetration / (totalWeight + alphaTilde)
 
 	// ========== 3. Apply linear corrections ==========
