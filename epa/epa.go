@@ -93,9 +93,9 @@ var (
 //
 // The contact normal points from body A toward body B (separation direction).
 // Penetration depth is always positive (how far to move B away from A).
-func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstraint, error) {
+func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex) (constraint.ContactConstraint, error) {
 	// If simplex is too small (degenerate case), create a minimal contact
-	if len(simplex) < 4 {
+	if simplex.Count < 4 {
 		return handleDegenerateSimplex(a, b, simplex), nil
 	}
 
@@ -177,10 +177,21 @@ func EPA(a, b *actor.RigidBody, simplex []mgl64.Vec3) (constraint.ContactConstra
 	return constraint.ContactConstraint{}, fmt.Errorf("EPA failed to converge after %d iterations", EPAMaxIterations)
 }
 
-func handleDegenerateSimplex(bodyA, bodyB *actor.RigidBody, simplex []mgl64.Vec3) constraint.ContactConstraint {
-	if len(simplex) >= 2 {
-		a := simplex[0]
-		b := simplex[1]
+// handleDegenerateSimplex creates a contact constraint when GJK returns an incomplete simplex.
+//
+// This happens in rare edge cases where shapes are touching but GJK couldn't build a full
+// tetrahedron. We estimate the contact normal and penetration depth from available points.
+//
+// Cases:
+//   - 2+ points: Use closest point to origin as penetration estimate
+//   - 1 point: Estimate from body center separation (very approximate)
+//
+// Returns a valid ContactConstraint with estimated values.
+func handleDegenerateSimplex(bodyA, bodyB *actor.RigidBody, simplex *gjk.Simplex) constraint.ContactConstraint {
+	if simplex.Count >= 2 {
+		// Use first two points to estimate
+		a := simplex.Points[0]
+		b := simplex.Points[1]
 
 		// Find which point is closer to origin
 		distA := math.Sqrt(a.Dot(a))
@@ -238,17 +249,6 @@ func handleDegenerateSimplex(bodyA, bodyB *actor.RigidBody, simplex []mgl64.Vec3
 	}
 }
 
-// handleDegenerateSimplex creates a contact constraint when GJK returns an incomplete simplex.
-//
-// This happens in rare edge cases where shapes are touching but GJK couldn't build a full
-// tetrahedron. We estimate the contact normal and penetration depth from available points.
-//
-// Cases:
-//   - 2+ points: Use closest point to origin as penetration estimate
-//   - 1 point: Estimate from body center separation (very approximate)
-//
-// Returns a valid ContactConstraint with estimated values.
-//
 // snapNormalToAxis clamps nearly-zero components of a normal vector to exactly zero.
 //
 // This improves numerical stability for axis-aligned collisions (box on ground)

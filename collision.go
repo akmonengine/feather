@@ -26,7 +26,7 @@ const (
 type CollisionPair struct {
 	BodyA   *actor.RigidBody
 	BodyB   *actor.RigidBody
-	simplex gjk.Simplex
+	simplex *gjk.Simplex
 }
 
 // BroadPhase performs broad-phase collision detection using AABB overlap tests
@@ -156,9 +156,14 @@ func GJK(pairChan <-chan CollisionPair) <-chan CollisionPair {
 				defer wg.Done()
 
 				for p := range pairChan {
-					if collision, simplex := gjk.GJK(p.BodyA, p.BodyB); collision {
+					simplex := gjk.SimplexPool.Get().(*gjk.Simplex)
+					simplex.Reset()
+
+					if collision := gjk.GJK(p.BodyA, p.BodyB, simplex); collision {
 						p.simplex = simplex
 						collisionChan <- p
+					} else {
+						gjk.SimplexPool.Put(simplex)
 					}
 				}
 			}()
@@ -183,6 +188,7 @@ func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
 				defer wg.Done()
 				for pair := range p {
 					contact, err := epa.EPA(pair.BodyA, pair.BodyB, pair.simplex)
+					gjk.SimplexPool.Put(pair.simplex)
 					if err != nil {
 						continue
 					}

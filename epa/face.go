@@ -3,6 +3,7 @@ package epa
 import (
 	"math"
 
+	"github.com/akmonengine/feather/gjk"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -65,8 +66,8 @@ func createFaceOutward(a, b, c, oppositePoint mgl64.Vec3) *Face {
 	return face
 }
 
-func buildInitialFaces(simplex []mgl64.Vec3) []*Face {
-	a, b, c, d := simplex[0], simplex[1], simplex[2], simplex[3]
+func buildInitialFaces(simplex *gjk.Simplex) []*Face {
+	a, b, c, d := simplex.Points[0], simplex.Points[1], simplex.Points[2], simplex.Points[3]
 
 	// Create the 4 triangular faces
 	// Each face is defined by 3 points + the opposite point for reference

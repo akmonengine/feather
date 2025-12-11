@@ -14,6 +14,8 @@
 package gjk
 
 import (
+	"sync"
+
 	"github.com/akmonengine/feather/actor"
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -21,7 +23,20 @@ import (
 // Simplex represents a set of 1-4 points in the Minkowski difference space.
 // The simplex evolves during GJK iterations, always containing the most recent support points.
 // Size progression: 1 point → 2 points (line) → 3 points (triangle) → 4 points (tetrahedron)
-type Simplex []mgl64.Vec3
+type Simplex struct {
+	Points [4]mgl64.Vec3
+	Count  int
+}
+
+func (s *Simplex) Reset() {
+	s.Count = 0
+}
+
+var SimplexPool = sync.Pool{
+	New: func() interface{} {
+		return &Simplex{}
+	},
+}
 
 // MinkowskiSupport computes a support point in the Minkowski difference (A - B).
 //
@@ -57,11 +72,10 @@ func MinkowskiSupport(a, b *actor.RigidBody, direction mgl64.Vec3) mgl64.Vec3 {
 //
 // Returns:
 //   - bool: true if collision detected, false otherwise
-//   - Simplex: final simplex (used by EPA for penetration depth if collision)
 //
-// The returned simplex contains 1-4 points. For collisions, it's always a tetrahedron (4 points)
-// containing the origin, which EPA uses as its initial polytope.
-func GJK(a, b *actor.RigidBody) (bool, Simplex) {
+// The simplex is modified in place and contains 1-4 points. For collisions, it's always
+// a tetrahedron (4 points) containing the origin, which EPA uses as its initial polytope.
+func GJK(a, b *actor.RigidBody, simplex *Simplex) bool {
 	// Compute initial direction from A to B (optimization over random direction)
 	// Starting toward the other shape typically reduces iterations
 	direction := b.Transform.Position.Sub(a.Transform.Position)
@@ -70,14 +84,15 @@ func GJK(a, b *actor.RigidBody) (bool, Simplex) {
 	}
 
 	// Get first point of the simplex in the Minkowski difference
-	simplex := make(Simplex, 0, 4)
-	simplex = append(simplex, MinkowskiSupport(a, b, direction))
+	simplex.Points[0] = MinkowskiSupport(a, b, direction)
+	simplex.Count = 1
 
 	// New direction towards the origin from this first point
-	direction = simplex[0].Mul(-1)
+	direction = simplex.Points[0].Mul(-1)
+
 	// If first support point is at/near origin, shapes are touching
 	if direction.LenSqr() < 1e-16 {
-		return true, simplex // Collision detected (rare: shapes exactly touching at point)
+		return true // Collision detected (rare: shapes exactly touching at point)
 	}
 
 	maxIterations := 32 // Safety limit to prevent infinite loops
@@ -90,23 +105,24 @@ func GJK(a, b *actor.RigidBody) (bool, Simplex) {
 		// This is the key optimization that makes GJK fast - we prove separation
 		// without building the full Minkowski difference.
 		if newPoint.Dot(direction) <= 0 {
-			return false, Simplex{} // No collision detected - shapes are separated
+			return false // No collision detected - shapes are separated
 		}
 
 		// Add the new point to the simplex
-		simplex = append(simplex, newPoint)
+		simplex.Points[simplex.Count] = newPoint
+		simplex.Count++
 
 		// Check if the simplex contains the origin
 		// This function also updates the simplex and direction for the next iteration
 		// by reducing the simplex to its closest feature to the origin
-		if containsOrigin(&simplex, &direction) {
-			return true, simplex // Collision detected - origin is inside simplex
+		if containsOrigin(simplex, &direction) {
+			return true // Collision detected - origin is inside simplex
 		}
 	}
 
 	// Failed to converge after maxIterations (very rare, may indicate numerical issues)
 	// In practice this almost never happens for valid convex shapes
-	return false, Simplex{}
+	return false
 }
 
 // containsOrigin tests if the simplex contains the origin and refines the simplex.
@@ -123,7 +139,7 @@ func GJK(a, b *actor.RigidBody) (bool, Simplex) {
 //   - true: Origin is contained (only possible for tetrahedron) → collision!
 //   - false: Origin is outside, simplex and direction updated for next iteration
 func containsOrigin(simplex *Simplex, direction *mgl64.Vec3) bool {
-	switch len(*simplex) {
+	switch simplex.Count {
 	case 2:
 		return line(simplex, direction)
 	case 3:
@@ -143,19 +159,19 @@ func containsOrigin(simplex *Simplex, direction *mgl64.Vec3) bool {
 // Returns false (a line cannot contain origin in 3D).
 // Updates direction to point toward origin from the closest feature.
 func line(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := (*simplex)[1]
-	b := (*simplex)[0]
+	a := simplex.Points[1]
+	b := simplex.Points[0]
 	ab := b.Sub(a)
 	ao := a.Mul(-1)
 
-	// ✅ Correction critique : gérer les points identiques
+	// Handle degenerate case: identical points
 	if ab.LenSqr() < 1e-8 {
 		if ao.LenSqr() < 1e-8 {
 			return true // origin is at the point
 		}
 		// Origin is not at the point, but simplex is degenerate
-		(*simplex)[0] = a
-		*simplex = (*simplex)[:1]
+		simplex.Points[0] = a
+		simplex.Count = 1
 		*direction = ao
 		return false
 	}
@@ -164,8 +180,8 @@ func line(simplex *Simplex, direction *mgl64.Vec3) bool {
 	// If ab.Dot(ao) <= 0, the origin is closest to point A alone
 	if ab.Dot(ao) <= 0 {
 		// Reduce simplex to point A
-		(*simplex)[0] = a
-		*simplex = (*simplex)[:1]
+		simplex.Points[0] = a
+		simplex.Count = 1
 		*direction = ao
 		return false
 	}
@@ -195,9 +211,9 @@ func line(simplex *Simplex, direction *mgl64.Vec3) bool {
 // Returns false (a triangle cannot contain origin in 3D, we need tetrahedron).
 // Reduces simplex to closest feature and updates direction.
 func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := (*simplex)[2] // Most recent point
-	b := (*simplex)[1]
-	c := (*simplex)[0]
+	a := simplex.Points[2] // Most recent point
+	b := simplex.Points[1]
+	c := simplex.Points[0]
 
 	ab := b.Sub(a)
 	ac := c.Sub(a)
@@ -210,9 +226,9 @@ func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
 	if abc.LenSqr() < 1e-10 {
 		// Treat as line instead of triangle
 		// Keep A and B (discard C which is furthest from recent history)
-		(*simplex)[0] = b
-		(*simplex)[1] = a
-		*simplex = (*simplex)[:2]
+		simplex.Points[0] = b
+		simplex.Points[1] = a
+		simplex.Count = 2
 		return line(simplex, direction)
 	}
 
@@ -221,10 +237,9 @@ func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
 	// Region AB (edge)
 	abPerp := ab.Cross(abc)
 	if abPerp.Dot(ao) > 0 {
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = a
-		(*simplex)[1] = b
-		*simplex = (*simplex)[:2]
+		simplex.Points[0] = b
+		simplex.Points[1] = a
+		simplex.Count = 2
 		*direction = ab.Cross(ao).Cross(ab)
 		return false
 	}
@@ -232,10 +247,9 @@ func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
 	// Region AC (edge)
 	acPerp := abc.Cross(ac)
 	if acPerp.Dot(ao) > 0 {
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = a
-		(*simplex)[1] = c
-		*simplex = (*simplex)[:2]
+		simplex.Points[0] = c
+		simplex.Points[1] = a
+		simplex.Count = 2
 		*direction = ac.Cross(ao).Cross(ac)
 		return false
 	}
@@ -246,11 +260,10 @@ func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
 		*direction = abc
 	} else {
 		// Below, reverse order to maintain correct orientation
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = a
-		(*simplex)[1] = c
-		(*simplex)[2] = b
-		*simplex = (*simplex)[:3]
+		simplex.Points[0] = a
+		simplex.Points[1] = c
+		simplex.Points[2] = b
+		simplex.Count = 3
 		*direction = abc.Mul(-1)
 	}
 
@@ -273,10 +286,10 @@ func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
 //
 // Returns true if origin is inside tetrahedron, false otherwise.
 func tetrahedron(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := (*simplex)[3] // Most recent point
-	b := (*simplex)[2]
-	c := (*simplex)[1]
-	d := (*simplex)[0]
+	a := simplex.Points[3] // Most recent point
+	b := simplex.Points[2]
+	c := simplex.Points[1]
+	d := simplex.Points[0]
 
 	ab := b.Sub(a)
 	ac := c.Sub(a)
@@ -307,12 +320,12 @@ func tetrahedron(simplex *Simplex, direction *mgl64.Vec3) bool {
 		adb = adb.Mul(-1)
 	}
 
-	// Degenerated
+	// Check for degenerate tetrahedron
 	if abc.LenSqr() < 1e-10 || acd.LenSqr() < 1e-10 || adb.LenSqr() < 1e-10 {
-		(*simplex)[0] = c
-		(*simplex)[1] = b
-		(*simplex)[2] = a
-		*simplex = (*simplex)[:3]
+		simplex.Points[0] = c
+		simplex.Points[1] = b
+		simplex.Points[2] = a
+		simplex.Count = 3
 		return triangle(simplex, direction)
 	}
 
@@ -321,31 +334,28 @@ func tetrahedron(simplex *Simplex, direction *mgl64.Vec3) bool {
 
 	// Face ABC
 	if abc.Dot(ao) > 0 {
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = c
-		(*simplex)[1] = b
-		(*simplex)[2] = a
-		*simplex = (*simplex)[:3]
+		simplex.Points[0] = c
+		simplex.Points[1] = b
+		simplex.Points[2] = a
+		simplex.Count = 3
 		return triangle(simplex, direction)
 	}
 
 	// Face ACD
 	if acd.Dot(ao) > 0 {
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = d
-		(*simplex)[1] = c
-		(*simplex)[2] = a
-		*simplex = (*simplex)[:3]
+		simplex.Points[0] = d
+		simplex.Points[1] = c
+		simplex.Points[2] = a
+		simplex.Count = 3
 		return triangle(simplex, direction)
 	}
 
 	// Face ADB
 	if adb.Dot(ao) > 0 {
-		// OPTIMIZE: Reuse backing array
-		(*simplex)[0] = b
-		(*simplex)[1] = d
-		(*simplex)[2] = a
-		*simplex = (*simplex)[:3]
+		simplex.Points[0] = b
+		simplex.Points[1] = d
+		simplex.Points[2] = a
+		simplex.Count = 3
 		return triangle(simplex, direction)
 	}
 
