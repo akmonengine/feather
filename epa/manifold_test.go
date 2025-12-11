@@ -162,70 +162,6 @@ func TestLineIntersectPlane(t *testing.T) {
 	}
 }
 
-// TestIsLargePlane tests large plane detection
-func TestIsLargePlane(t *testing.T) {
-	builder := &ManifoldBuilder{}
-
-	tests := []struct {
-		name     string
-		feature  [8]mgl64.Vec3
-		count    int
-		expected bool
-	}{
-		{
-			name:     "not_4_points",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}},
-			count:    3,
-			expected: false,
-		},
-		{
-			name:     "zero_points",
-			feature:  [8]mgl64.Vec3{},
-			count:    0,
-			expected: false,
-		},
-		{
-			name:     "small_feature",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}},
-			count:    4,
-			expected: false,
-		},
-		{
-			name:     "large_plane_detected",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {200, 0, 0}, {0, 200, 0}, {200, 200, 0}},
-			count:    4,
-			expected: true,
-		},
-		{
-			name:     "boundary_case_exactly_100",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {100, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-			count:    4,
-			expected: false, // Should be > 100, not >= 100
-		},
-		{
-			name:     "boundary_case_just_over_100",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {100.01, 0, 0}, {0, 0, 0}, {0, 0, 0}},
-			count:    4,
-			expected: true,
-		},
-		{
-			name:     "first_pair_large",
-			feature:  [8]mgl64.Vec3{{0, 0, 0}, {150, 0, 0}, {1, 0, 0}, {1, 0, 0}},
-			count:    4,
-			expected: true, // Early exit on i=0, j=1
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := builder.isLargePlane(&tt.feature, tt.count)
-			if result != tt.expected {
-				t.Errorf("isLargePlane() = %v, want %v", result, tt.expected)
-			}
-		})
-	}
-}
-
 // TestComputeCenter tests center computation
 func TestComputeCenter(t *testing.T) {
 	builder := &ManifoldBuilder{}
@@ -351,128 +287,6 @@ func TestTransformFeatureNormalShapes(t *testing.T) {
 	})
 }
 
-// TestTransformFeaturePlane tests plane special case with large corners
-func TestTransformFeaturePlane(t *testing.T) {
-	builder := &ManifoldBuilder{}
-
-	t.Run("horizontal_plane", func(t *testing.T) {
-		input := [8]mgl64.Vec3{} // Input ignored for Plane
-		inputCount := 0
-
-		transform := actor.Transform{
-			Position: mgl64.Vec3{0, 0, 0},
-			Rotation: mgl64.QuatIdent(),
-		}
-
-		plane := &actor.Plane{
-			Normal:   mgl64.Vec3{0, 1, 0},
-			Distance: 0,
-		}
-
-		var output [8]mgl64.Vec3
-		var outputCount int
-
-		builder.transformFeature(&input, inputCount, transform, plane, &output, &outputCount)
-
-		// Should generate exactly 4 corners
-		if outputCount != 4 {
-			t.Errorf("outputCount = %d, want 4", outputCount)
-		}
-
-		// Points should form a large square (size 1000.0)
-		// Center should be at plane.Normal * -plane.Distance = {0,0,0}
-		// Corners should be ±1000 in tangent directions
-
-		// Check all points are roughly 1000 units from center
-		center := mgl64.Vec3{0, 0, 0}
-		for i := 0; i < outputCount; i++ {
-			dist := output[i].Sub(center).Len()
-			expectedDist := 1000.0 * math.Sqrt(2) // Diagonal of square
-			if math.Abs(dist-expectedDist) > 1.0 {
-				t.Errorf("point[%d] distance from center = %v, want ~%v", i, dist, expectedDist)
-			}
-
-			// All points should be on the plane (Y=0)
-			if math.Abs(output[i].Y()) > 1e-6 {
-				t.Errorf("point[%d].Y = %v, should be on plane Y=0", i, output[i].Y())
-			}
-		}
-	})
-
-	t.Run("vertical_plane_x", func(t *testing.T) {
-		input := [8]mgl64.Vec3{}
-		inputCount := 0
-
-		transform := actor.Transform{
-			Position: mgl64.Vec3{0, 0, 0},
-			Rotation: mgl64.QuatIdent(),
-		}
-
-		plane := &actor.Plane{
-			Normal:   mgl64.Vec3{1, 0, 0},
-			Distance: 0,
-		}
-
-		var output [8]mgl64.Vec3
-		var outputCount int
-
-		builder.transformFeature(&input, inputCount, transform, plane, &output, &outputCount)
-
-		if outputCount != 4 {
-			t.Errorf("outputCount = %d, want 4", outputCount)
-		}
-
-		// All points should be on the plane (X=0)
-		for i := 0; i < outputCount; i++ {
-			if math.Abs(output[i].X()) > 1e-6 {
-				t.Errorf("point[%d].X = %v, should be on plane X=0", i, output[i].X())
-			}
-		}
-	})
-
-	t.Run("diagonal_plane", func(t *testing.T) {
-		input := [8]mgl64.Vec3{}
-		inputCount := 0
-
-		normal := mgl64.Vec3{1, 1, 1}.Normalize()
-
-		transform := actor.Transform{
-			Position: mgl64.Vec3{0, 0, 0},
-			Rotation: mgl64.QuatIdent(),
-		}
-
-		plane := &actor.Plane{
-			Normal:   normal,
-			Distance: 0,
-		}
-
-		var output [8]mgl64.Vec3
-		var outputCount int
-
-		builder.transformFeature(&input, inputCount, transform, plane, &output, &outputCount)
-
-		if outputCount != 4 {
-			t.Errorf("outputCount = %d, want 4", outputCount)
-		}
-
-		// All points should be on the plane: dot(point, normal) = 0
-		for i := 0; i < outputCount; i++ {
-			dotProduct := output[i].Dot(normal)
-			if math.Abs(dotProduct) > 1e-4 {
-				t.Errorf("point[%d] not on plane: dot = %v", i, dotProduct)
-			}
-		}
-
-		// Points should be large (~ 1000 units from origin)
-		for i := 0; i < outputCount; i++ {
-			dist := output[i].Len()
-			if dist < 1000.0 {
-				t.Errorf("point[%d] distance = %v, expected > 1000", i, dist)
-			}
-		}
-	})
-}
-
 // TestClipPolygonAgainstPlane tests Sutherland-Hodgman single plane clipping
 func TestClipPolygonAgainstPlane(t *testing.T) {
 	builder := &ManifoldBuilder{}
@@ -571,40 +385,6 @@ func TestClipPolygonAgainstPlane(t *testing.T) {
 // TestClipIncidentAgainstReference tests multi-edge Sutherland-Hodgman with buffer ping-pong
 func TestClipIncidentAgainstReference(t *testing.T) {
 	builder := &ManifoldBuilder{}
-
-	t.Run("large_plane_detected", func(t *testing.T) {
-		builder.Reset()
-
-		// Create a large plane reference
-		var reference [8]mgl64.Vec3
-		reference[0] = mgl64.Vec3{0, 0, 0}
-		reference[1] = mgl64.Vec3{200, 0, 0}
-		reference[2] = mgl64.Vec3{200, 200, 0}
-		reference[3] = mgl64.Vec3{0, 200, 0}
-		referenceCount := 4
-
-		// Incident polygon
-		var incident [8]mgl64.Vec3
-		incident[0] = mgl64.Vec3{1, 0, 0}
-		incident[1] = mgl64.Vec3{2, 0, 0}
-		incidentCount := 2
-
-		normal := mgl64.Vec3{0, 0, 1}
-
-		count := builder.clipIncidentAgainstReference(&incident, incidentCount, &reference, referenceCount, normal)
-
-		// Should copy incident to clipBuffer1 unchanged
-		if count != incidentCount {
-			t.Errorf("count = %d, want %d", count, incidentCount)
-		}
-
-		// Verify clipBuffer1 has the incident points
-		for i := 0; i < incidentCount; i++ {
-			if !vec3ApproxEqual(builder.clipBuffer1[i], incident[i], 1e-6) {
-				t.Errorf("clipBuffer1[%d] = %v, want %v", i, builder.clipBuffer1[i], incident[i])
-			}
-		}
-	})
 
 	t.Run("insufficient_reference", func(t *testing.T) {
 		builder.Reset()
@@ -899,6 +679,216 @@ func TestReduceTo4Points(t *testing.T) {
 		}
 		if builder.tempPointsCount < 1 {
 			t.Errorf("tempPointsCount = %d, want >= 1", builder.tempPointsCount)
+		}
+	})
+}
+
+// TestGeneratePlaneManifold tests the specialized plane manifold generator
+func TestGeneratePlaneManifold(t *testing.T) {
+	t.Run("box_on_plane_4_corners", func(t *testing.T) {
+		// Box sitting flat on horizontal plane - should get 4 contact points
+		box := &actor.Box{
+			HalfExtents: mgl64.Vec3{1, 1, 1},
+		}
+		boxBody := &actor.RigidBody{
+			Shape: box,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0.9, 0}, // Slightly penetrating plane
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		plane := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0}, // Horizontal plane
+			Distance: 0,
+		}
+		planeBody := &actor.RigidBody{
+			Shape: plane,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		normal := mgl64.Vec3{0, 1, 0}
+		depth := 0.1
+
+		points := GenerateManifold(boxBody, planeBody, normal, depth)
+
+		// Should get 4 contact points (bottom corners of box)
+		if len(points) != 4 {
+			t.Errorf("len(points) = %d, want 4", len(points))
+		}
+
+		// All points should have correct penetration depth
+		for i, p := range points {
+			if math.Abs(p.Penetration-depth) > 1e-6 {
+				t.Errorf("points[%d].Penetration = %v, want %v", i, p.Penetration, depth)
+			}
+		}
+	})
+
+	t.Run("box_on_plane_4_corners_inversed", func(t *testing.T) {
+		// Box sitting flat on horizontal plane - should get 4 contact points
+		box := &actor.Box{
+			HalfExtents: mgl64.Vec3{1, 1, 1},
+		}
+		boxBody := &actor.RigidBody{
+			Shape: box,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0.9, 0}, // Slightly penetrating plane
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		plane := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0}, // Horizontal plane
+			Distance: 0,
+		}
+		planeBody := &actor.RigidBody{
+			Shape: plane,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		normal := mgl64.Vec3{0, 1, 0}
+		depth := 0.1
+
+		points := GenerateManifold(planeBody, boxBody, normal, depth)
+
+		// Should get 4 contact points (bottom corners of box)
+		if len(points) != 4 {
+			t.Errorf("len(points) = %d, want 4", len(points))
+		}
+
+		// All points should have correct penetration depth
+		for i, p := range points {
+			if math.Abs(p.Penetration-depth) > 1e-6 {
+				t.Errorf("points[%d].Penetration = %v, want %v", i, p.Penetration, depth)
+			}
+		}
+	})
+
+	t.Run("sphere_on_plane", func(t *testing.T) {
+		// Sphere on plane - should get 1 contact point
+		sphere := &actor.Sphere{Radius: 1.0}
+		sphereBody := &actor.RigidBody{
+			Shape: sphere,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0.9, 0}, // Penetrating plane
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		plane := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0},
+			Distance: 0,
+		}
+		planeBody := &actor.RigidBody{
+			Shape: plane,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		normal := mgl64.Vec3{0, 1, 0}
+		depth := 0.1
+
+		points := GenerateManifold(sphereBody, planeBody, normal, depth)
+
+		// Should get 1 contact point
+		if len(points) != 1 {
+			t.Errorf("len(points) = %d, want 1", len(points))
+		}
+
+		if math.Abs(points[0].Penetration-depth) > 1e-6 {
+			t.Errorf("Penetration = %v, want %v", points[0].Penetration, depth)
+		}
+	})
+
+	t.Run("large_box_on_plane_no_size_limit", func(t *testing.T) {
+		// CRITICAL TEST: Box with 5000 unit edges on plane
+		// This would fail with old approach (1000 unit limit)
+
+		// Huge box - 5000 units on each side!
+		box := &actor.Box{
+			HalfExtents: mgl64.Vec3{2500, 100, 2500},
+		}
+		boxBody := &actor.RigidBody{
+			Shape: box,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 90, 0}, // Penetrating plane
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		plane := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0},
+			Distance: 0,
+		}
+		planeBody := &actor.RigidBody{
+			Shape: plane,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		normal := mgl64.Vec3{0, 1, 0}
+		depth := 10.0
+
+		points := GenerateManifold(boxBody, planeBody, normal, depth)
+
+		// Should get 4 contact points (no fall-through!)
+		if len(points) != 4 {
+			t.Errorf("len(points) = %d, want 4 (large box should not fall through infinite plane!)", len(points))
+		}
+
+		// All points should have correct penetration
+		for i, p := range points {
+			if math.Abs(p.Penetration-depth) > 1e-6 {
+				t.Errorf("points[%d].Penetration = %v, want %v", i, p.Penetration, depth)
+			}
+		}
+	})
+
+	t.Run("plane_plane_collision", func(t *testing.T) {
+		// Edge case: two parallel planes
+		planeA := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0},
+			Distance: 0,
+		}
+		planeBodyA := &actor.RigidBody{
+			Shape: planeA,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		planeB := &actor.Plane{
+			Normal:   mgl64.Vec3{0, 1, 0},
+			Distance: 1.0,
+		}
+		planeBodyB := &actor.RigidBody{
+			Shape: planeB,
+			Transform: actor.Transform{
+				Position: mgl64.Vec3{0, 0, 0},
+				Rotation: mgl64.QuatIdent(),
+			},
+		}
+
+		normal := mgl64.Vec3{0, 1, 0}
+		depth := 1.0
+
+		points := GenerateManifold(planeBodyA, planeBodyB, normal, depth)
+
+		// Should get 1 fallback contact point
+		if len(points) != 1 {
+			t.Errorf("len(points) = %d, want 1", len(points))
 		}
 	})
 }
