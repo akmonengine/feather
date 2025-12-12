@@ -100,7 +100,9 @@ func (sg *SpatialGrid) Clear() {
 
 func (sg *SpatialGrid) SortCells() {
 	for i := range sg.cells {
-		sort.Ints(sg.cells[i].bodyIndices)
+		if len(sg.cells[i].bodyIndices) > 1 {
+			sort.Ints(sg.cells[i].bodyIndices)
+		}
 	}
 }
 
