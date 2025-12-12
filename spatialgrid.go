@@ -34,6 +34,7 @@ type SpatialGrid struct {
 	cellSize float64
 	cells    []Cell
 	cellMask int
+	planes   Cell
 }
 
 // ============================================================================
@@ -73,6 +74,11 @@ func nextPowerOfTwo(n int) int {
 
 // Insert - Insère un body dans toutes les cellules qu'il occupe
 func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
+	if _, ok := body.Shape.(*actor.Plane); ok {
+		sg.planes.bodyIndices = append(sg.planes.bodyIndices, bodyIndex)
+		return
+	}
+
 	aabb := body.Shape.GetAABB()
 	minCell := sg.worldToCell(aabb.Min)
 	maxCell := sg.worldToCell(aabb.Max)
@@ -93,6 +99,8 @@ func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
 }
 
 func (sg *SpatialGrid) Clear() {
+	sg.planes.bodyIndices = sg.planes.bodyIndices[:0]
+
 	for i := range sg.cells {
 		sg.cells[i].bodyIndices = sg.cells[i].bodyIndices[:0]
 	}
@@ -185,6 +193,9 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 
 			seen := make([]bool, len(bodies))
 			for bodyIdx := start; bodyIdx < end; bodyIdx++ {
+				if _, isPlane := bodies[bodyIdx].Shape.(*actor.Plane); isPlane {
+					continue
+				}
 				copy(seen, clearSeen)
 
 				bodyA := bodies[bodyIdx]
@@ -216,19 +227,16 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 									continue
 								}
 
-								_, aIsPlane := bodyA.Shape.(*actor.Plane)
-								_, bIsPlane := bodyB.Shape.(*actor.Plane)
-								if aIsPlane || bIsPlane {
-									pairsChan <- Pair{BodyA: bodyA, BodyB: bodyB}
-									continue
-								}
-
 								if bodyA.Shape.GetAABB().Overlaps(bodyB.Shape.GetAABB()) {
 									pairsChan <- Pair{BodyA: bodyA, BodyB: bodyB}
 								}
 							}
 						}
 					}
+				}
+
+				for _, planeIdx := range sg.planes.bodyIndices {
+					pairsChan <- Pair{BodyA: bodies[planeIdx], BodyB: bodyA}
 				}
 			}
 		}(startIdx, endIdx)
