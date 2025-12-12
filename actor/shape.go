@@ -304,8 +304,8 @@ type Plane struct {
 // This method is bypassed, because planes are automatically included from the broad phase to the narrow phase
 // We use specific functions for plane / convex shapes collision
 func (p *Plane) ComputeAABB(transform Transform) {
-	const thickness = 0.0            // épaisseur de détection du plan
-	const infinity = math.MaxFloat64 // grande valeur pour les dimensions infinies
+	const thickness = 10.0 // épaisseur de détection du plan
+	const infinity = 100.0 // grande valeur pour les dimensions infinies
 
 	// Point on the plane closest to the origin
 	// Assumes p.Normal is normalized

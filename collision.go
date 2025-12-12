@@ -32,62 +32,22 @@ type CollisionPair struct {
 // BroadPhase performs broad-phase collision detection using AABB overlap tests
 // It returns pairs of bodies whose AABBs overlap and might be colliding
 // This is an O(n²) brute-force approach suitable for small numbers of bodies
-
-func BroadPhase(bodies []*actor.RigidBody) <-chan CollisionPair {
-	// Brute force: test all pairs
-	checkingPairs := make(chan CollisionPair, WORKERS*4)
-
-	var wg sync.WaitGroup
-	n := len(bodies)
-	chunkSize := (n + WORKERS - 1) / WORKERS
-
-	for workerID := 0; workerID < WORKERS; workerID++ {
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for i := start; i < end; i++ {
-				bodyA := bodies[i]
-
-				for j := i + 1; j < n; j++ {
-					bodyB := bodies[j]
-
-					// Skip if both bodies are static (static-static collisions don't matter)
-					if bodyA.BodyType == actor.BodyTypeStatic && bodyB.BodyType == actor.BodyTypeStatic {
-						continue
-					}
-					if bodyA.IsSleeping && bodyB.IsSleeping {
-						continue
-					}
-
-					_, aIsPlane := bodyA.Shape.(*actor.Plane)
-					_, bIsPlane := bodyB.Shape.(*actor.Plane)
-					if aIsPlane || bIsPlane {
-						checkingPairs <- CollisionPair{BodyA: bodyA, BodyB: bodyB}
-						continue
-					}
-
-					aabbA := bodyA.Shape.GetAABB()
-					aabbB := bodyB.Shape.GetAABB()
-					if aabbA.Overlaps(aabbB) {
-						checkingPairs <- CollisionPair{BodyA: bodyA, BodyB: bodyB}
-					}
-				}
-			}
-		}(workerID*chunkSize, min((workerID+1)*chunkSize, n))
+func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody) <-chan Pair {
+	spatialGrid.Clear()
+	for i, body := range bodies {
+		spatialGrid.Insert(i, body)
 	}
+	spatialGrid.SortCells()
 
-	go func() {
-		wg.Wait()
-		close(checkingPairs)
-	}()
+	checkingPairs := spatialGrid.FindPairsParallel(bodies, WORKERS)
 
 	return checkingPairs
 }
 
-func NarrowPhase(pairs <-chan CollisionPair) []*constraint.ContactConstraint {
+func NarrowPhase(pairs <-chan Pair) []*constraint.ContactConstraint {
 	// Dispatcher: separate pairs with planes, and normal convex objects
-	planePairs := make(chan CollisionPair, WORKERS)
-	gjkPairs := make(chan CollisionPair, WORKERS)
+	planePairs := make(chan Pair, WORKERS)
+	gjkPairs := make(chan Pair, WORKERS)
 
 	go func() {
 		defer close(planePairs)
@@ -140,10 +100,11 @@ func NarrowPhase(pairs <-chan CollisionPair) []*constraint.ContactConstraint {
 	for c := range allContacts {
 		contacts = append(contacts, c)
 	}
+	//fmt.Println("COUNT PAIRS", len(contacts))
 	return contacts
 }
 
-func GJK(pairChan <-chan CollisionPair) <-chan CollisionPair {
+func GJK(pairChan <-chan Pair) <-chan CollisionPair {
 	collisionChan := make(chan CollisionPair, WORKERS)
 
 	go func() {
@@ -160,8 +121,11 @@ func GJK(pairChan <-chan CollisionPair) <-chan CollisionPair {
 					simplex.Reset()
 
 					if collision := gjk.GJK(p.BodyA, p.BodyB, simplex); collision {
-						p.simplex = simplex
-						collisionChan <- p
+						collisionChan <- CollisionPair{
+							BodyA:   p.BodyA,
+							BodyB:   p.BodyB,
+							simplex: simplex,
+						}
 					} else {
 						gjk.SimplexPool.Put(simplex)
 					}
@@ -203,7 +167,7 @@ func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
 	return ch
 }
 
-func collidePlane(pairs <-chan CollisionPair) <-chan *constraint.ContactConstraint {
+func collidePlane(pairs <-chan Pair) <-chan *constraint.ContactConstraint {
 	ch := make(chan *constraint.ContactConstraint, WORKERS)
 
 	go func() {

@@ -6,14 +6,15 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const WORKERS = 10
+const WORKERS = 8
 
 type World struct {
 	// List of all rigid bodies in the world
 	Bodies []*actor.RigidBody
 	// Gravity acceleration (m/s², or N/kg)
-	Gravity  mgl64.Vec3
-	Substeps int
+	Gravity     mgl64.Vec3
+	Substeps    int
+	SpatialGrid *SpatialGrid
 }
 
 // AddBody adds a rigid body to the world
@@ -39,14 +40,12 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 func (w *World) Step(dt float64) {
 	h := dt / float64(w.Substeps)
 
-	cs := make([]*constraint.ContactConstraint, 0)
-
 	for range w.Substeps {
 		w.integrate(h)
 
 		// Phase 2.0: Collision pair finding - Broad phase
 		// Phase 2.1: Collision pair finding - narrow phase
-		constraints := NarrowPhase(BroadPhase(w.Bodies))
+		constraints := NarrowPhase(BroadPhase(w.SpatialGrid, w.Bodies))
 
 		// Phase 3: Solver, only one iteration is required thanks to substeps
 		w.solvePosition(h, constraints)
@@ -59,8 +58,6 @@ func (w *World) Step(dt float64) {
 		w.solveVelocity(h, constraints)
 
 		w.trySleep(h)
-
-		cs = cs[:0]
 	}
 }
 
