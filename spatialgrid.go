@@ -168,6 +168,7 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 		bodiesPerWorker = 1
 	}
 
+	clearSeen := make([]bool, len(bodies))
 	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
 
@@ -177,7 +178,6 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 			endIdx = len(bodies)
 		}
 
-		clearSeen := make([]bool, len(bodies))
 		go func(start, end int) {
 			defer wg.Done()
 
@@ -239,10 +239,6 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 
 	return pairsChan
 }
-
-// ============================================================================
-// Méthodes privées
-// ============================================================================
 
 // worldToCell - Convertit une position monde en coordonnées de cellule
 func (sg *SpatialGrid) worldToCell(pos mgl64.Vec3) CellKey {
