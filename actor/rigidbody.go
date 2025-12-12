@@ -111,7 +111,7 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 func (rb *RigidBody) TrySleep(dt float64, timethreshold float64, velocityThreshold float64) {
 	if rb.Velocity.Len() < velocityThreshold && rb.AngularVelocity.Len() < velocityThreshold {
 		rb.SleepTimer += dt // Incrémente le timer
-		if rb.SleepTimer >= timethreshold {
+		if !rb.IsSleeping && rb.SleepTimer >= timethreshold {
 			rb.Sleep()
 		}
 	} else {
