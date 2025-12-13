@@ -196,9 +196,14 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 				if _, isPlane := bodies[bodyIdx].Shape.(*actor.Plane); isPlane {
 					continue
 				}
-				copy(seen, clearSeen)
-
 				bodyA := bodies[bodyIdx]
+
+				// write all planes/body collisions
+				for _, planeId := range sg.planes.bodyIndices {
+					pairsChan <- Pair{BodyA: bodies[planeId], BodyB: bodyA}
+				}
+
+				copy(seen, clearSeen)
 
 				// Trouver cellules occupées par bodyA
 				minCell := sg.worldToCell(bodyA.Shape.GetAABB().Min)
@@ -233,10 +238,6 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 							}
 						}
 					}
-				}
-
-				for _, planeIdx := range sg.planes.bodyIndices {
-					pairsChan <- Pair{BodyA: bodies[planeIdx], BodyB: bodyA}
 				}
 			}
 		}(startIdx, endIdx)
