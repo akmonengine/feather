@@ -98,8 +98,9 @@ func TestGJK_Spheres_Intersecting(t *testing.T) {
 	t.Run("overlapping spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{1.5, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision between overlapping spheres")
 		}
@@ -108,8 +109,9 @@ func TestGJK_Spheres_Intersecting(t *testing.T) {
 	t.Run("touching spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{2.0, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		// Touching should be detected as collision
 		if !result {
 			t.Error("Expected collision for touching spheres")
@@ -119,8 +121,9 @@ func TestGJK_Spheres_Intersecting(t *testing.T) {
 	t.Run("identical position spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for spheres at identical positions")
 		}
@@ -131,8 +134,9 @@ func TestGJK_Spheres_Separated(t *testing.T) {
 	t.Run("far apart spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{10, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if result {
 			t.Error("Expected no collision between separated spheres")
 		}
@@ -141,8 +145,9 @@ func TestGJK_Spheres_Separated(t *testing.T) {
 	t.Run("barely separated spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{2.1, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if result {
 			t.Error("Expected no collision for barely separated spheres")
 		}
@@ -162,8 +167,9 @@ func TestGJK_Spheres_Separated(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 				b := createSphereBody(tc.positionB, 1.0)
+				simplex := &Simplex{}
 
-				result, _ := GJK(a, b)
+				result := GJK(a, b, simplex)
 				if result {
 					t.Errorf("Expected no collision for %s", tc.name)
 				}
@@ -178,8 +184,9 @@ func TestGJK_Boxes_Intersecting(t *testing.T) {
 	t.Run("overlapping boxes", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		b := createBoxBody(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision between overlapping boxes")
 		}
@@ -188,8 +195,9 @@ func TestGJK_Boxes_Intersecting(t *testing.T) {
 	t.Run("touching boxes", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		b := createBoxBody(mgl64.Vec3{2.0, 0, 0}, mgl64.Vec3{1, 1, 1})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for touching boxes")
 		}
@@ -198,8 +206,9 @@ func TestGJK_Boxes_Intersecting(t *testing.T) {
 	t.Run("box completely inside another", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{2, 2, 2})
 		b := createBoxBody(mgl64.Vec3{0, 1, 1}, mgl64.Vec3{1, 1, 1})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for box inside another box")
 		}
@@ -210,8 +219,9 @@ func TestGJK_Boxes_Separated(t *testing.T) {
 	t.Run("far apart boxes", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		b := createBoxBody(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if result {
 			t.Error("Expected no collision between separated boxes")
 		}
@@ -220,8 +230,9 @@ func TestGJK_Boxes_Separated(t *testing.T) {
 	t.Run("barely separated boxes", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		b := createBoxBody(mgl64.Vec3{2.1, 0, 0}, mgl64.Vec3{1, 1, 1})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if result {
 			t.Error("Expected no collision for barely separated boxes")
 		}
@@ -234,8 +245,9 @@ func TestGJK_MixedShapes_Intersecting(t *testing.T) {
 	t.Run("sphere inside box", func(t *testing.T) {
 		box := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{2, 2, 2})
 		sphere := createSphereBody(mgl64.Vec3{0, 0, 0}, 0.5)
+		simplex := &Simplex{}
 
-		result, _ := GJK(box, sphere)
+		result := GJK(box, sphere, simplex)
 		if !result {
 			t.Error("Expected collision for sphere inside box")
 		}
@@ -244,8 +256,9 @@ func TestGJK_MixedShapes_Intersecting(t *testing.T) {
 	t.Run("sphere overlapping box corner", func(t *testing.T) {
 		box := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		sphere := createSphereBody(mgl64.Vec3{1.5, 1.5, 1.5}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(box, sphere)
+		result := GJK(box, sphere, simplex)
 		if !result {
 			t.Error("Expected collision for sphere overlapping box corner")
 		}
@@ -256,8 +269,9 @@ func TestGJK_MixedShapes_Separated(t *testing.T) {
 	t.Run("sphere outside box", func(t *testing.T) {
 		box := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		sphere := createSphereBody(mgl64.Vec3{5, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(box, sphere)
+		result := GJK(box, sphere, simplex)
 		if result {
 			t.Error("Expected no collision for sphere outside box")
 		}
@@ -266,8 +280,9 @@ func TestGJK_MixedShapes_Separated(t *testing.T) {
 	t.Run("sphere near box edge but not touching", func(t *testing.T) {
 		box := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		sphere := createSphereBody(mgl64.Vec3{2.5, 0, 0}, 0.4)
+		simplex := &Simplex{}
 
-		result, _ := GJK(box, sphere)
+		result := GJK(box, sphere, simplex)
 		if result {
 			t.Error("Expected no collision for sphere near but not touching box")
 		}
@@ -280,8 +295,9 @@ func TestGJK_EdgeCases(t *testing.T) {
 	t.Run("very small spheres overlapping", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 0.001)
 		b := createSphereBody(mgl64.Vec3{0.0015, 0, 0}, 0.001)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for very small overlapping spheres")
 		}
@@ -290,8 +306,9 @@ func TestGJK_EdgeCases(t *testing.T) {
 	t.Run("very large spheres", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1000.0)
 		b := createSphereBody(mgl64.Vec3{1500, 0, 0}, 1000.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for very large overlapping spheres")
 		}
@@ -300,8 +317,9 @@ func TestGJK_EdgeCases(t *testing.T) {
 	t.Run("different sized boxes overlapping", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 		b := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{5, 5, 5})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for different sized boxes at same position")
 		}
@@ -314,9 +332,10 @@ func TestGJK_ZeroVectorDirection(t *testing.T) {
 	t.Run("identical positions trigger fallback", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
 		// This should trigger the fallback direction (1,0,0)
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for spheres at identical positions with zero initial direction")
 		}
@@ -325,9 +344,10 @@ func TestGJK_ZeroVectorDirection(t *testing.T) {
 	t.Run("extremely close positions trigger fallback", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		b := createSphereBody(mgl64.Vec3{1e-15, 0, 0}, 1.0)
+		simplex := &Simplex{}
 
 		// This should trigger the fallback direction due to near-zero initial direction
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for spheres with extremely close positions")
 		}
@@ -340,8 +360,9 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 		// Separation distance should be exactly at tolerance threshold
 		b := createSphereBody(mgl64.Vec3{2.0000001, 0, 0}, 1.0) // 2.0 + 1e-7
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if result {
 			t.Error("Expected no collision for spheres separated by exactly 1e-8")
 		}
@@ -350,8 +371,9 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 	t.Run("extremely large shapes (1e10)", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1e10)
 		b := createSphereBody(mgl64.Vec3{1.5e10, 0, 0}, 1e10)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for extremely large overlapping spheres")
 		}
@@ -360,8 +382,9 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 	t.Run("extremely small shapes (1e-10)", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1e-10)
 		b := createSphereBody(mgl64.Vec3{1.5e-10, 0, 0}, 1e-10)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for extremely small overlapping spheres")
 		}
@@ -372,10 +395,13 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 func TestGJK_DegenerateSimplex(t *testing.T) {
 	t.Run("colinear points in tetrahedron", func(t *testing.T) {
 		simplex := Simplex{
-			{0, 0, 0},
-			{1, 0, 0},
-			{2, 0, 0},
-			{3, 0, 0},
+			Points: [4]mgl64.Vec3{
+				{0, 0, 0},
+				{1, 0, 0},
+				{2, 0, 0},
+				{3, 0, 0},
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 1, 0}
 
@@ -388,10 +414,13 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 
 	t.Run("identical points in simplex", func(t *testing.T) {
 		simplex := Simplex{
-			{0, 0, 0},
-			{0, 0, 0},
-			{1, 0, 0},
-			{0, 1, 0},
+			Points: [4]mgl64.Vec3{
+				{0, 0, 0},
+				{0, 0, 0},
+				{1, 0, 0},
+				{0, 1, 0},
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -404,8 +433,13 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 
 	t.Run("zero-length edge in line", func(t *testing.T) {
 		simplex := Simplex{
-			{1e-15, 0, 0},
-			{1e-15, 1e-15, 0},
+			Points: [4]mgl64.Vec3{
+				{1e-15, 0, 0},
+				{1e-15, 1e-15, 0},
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
 		}
 		direction := mgl64.Vec3{0, 1, 0}
 
@@ -429,10 +463,13 @@ func TestGJK_TetrahedronFaceNormal(t *testing.T) {
 
 		// Create a tetrahedron with face ABC at z=1e-12 and origin at (0,0,0)
 		simplex := Simplex{
-			{1, 1, -1e-12}, // D
-			{1, 0, 1e-12},  // C
-			{0, 1, 1e-12},  // B
-			{0, 0, 1e-12},  // A
+			Points: [4]mgl64.Vec3{
+				{1, 1, -1e-12}, // D
+				{1, 0, 1e-12},  // C
+				{0, 1, 1e-12},  // B
+				{0, 0, 1e-12},  // A
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -446,10 +483,13 @@ func TestGJK_TetrahedronFaceNormal(t *testing.T) {
 		// Create a tetrahedron where one face has a normal with near-zero magnitude
 		// This can happen when three points are nearly colinear
 		simplex := Simplex{
-			{0, 0, 0},
-			{1, 0, 0},
-			{1, 1e-15, 0},
-			{0, 0, 1},
+			Points: [4]mgl64.Vec3{
+				{0, 0, 0},
+				{1, 0, 0},
+				{1, 1e-15, 0},
+				{0, 0, 1},
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -466,8 +506,9 @@ func TestGJK_ZeroVolumeShapes(t *testing.T) {
 	t.Run("zero-radius sphere (point)", func(t *testing.T) {
 		a := createSphereBody(mgl64.Vec3{0, 0, 0}, 0.0)
 		b := createSphereBody(mgl64.Vec3{0, 0, 0}, 0.0)
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for two points at same position")
 		}
@@ -476,8 +517,9 @@ func TestGJK_ZeroVolumeShapes(t *testing.T) {
 	t.Run("zero-extent box (point)", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{0, 0, 0})
 		b := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{0, 0, 0})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for two zero-extent boxes at same position")
 		}
@@ -486,8 +528,9 @@ func TestGJK_ZeroVolumeShapes(t *testing.T) {
 	t.Run("zero-extent box (line)", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 0, 0})
 		b := createBoxBody(mgl64.Vec3{1, 0, 0}, mgl64.Vec3{1, 0, 0})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for two lines touching at endpoint")
 		}
@@ -496,8 +539,9 @@ func TestGJK_ZeroVolumeShapes(t *testing.T) {
 	t.Run("zero-extent box (plane)", func(t *testing.T) {
 		a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 0})
 		b := createBoxBody(mgl64.Vec3{0.5, 0.5, 0}, mgl64.Vec3{1, 1, 0})
+		simplex := &Simplex{}
 
-		result, _ := GJK(a, b)
+		result := GJK(a, b, simplex)
 		if !result {
 			t.Error("Expected collision for two zero-thickness planes overlapping")
 		}
@@ -513,8 +557,13 @@ func TestLine(t *testing.T) {
 	t.Run("origin near line (normal case)", func(t *testing.T) {
 		// Normal case: origin is near the line but not on it
 		simplex := Simplex{
-			{-1, 1, 0}, // B (old point)
-			{1, 1, 0},  // A (most recent point)
+			Points: [4]mgl64.Vec3{
+				{-1, 1, 0}, // B (old point)
+				{1, 1, 0},  // A (most recent point)
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
 		}
 		direction := mgl64.Vec3{0, 1, 0}
 
@@ -524,8 +573,8 @@ func TestLine(t *testing.T) {
 			t.Error("Line not passing through origin should not detect collision")
 		}
 		// Origin is in direction of B, so both points should be kept
-		if len(simplex) != 2 {
-			t.Errorf("Expected simplex length 2, got %d", len(simplex))
+		if simplex.Count != 2 {
+			t.Errorf("Expected simplex length 2, got %d", simplex.Count)
 		}
 	})
 
@@ -533,8 +582,13 @@ func TestLine(t *testing.T) {
 		// Special case: origin is exactly on the line segment AB
 		// This is a degenerate case that indicates collision
 		simplex := Simplex{
-			{-1, 0, 0}, // B (old point)
-			{1, 0, 0},  // A (most recent point)
+			Points: [4]mgl64.Vec3{
+				{-1, 0, 0}, // B (old point)
+				{1, 0, 0},  // A (most recent point)
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
 		}
 		direction := mgl64.Vec3{0, 1, 0}
 
@@ -547,8 +601,13 @@ func TestLine(t *testing.T) {
 
 	t.Run("origin behind point A", func(t *testing.T) {
 		simplex := Simplex{
-			{3, 0, 0}, // B
-			{1, 0, 0}, // A
+			Points: [4]mgl64.Vec3{
+				{3, 0, 0}, // B
+				{1, 0, 0}, // A
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
 		}
 		direction := mgl64.Vec3{-1, 0, 0}
 		result := line(&simplex, &direction)
@@ -556,8 +615,8 @@ func TestLine(t *testing.T) {
 			t.Error("Line should not contain origin")
 		}
 		// Le simplexe doit rester à 2 points
-		if len(simplex) != 2 {
-			t.Errorf("Expected simplex to remain at 2 points, got %d", len(simplex))
+		if simplex.Count != 2 {
+			t.Errorf("Expected simplex to remain at 2 points, got %d", simplex.Count)
 		}
 		// Direction doit pointer vers A
 		if direction.Dot(mgl64.Vec3{-1, 0, 0}) != 1.0 {
@@ -569,9 +628,13 @@ func TestLine(t *testing.T) {
 func TestTriangle(t *testing.T) {
 	t.Run("origin above triangle", func(t *testing.T) {
 		simplex := Simplex{
-			{1, 0, 0},   // C (oldest)
-			{0, 1, 0},   // B
-			{0, 0, 0.5}, // A (most recent)
+			Points: [4]mgl64.Vec3{
+				{1, 0, 0},   // C (oldest)
+				{0, 1, 0},   // B
+				{0, 0, 0.5}, // A (most recent)
+				{0, 0, 0},
+			},
+			Count: 3,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -581,8 +644,8 @@ func TestTriangle(t *testing.T) {
 			t.Error("Triangle should never contain origin in 3D")
 		}
 		// Simplex should remain a triangle (3 points)
-		if len(simplex) != 3 {
-			t.Errorf("Expected simplex to remain triangle (3 points), got %d", len(simplex))
+		if simplex.Count != 3 {
+			t.Errorf("Expected simplex to remain triangle (3 points), got %d", simplex.Count)
 		}
 	})
 
@@ -591,9 +654,13 @@ func TestTriangle(t *testing.T) {
 		// Triangle vertices: A=(2,0,0), B=(0,2,0), C=(3,3,0)
 		// Origin should be in the Voronoi region of edge AB
 		simplex := Simplex{
-			{3, 3, 0}, // C (oldest)
-			{0, 2, 0}, // B
-			{2, 0, 0}, // A (most recent)
+			Points: [4]mgl64.Vec3{
+				{3, 3, 0}, // C (oldest)
+				{0, 2, 0}, // B
+				{2, 0, 0}, // A (most recent)
+				{0, 0, 0},
+			},
+			Count: 3,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -603,8 +670,8 @@ func TestTriangle(t *testing.T) {
 			t.Error("Triangle should never contain origin in 3D")
 		}
 		// Origin is in AB region, so simplex should be reduced to edge AB (2 points)
-		if len(simplex) != 2 {
-			t.Errorf("Expected simplex reduced to edge (2 points), got %d", len(simplex))
+		if simplex.Count != 2 {
+			t.Errorf("Expected simplex reduced to edge (2 points), got %d", simplex.Count)
 		}
 	})
 
@@ -612,9 +679,13 @@ func TestTriangle(t *testing.T) {
 		// Create a proper triangle where origin is in AC edge region
 		// Triangle vertices: A=(2,0,0), B=(3,3,0), C=(0,2,0)
 		simplex := Simplex{
-			{0, 2, 0}, // C (oldest)
-			{3, 3, 0}, // B
-			{2, 0, 0}, // A (most recent)
+			Points: [4]mgl64.Vec3{
+				{0, 2, 0}, // C (oldest)
+				{3, 3, 0}, // B
+				{2, 0, 0}, // A (most recent)
+				{0, 0, 0},
+			},
+			Count: 3,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -624,8 +695,8 @@ func TestTriangle(t *testing.T) {
 			t.Error("Triangle should never contain origin in 3D")
 		}
 		// Origin is in AC region, so simplex should be reduced to edge AC (2 points)
-		if len(simplex) != 2 {
-			t.Errorf("Expected simplex reduced to edge (2 points), got %d", len(simplex))
+		if simplex.Count != 2 {
+			t.Errorf("Expected simplex reduced to edge (2 points), got %d", simplex.Count)
 		}
 	})
 }
@@ -635,10 +706,13 @@ func TestTetrahedron(t *testing.T) {
 		// Create a tetrahedron that actually contains the origin
 		// Using a regular tetrahedron centered near origin
 		simplex := Simplex{
-			{-1, -1, -1}, // D (oldest)
-			{1, 1, -1},   // C
-			{1, -1, 1},   // B
-			{-1, 1, 1},   // A (most recent)
+			Points: [4]mgl64.Vec3{
+				{-1, -1, -1}, // D (oldest)
+				{1, 1, -1},   // C
+				{1, -1, 1},   // B
+				{-1, 1, 1},   // A (most recent)
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -652,10 +726,13 @@ func TestTetrahedron(t *testing.T) {
 	t.Run("origin outside ABC face", func(t *testing.T) {
 		// Tetrahedron with origin clearly outside
 		simplex := Simplex{
-			{5, 5, 5}, // D (oldest)
-			{6, 5, 5}, // C
-			{5, 6, 5}, // B
-			{5, 5, 6}, // A (most recent)
+			Points: [4]mgl64.Vec3{
+				{5, 5, 5}, // D (oldest)
+				{6, 5, 5}, // C
+				{5, 6, 5}, // B
+				{5, 5, 6}, // A (most recent)
+			},
+			Count: 4,
 		}
 		direction := mgl64.Vec3{0, 0, 1}
 
@@ -664,8 +741,8 @@ func TestTetrahedron(t *testing.T) {
 		if result {
 			t.Error("Expected origin to be outside tetrahedron")
 		}
-		if len(simplex) > 3 {
-			t.Errorf("Expected simplex reduced to triangle (3 points), got %d", len(simplex))
+		if simplex.Count > 3 {
+			t.Errorf("Expected simplex reduced to triangle (3 points), got %d", simplex.Count)
 		}
 	})
 }
@@ -675,39 +752,43 @@ func TestTetrahedron(t *testing.T) {
 func BenchmarkGJK_Spheres_Intersecting(b *testing.B) {
 	a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 	body := createSphereBody(mgl64.Vec3{1.5, 0, 0}, 1.0)
+	simplex := &Simplex{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GJK(a, body)
+		GJK(a, body, simplex)
 	}
 }
 
 func BenchmarkGJK_Spheres_Separated(b *testing.B) {
 	a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1.0)
 	body := createSphereBody(mgl64.Vec3{10, 0, 0}, 1.0)
+	simplex := &Simplex{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GJK(a, body)
+		GJK(a, body, simplex)
 	}
 }
 
 func BenchmarkGJK_Boxes_Intersecting(b *testing.B) {
 	a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 	box := createBoxBody(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1})
+	simplex := &Simplex{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GJK(a, box)
+		GJK(a, box, simplex)
 	}
 }
 
 func BenchmarkGJK_MixedShapes(b *testing.B) {
 	box := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
 	sphere := createSphereBody(mgl64.Vec3{1.5, 1.5, 1.5}, 1.0)
+	simplex := &Simplex{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GJK(box, sphere)
+		GJK(box, sphere, simplex)
 	}
 }
