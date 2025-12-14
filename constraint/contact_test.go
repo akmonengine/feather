@@ -48,11 +48,9 @@ func TestContactConstraint_SolvePosition_NoPenetration(t *testing.T) {
 	bodyB := createDynamicBody(mgl64.Vec3{2, 0, 0}, mgl64.Vec3{0, 0, 0}, 1.0)
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.5,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
@@ -82,11 +80,9 @@ func TestContactConstraint_SolvePosition_WithPenetration(t *testing.T) {
 	penetrationDepth := 0.5
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0}, // Normal points from A to B
-		Compliance:  0.0,
-		Restitution: 0.5,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0}, // Normal points from A to B
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{0.75, 0, 0},
@@ -128,11 +124,9 @@ func TestContactConstraint_SolvePosition_EqualMasses(t *testing.T) {
 	penetration := 0.2
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.0,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{0.5, 0, 0},
@@ -160,11 +154,9 @@ func TestContactConstraint_SolvePosition_StaticBody(t *testing.T) {
 	bodyB := createDynamicBody(mgl64.Vec3{1, 0, 0}, mgl64.Vec3{0, 0, 0}, 1.0)
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.0,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{0.5, 0, 0},
@@ -194,11 +186,9 @@ func TestContactConstraint_SolvePosition_BothStatic(t *testing.T) {
 	bodyB := createStaticBody(mgl64.Vec3{1, 0, 0})
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.0,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{0.5, 0, 0},
@@ -226,11 +216,9 @@ func TestContactConstraint_SolveVelocity_NoRelativeVelocity(t *testing.T) {
 	bodyB := createDynamicBody(mgl64.Vec3{2, 0, 0}, mgl64.Vec3{1, 0, 0}, 1.0)
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.5,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
@@ -264,11 +252,9 @@ func TestContactConstraint_SolveVelocity_Approaching(t *testing.T) {
 	bodyB.Material.Restitution = 0.8
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0}, // Normal points from A to B
-		Compliance:  0.0,
-		Restitution: 0.8,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0}, // Normal points from A to B
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
@@ -301,11 +287,9 @@ func TestContactConstraint_SolveVelocity_Restitution(t *testing.T) {
 	bodyB.PresolveVelocity = mgl64.Vec3{0, 0, 0}
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 1.0,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
@@ -339,11 +323,9 @@ func TestContactConstraint_SolveVelocity_LowSpeedNoRestitution(t *testing.T) {
 	bodyB.PresolveVelocity = mgl64.Vec3{0, 0, 0}
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.9,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
@@ -371,11 +353,9 @@ func TestContactConstraint_SolveVelocity_MultiplePoints(t *testing.T) {
 	bodyB := createDynamicBody(mgl64.Vec3{2, 0, 0}, mgl64.Vec3{0, 0, 0}, 1.0)
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.5,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0.5, 0},
@@ -403,11 +383,9 @@ func TestContactConstraint_SolveVelocity_SmallVelocityClamping(t *testing.T) {
 	bodyB := createDynamicBody(mgl64.Vec3{2, 0, 0}, mgl64.Vec3{0, 0, 0}, 1.0)
 
 	constraint := &ContactConstraint{
-		BodyA:       bodyA,
-		BodyB:       bodyB,
-		Normal:      mgl64.Vec3{1, 0, 0},
-		Compliance:  0.0,
-		Restitution: 0.0,
+		BodyA:  bodyA,
+		BodyB:  bodyB,
+		Normal: mgl64.Vec3{1, 0, 0},
 		Points: []ContactPoint{
 			{
 				Position:    mgl64.Vec3{1, 0, 0},
