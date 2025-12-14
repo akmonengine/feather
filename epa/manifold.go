@@ -344,14 +344,14 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 		return
 	}
 
-	// 1. Initialisation : choisir le point le plus éloigné du centre de masse
+	// 1. Initialization: choose the point farthest from the center of mass
 	center := mgl64.Vec3{0, 0, 0}
 	for i := 0; i < b.tempPointsCount; i++ {
 		center = center.Add(b.tempPoints[i].Position)
 	}
 	center = center.Mul(1.0 / float64(b.tempPointsCount))
 
-	// Trouver le point le plus éloigné du centre
+	// Find the point farthest from the center
 	maxDistSq := -1.0
 	firstIdx := 0
 	for i := 0; i < b.tempPointsCount; i++ {
@@ -367,21 +367,21 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 	selectedIndices := [maxContactPoints]int{firstIdx}
 	selectedCount := 1
 
-	// Tableau pour stocker les distances minimales au carré
+	// Array to store minimum squared distances
 	var minDistSq [8]float64
 	for i := 0; i < b.tempPointsCount; i++ {
 		diff := b.tempPoints[i].Position.Sub(b.tempPoints[firstIdx].Position)
 		minDistSq[i] = diff.Dot(diff)
 	}
 
-	// Itérer jusqu'à avoir 4 points
+	// Iterate until we have 4 points
 	for selectedCount < maxContactPoints {
-		// Trouver le point avec la plus grande distance minimale
+		// Find the point with the largest minimum distance
 		maxMinDistSq := -1.0
 		nextIdx := -1
 		for i := 0; i < b.tempPointsCount; i++ {
 			if minDistSq[i] > maxMinDistSq {
-				// Vérifier si le point n'est pas déjà sélectionné
+				// Check if the point is not already selected
 				isSelected := false
 				for j := 0; j < selectedCount; j++ {
 					if selectedIndices[j] == i {
@@ -397,14 +397,14 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 		}
 
 		if nextIdx == -1 {
-			break // Cas de sécurité (ne devrait pas arriver)
+			break // Safety case (should not happen)
 		}
 
-		// Ajouter le point sélectionné
+		// Add the selected point
 		selectedIndices[selectedCount] = nextIdx
 		selectedCount++
 
-		// Mettre à jour les distances minimales
+		// Update minimum distances
 		for i := 0; i < b.tempPointsCount; i++ {
 			diff := b.tempPoints[i].Position.Sub(b.tempPoints[nextIdx].Position)
 			distSq := diff.Dot(diff)
@@ -414,19 +414,19 @@ func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
 		}
 	}
 
-	// 3. Copier les points sélectionnés dans un buffer temporaire
-	// Utiliser un buffer temporaire pour éviter d'écraser les données originales
+	// 3. Copy the selected points to a temporary buffer
+	// Use a temporary buffer to avoid overwriting original data
 	var tempPoints [maxContactPoints]constraint.ContactPoint
 	for i := 0; i < maxContactPoints; i++ {
 		if i < selectedCount {
 			tempPoints[i] = b.tempPoints[selectedIndices[i]]
 		} else {
-			// Fallback (ne devrait pas arriver)
+			// Fallback (should not happen)
 			tempPoints[i] = b.tempPoints[0]
 		}
 	}
 
-	// 4. Copier les points du buffer temporaire vers b.tempPoints
+	// 4. Copy the points from the temporary buffer to b.tempPoints
 	for i := 0; i < maxContactPoints; i++ {
 		b.tempPoints[i] = tempPoints[i]
 	}

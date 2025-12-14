@@ -19,7 +19,6 @@ package epa
 import (
 	"fmt"
 	"math"
-	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -50,19 +49,11 @@ const (
 	// DegeneratePenetrationEstimate is a fallback penetration depth for degenerate cases
 	// where we have insufficient simplex points to compute accurate depth.
 	DegeneratePenetrationEstimate = 0.01
-)
 
-var (
-	facePool = sync.Pool{
-		New: func() interface{} {
-			return &Face{}
-		},
-	}
-	edgePool = sync.Pool{
-		New: func() interface{} {
-			return &Edge{}
-		},
-	}
+	// Small initial capacity for PolytopeBuilder - grows dynamically as needed
+	// Using very small initial capacity (4) for memory efficiency
+	// No maximum limits - buffers grow to accommodate any reasonable polytope size
+	polytopeInitialCapacity = 4
 )
 
 // EPA computes penetration depth and contact information for overlapping convex shapes.
@@ -92,35 +83,38 @@ func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex) (constraint.ContactConstra
 		return handleDegenerateSimplex(a, b, simplex), nil
 	}
 
-	// Step 1: Build initial polytope faces from the tetrahedron simplex
-	faces := buildInitialFaces(simplex)
+	// Get builder from pool - single allocation replacing multiple pools
+	builder := polytopeBuilderPool.Get().(*PolytopeBuilder)
+	defer polytopeBuilderPool.Put(builder)
+	builder.Reset()
 
-	defer func() {
-		for _, face := range faces {
-			facePool.Put(face)
-		}
-	}()
+	// Step 1: Build initial polytope faces from the tetrahedron simplex
+	if err := builder.BuildInitialFaces(simplex); err != nil {
+		return constraint.ContactConstraint{}, err
+	}
 
 	var closestFaceIndex int
 	var closestFace *Face
 	var support mgl64.Vec3
 	var distance float64
+
 	// Step 2: Iteratively expand polytope toward origin
 	for i := 0; i < EPAMaxIterations; i++ {
-		if len(faces) == 0 {
+		if len(builder.faces) == 0 {
 			// All faces removed (degenerate polytope) - should not happen
 			break
 		}
 
 		// Step 3: Find the face closest to the origin
 		// This face's normal and distance give us the current best MTV estimate
-		closestFaceIndex = findClosestFaceIndex(faces)
-		closestFace = faces[closestFaceIndex]
+		closestFaceIndex = builder.FindClosestFaceIndex()
+		closestFace = &builder.faces[closestFaceIndex]
 
 		// Skip faces that are too close to or behind the origin (degenerate)
 		if closestFace.Distance < EPAMinFaceDistance {
-			// Remove this face and try the next one
-			faces = append(faces[:closestFaceIndex], faces[closestFaceIndex+1:]...)
+			// Remove this face and try the next one using swap-with-last
+			builder.faces[closestFaceIndex] = builder.faces[len(builder.faces)-1]
+			builder.faces = builder.faces[:len(builder.faces)-1]
 			continue
 		}
 
@@ -132,22 +126,6 @@ func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex) (constraint.ContactConstra
 		// If the new support point doesn't significantly improve the distance,
 		// we've found the face of the Minkowski difference closest to the origin
 		if distance-closestFace.Distance < EPAConvergenceTolerance {
-			// Special handling for Plane shapes: ensure normal points in correct direction
-			// Planes are infinite, so their normals need careful orientation
-			if plane, ok := a.Shape.(*actor.Plane); ok {
-				// Normal should point in the plane's outward direction
-				if closestFace.Normal.Dot(plane.Normal) < 0 {
-					closestFace.Normal = closestFace.Normal.Mul(-1)
-				}
-			}
-
-			if plane, ok := b.Shape.(*actor.Plane); ok {
-				// Normal points from A to B, so for plane B it should oppose the plane's normal
-				if closestFace.Normal.Dot(plane.Normal) > 0 {
-					closestFace.Normal = closestFace.Normal.Mul(-1)
-				}
-			}
-
 			// Generate contact manifold (multiple contact points for stability)
 			manifoldPoints := GenerateManifold(a, b, closestFace.Normal, closestFace.Distance)
 
@@ -161,7 +139,17 @@ func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex) (constraint.ContactConstra
 
 		// Step 6: Expand polytope by adding the new support point
 		// This removes faces that "see" the new point and adds new faces connecting to it
-		addPointAndRebuildFaces(&faces, support, closestFaceIndex)
+		// Zero allocations - all operations use fixed buffers
+		if err := builder.AddPointAndRebuildFaces(support, closestFaceIndex); err != nil {
+			// Buffer overflow - return current best estimate instead of failing
+			manifoldPoints := GenerateManifold(a, b, closestFace.Normal, closestFace.Distance)
+			return constraint.ContactConstraint{
+				BodyA:  a,
+				BodyB:  b,
+				Points: manifoldPoints,
+				Normal: closestFace.Normal,
+			}, nil
+		}
 	}
 
 	// EPA failed to converge within max iterations (rare, indicates numerical issues)

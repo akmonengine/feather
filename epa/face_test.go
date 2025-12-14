@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/akmonengine/feather/gjk"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -17,6 +18,16 @@ func vec3ApproxEqual(a, b mgl64.Vec3, tolerance float64) bool {
 func isNormalized(v mgl64.Vec3, tolerance float64) bool {
 	length := v.Len()
 	return math.Abs(length-1.0) < tolerance
+}
+
+// normalizeEdge normalizes an edge so that A < B lexicographically
+// This is the same logic used in PolytopeBuilder.findBoundaryEdges
+func normalizeEdge(edge Edge) Edge {
+	a, b := edge.A, edge.B
+	if compareVec3(a, b) > 0 {
+		return Edge{A: b, B: a}
+	}
+	return Edge{A: a, B: b}
 }
 
 // TestCompareVec3 tests lexicographic comparison of vectors
@@ -151,7 +162,9 @@ func TestCreateFaceOutward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			face := createFaceOutward(tt.a, tt.b, tt.c, tt.oppositePoint)
+			// Use PolytopeBuilder to create face
+			builder := &PolytopeBuilder{}
+			face := builder.createFaceOutward(tt.a, tt.b, tt.c, tt.oppositePoint)
 
 			// Check that points are stored correctly
 			if !vec3ApproxEqual(face.Points[0], tt.a, 1e-9) {
@@ -245,11 +258,29 @@ func TestBuildInitialFaces(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			faces := buildInitialFaces(tt.simplex)
+			// Create a simplex for testing
+			simplex := &gjk.Simplex{}
+			// Copy points to simplex
+			for i, point := range tt.simplex {
+				if i < len(simplex.Points) {
+					simplex.Points[i] = point
+				}
+			}
+			simplex.Count = len(tt.simplex)
+
+			// Use PolytopeBuilder to build initial faces
+			builder := &PolytopeBuilder{}
+			err := builder.BuildInitialFaces(simplex)
+			if err != nil {
+				t.Fatalf("BuildInitialFaces failed: %v", err)
+			}
+
+			// Get the faces from the builder
+			faces := builder.faces[:len(builder.faces)]
 
 			// Check number of faces
 			if len(faces) < tt.minFaces || len(faces) > tt.maxFaces {
-				t.Errorf("buildInitialFaces() returned %d faces, want between %d and %d",
+				t.Errorf("BuildInitialFaces() returned %d faces, want between %d and %d",
 					len(faces), tt.minFaces, tt.maxFaces)
 			}
 
@@ -313,9 +344,14 @@ func TestFindClosestFaceIndex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := findClosestFaceIndex(tt.faces)
+			// Use PolytopeBuilder to find closest face
+			builder := &PolytopeBuilder{}
+			// Copy faces to builder using append
+			builder.faces = append(builder.faces, tt.faces...)
+
+			result := builder.FindClosestFaceIndex()
 			if result != tt.expectedIndex {
-				t.Errorf("findClosestFaceIndex() = %d, want %d", result, tt.expectedIndex)
+				t.Errorf("FindClosestFaceIndex() = %d, want %d", result, tt.expectedIndex)
 			}
 		})
 	}
@@ -393,7 +429,22 @@ func TestFindBoundaryEdges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			edges := findBoundaryEdges(tt.faces, tt.visibleIndices)
+			// Use PolytopeBuilder to find boundary edges
+			builder := &PolytopeBuilder{}
+
+			// Copy faces to builder using append
+			builder.faces = append(builder.faces, tt.faces...)
+			// Copy visible indices to builder using append
+			builder.visibleIndices = append(builder.visibleIndices, tt.visibleIndices...)
+
+			// Find boundary edges
+			err := builder.findBoundaryEdges()
+			if err != nil {
+				t.Fatalf("findBoundaryEdges failed: %v", err)
+			}
+
+			// Get edges from builder
+			edges := builder.edges[:len(builder.edges)]
 
 			if len(edges) < tt.minEdges || len(edges) > tt.maxEdges {
 				t.Errorf("findBoundaryEdges() returned %d edges, want between %d and %d",
@@ -402,9 +453,9 @@ func TestFindBoundaryEdges(t *testing.T) {
 
 			// All boundary edges should be normalized
 			for _, edge := range edges {
-				normalized := normalizeEdge(edge)
+				normalized := normalizeEdge(Edge{A: edge.A, B: edge.B})
 				if !vec3ApproxEqual(edge.A, normalized.A, 1e-9) || !vec3ApproxEqual(edge.B, normalized.B, 1e-9) {
-					t.Logf("edge not in normalized form: %v (normalized: %v)", edge, normalized)
+					t.Logf("edge not in normalized form: %v (normalized: %v)", Edge{A: edge.A, B: edge.B}, normalized)
 				}
 			}
 		})
@@ -438,17 +489,26 @@ func TestAddPointAndRebuildFaces(t *testing.T) {
 			},
 		}
 
-		faces := make([]Face, len(initialFaces))
-		copy(faces, initialFaces)
+		// Use PolytopeBuilder for polytope expansion
+		builder := &PolytopeBuilder{}
+
+		// Copy initial faces to builder using append
+		builder.faces = append(builder.faces, initialFaces...)
 
 		support := mgl64.Vec3{2, 0.5, 0.5}
 		closestIndex := 0
 
-		addPointAndRebuildFaces(&faces, support, closestIndex)
+		err := builder.AddPointAndRebuildFaces(support, closestIndex)
+		if err != nil {
+			t.Fatalf("AddPointAndRebuildFaces failed: %v", err)
+		}
+
+		// Get faces from builder
+		faces := builder.faces[:len(builder.faces)]
 
 		// Should still have faces after rebuild
 		if len(faces) == 0 {
-			t.Error("addPointAndRebuildFaces() resulted in no faces (safety check failed)")
+			t.Error("AddPointAndRebuildFaces() resulted in no faces (safety check failed)")
 		}
 
 		// Check that all faces have valid normals and distances
@@ -469,14 +529,23 @@ func TestAddPointAndRebuildFaces(t *testing.T) {
 			},
 		}
 
-		faces := make([]Face, len(initialFaces))
-		copy(faces, initialFaces)
+		// Use PolytopeBuilder for polytope expansion
+		builder := &PolytopeBuilder{}
+
+		// Copy initial faces to builder using append
+		builder.faces = append(builder.faces, initialFaces...)
 
 		// Point that would make all faces visible
 		support := mgl64.Vec3{0, 0, 2}
 		closestIndex := 0
 
-		addPointAndRebuildFaces(&faces, support, closestIndex)
+		err := builder.AddPointAndRebuildFaces(support, closestIndex)
+		if err != nil {
+			t.Fatalf("AddPointAndRebuildFaces failed: %v", err)
+		}
+
+		// Get faces from builder
+		faces := builder.faces[:len(builder.faces)]
 
 		// Safety check should ensure at least one face remains
 		if len(faces) == 0 {
@@ -493,15 +562,23 @@ func TestAddPointAndRebuildFaces(t *testing.T) {
 			},
 		}
 
-		faces := make([]Face, len(initialFaces))
-		copy(faces, initialFaces)
+		// Use PolytopeBuilder for polytope expansion
+		builder := &PolytopeBuilder{}
 
+		// Copy initial faces to builder using append
+		builder.faces = append(builder.faces, initialFaces...)
 		// Point behind the face (not visible)
 		support := mgl64.Vec3{-1, -1, -1}
 		closestIndex := 0
 
-		initialLen := len(faces)
-		addPointAndRebuildFaces(&faces, support, closestIndex)
+		initialLen := len(builder.faces)
+		err := builder.AddPointAndRebuildFaces(support, closestIndex)
+		if err != nil {
+			t.Fatalf("AddPointAndRebuildFaces failed: %v", err)
+		}
+
+		// Get faces from builder
+		faces := builder.faces[:len(builder.faces)]
 
 		// Should have modified the polytope
 		if len(faces) == 0 {
@@ -521,24 +598,27 @@ func BenchmarkCreateFaceOutward(b *testing.B) {
 	c := mgl64.Vec3{0, 1, 0}
 	d := mgl64.Vec3{0, 0, 0}
 	opposite := mgl64.Vec3{0, 0, 1}
+	builder := &PolytopeBuilder{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		createFaceOutward(a, c, d, opposite)
+		builder.createFaceOutward(a, c, d, opposite)
 	}
 }
 
 func BenchmarkBuildInitialFaces(b *testing.B) {
-	simplex := []mgl64.Vec3{
-		{1, 0, 0},
-		{0, 1, 0},
-		{0, 0, 1},
-		{0, 0, 0},
-	}
+	simplex := &gjk.Simplex{}
+	simplex.Points[0] = mgl64.Vec3{1, 0, 0}
+	simplex.Points[1] = mgl64.Vec3{0, 1, 0}
+	simplex.Points[2] = mgl64.Vec3{0, 0, 1}
+	simplex.Points[3] = mgl64.Vec3{0, 0, 0}
+	simplex.Count = 4
+	builder := &PolytopeBuilder{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		buildInitialFaces(simplex)
+		builder.Reset()
+		builder.BuildInitialFaces(simplex)
 	}
 }
 
@@ -550,27 +630,42 @@ func BenchmarkFindBoundaryEdges(b *testing.B) {
 		{Points: [3]mgl64.Vec3{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
 	}
 	visibleIndices := []int{0, 1}
+	builder := &PolytopeBuilder{}
+
+	// Setup builder
+	for i, face := range faces {
+		if i < len(builder.faces) {
+			builder.faces[i] = face
+		}
+	}
+	for i, idx := range visibleIndices {
+		if i < len(builder.visibleIndices) {
+			builder.visibleIndices[i] = idx
+		}
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		findBoundaryEdges(faces, visibleIndices)
+		builder.findBoundaryEdges()
 	}
 }
 
 func BenchmarkAddPointAndRebuildFaces(b *testing.B) {
 	support := mgl64.Vec3{2, 0.5, 0.5}
 	closestIndex := 0
+	builder := &PolytopeBuilder{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		faces := []Face{
-			{Points: [3]mgl64.Vec3{{1, 0, 0}, {0, 1, 0}, {0, 0, 0}}, Normal: mgl64.Vec3{0, 0, 1}, Distance: 0.1},
-			{Points: [3]mgl64.Vec3{{0, 0, 1}, {1, 0, 1}, {0, 1, 1}}, Normal: mgl64.Vec3{0, 0, -1}, Distance: 0.1},
-			{Points: [3]mgl64.Vec3{{0, 0, 0}, {0, 0, 1}, {1, 0, 0}}, Normal: mgl64.Vec3{0, 1, 0}, Distance: 0.1},
-		}
+		// Setup initial faces
+		builder.Reset()
+		builder.faces = append(builder.faces,
+			Face{Points: [3]mgl64.Vec3{{1, 0, 0}, {0, 1, 0}, {0, 0, 0}}, Normal: mgl64.Vec3{0, 0, 1}, Distance: 0.1},
+			Face{Points: [3]mgl64.Vec3{{0, 0, 1}, {1, 0, 1}, {0, 1, 1}}, Normal: mgl64.Vec3{0, 0, -1}, Distance: 0.1},
+			Face{Points: [3]mgl64.Vec3{{0, 0, 0}, {0, 0, 1}, {1, 0, 0}}, Normal: mgl64.Vec3{0, 1, 0}, Distance: 0.1})
 		b.StartTimer()
 
-		addPointAndRebuildFaces(&faces, support, closestIndex)
+		builder.AddPointAndRebuildFaces(support, closestIndex)
 	}
 }
