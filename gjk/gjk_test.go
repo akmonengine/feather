@@ -408,7 +408,7 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 		// This should be reduced to a line and eventually return false
 		result := tetrahedron(&simplex, &direction)
 		if result {
-			t.Error("Expected tetrahedron with colinear points to not contain origin")
+			t.Error("Expected tetrahedron with colinear points to not contain origin (origin not on any segment)")
 		}
 	})
 
@@ -445,8 +445,8 @@ func TestGJK_DegenerateSimplex(t *testing.T) {
 
 		// This should be handled as a degenerate line
 		result := line(&simplex, &direction)
-		if result {
-			t.Error("Expected degenerate line with zero-length edge to not contain origin")
+		if !result {
+			t.Error("Expected degenerate line with near-identical points to contain origin")
 		}
 	})
 }
@@ -599,6 +599,72 @@ func TestLine(t *testing.T) {
 		}
 	})
 
+	t.Run("origin on line segment", func(t *testing.T) {
+		// Test that origin is detected as on segment when t is between 0 and 1
+		simplex := Simplex{
+			Points: [4]mgl64.Vec3{
+				{2, 0, 0}, // B
+				{0, 0, 0}, // A
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
+		}
+		direction := mgl64.Vec3{0, 1, 0}
+
+		// Origin is at (0,0,0) which is exactly point A (t=0)
+		// Correctly identifies this as Voronoi region A
+		// and reduces to point A, returning false (no collision in this case)
+		result := line(&simplex, &direction)
+		if result {
+			t.Error("Expected no collision when origin is exactly at point A (Voronoi region A)")
+		}
+	})
+
+	t.Run("origin on line segment middle", func(t *testing.T) {
+		// Test that origin is detected as on segment when t is between 0 and 1
+		simplex := Simplex{
+			Points: [4]mgl64.Vec3{
+				{2, 0, 0}, // B
+				{0, 0, 0}, // A
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
+		}
+		direction := mgl64.Vec3{0, 1, 0}
+
+		// Move simplex so origin is in the middle of segment AB
+		simplex.Points[1] = mgl64.Vec3{1, 0, 0}  // A
+		simplex.Points[0] = mgl64.Vec3{-1, 0, 0} // B
+		// Origin (0,0,0) is exactly in the middle (t=0.5)
+		result := line(&simplex, &direction)
+		if !result {
+			t.Error("Expected collision when origin is in the middle of segment (t=0.5)")
+		}
+	})
+
+	t.Run("origin on infinite line but not on segment", func(t *testing.T) {
+		// Test that origin on infinite line but outside segment returns false
+		simplex := Simplex{
+			Points: [4]mgl64.Vec3{
+				{1, 0, 0}, // B
+				{2, 0, 0}, // A
+				{0, 0, 0},
+				{0, 0, 0},
+			},
+			Count: 2,
+		}
+		direction := mgl64.Vec3{0, 1, 0}
+
+		// Origin (0,0,0) is on the infinite line but not on segment [A,B]
+		// Segment is from (2,0,0) to (1,0,0), origin is at (0,0,0) which is outside
+		result := line(&simplex, &direction)
+		if result {
+			t.Error("Expected no collision when origin is on infinite line but not on segment")
+		}
+	})
+
 	t.Run("origin behind point A", func(t *testing.T) {
 		simplex := Simplex{
 			Points: [4]mgl64.Vec3{
@@ -614,11 +680,11 @@ func TestLine(t *testing.T) {
 		if result {
 			t.Error("Line should not contain origin")
 		}
-		// Le simplexe doit rester à 2 points
-		if simplex.Count != 2 {
-			t.Errorf("Expected simplex to remain at 2 points, got %d", simplex.Count)
+		// When origin is behind point A, simplex should be reduced to point A only
+		if simplex.Count != 1 {
+			t.Errorf("Expected simplex to be reduced to 1 point, got %d", simplex.Count)
 		}
-		// Direction doit pointer vers A
+		// Direction should point from A toward origin
 		if direction.Dot(mgl64.Vec3{-1, 0, 0}) != 1.0 {
 			t.Errorf("Expected direction to be (-1,0,0), got %v", direction)
 		}

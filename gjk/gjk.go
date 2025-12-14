@@ -154,9 +154,10 @@ func containsOrigin(simplex *Simplex, direction *mgl64.Vec3) bool {
 //
 // Tests which Voronoi region contains the origin:
 //   - Region A: Origin is closest to point A alone
+//   - Region B: Origin is closest to point B alone
 //   - Region AB: Origin is closest to the line segment AB
 //
-// Returns false (a line cannot contain origin in 3D).
+// Returns true only if origin is on the line segment (not just the infinite line).
 // Updates direction to point toward origin from the closest feature.
 func line(simplex *Simplex, direction *mgl64.Vec3) bool {
 	a := simplex.Points[1]
@@ -186,11 +187,43 @@ func line(simplex *Simplex, direction *mgl64.Vec3) bool {
 		return false
 	}
 
+	// Check if origin is in Voronoi region B (behind B, opposite direction from A)
+	bo := b.Mul(-1)
+	if ab.Dot(bo) >= 0 {
+		// Reduce simplex to point B
+		simplex.Points[0] = b
+		simplex.Count = 1
+		*direction = bo
+		return false
+	}
+
 	// Origin is in Voronoi region AB (between A and B direction-wise)
 	abPerp := ab.Cross(ao).Cross(ab)
 	if abPerp.LenSqr() < 1e-8 {
-		// Origin is on the line segment → touching
-		return true
+		// Origin is on the line, but check if it's on the segment [A, B]
+		abLengthSqr := ab.LenSqr()
+		t := ao.Dot(ab) / abLengthSqr
+
+		// Check if origin is on the segment [A, B] with tolerance
+		// Using 1e-6 tolerance for segment inclusion
+		if t >= -1e-6 && t <= 1.0+1e-6 {
+			return true // Collision - origin is on the segment
+		}
+
+		// Origin is on the infinite line but not on the segment
+		// Find closest point on segment and continue
+		if t < 0 {
+			// Closest to A
+			simplex.Points[0] = a
+			simplex.Count = 1
+			*direction = ao
+		} else {
+			// Closest to B
+			simplex.Points[0] = b
+			simplex.Count = 1
+			*direction = bo
+		}
+		return false
 	}
 
 	*direction = abPerp
