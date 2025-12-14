@@ -9,42 +9,31 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-// ============================================================================
-// Types
-// ============================================================================
-
-// CellKey - Coordonnées d'une cellule dans l'espace 3D
+// CellKey - Coordinates of a cell in 3D space
 type CellKey struct {
 	X, Y, Z int
 }
 
-// Cell - Conteneur d'indices de bodies dans une cellule
+// Cell - Container of body indices in a cell
 type Cell struct {
 	bodyIndices []int
 }
 
-// Pair - Paire de bodies potentiellement en collision
+// Pair - Pair of bodies potentially in collision
 type Pair struct {
 	BodyA *actor.RigidBody
 	BodyB *actor.RigidBody
 }
 
-// SpatialGrid - Grille spatiale uniforme avec hashing pour broad phase
+// SpatialGrid - Uniform spatial grid with hashing for broad phase
 type SpatialGrid struct {
 	cellSize float64
 	cells    []Cell
-	cellMask int
 	planes   Cell
 }
 
-// ============================================================================
-// Constructeur
-// ============================================================================
-
-// NewSpatialGrid - Crée une nouvelle grille spatiale
+// NewSpatialGrid - Creates a new spatial grid
 func NewSpatialGrid(cellSize float64, numCells int) *SpatialGrid {
-	numCells = nextPowerOfTwo(numCells)
-
 	cells := make([]Cell, numCells)
 	for i := range cells {
 		cells[i].bodyIndices = make([]int, 0, 8)
@@ -53,26 +42,10 @@ func NewSpatialGrid(cellSize float64, numCells int) *SpatialGrid {
 	return &SpatialGrid{
 		cellSize: cellSize,
 		cells:    cells,
-		cellMask: numCells - 1,
 	}
 }
 
-// nextPowerOfTwo - Arrondit à la puissance de 2 supérieure
-func nextPowerOfTwo(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	n--
-	n |= n >> 1
-	n |= n >> 2
-	n |= n >> 4
-	n |= n >> 8
-	n |= n >> 16
-	n++
-	return n
-}
-
-// Insert - Insère un body dans toutes les cellules qu'il occupe
+// Insert - Inserts a body into all cells it occupies
 func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
 	if _, ok := body.Shape.(*actor.Plane); ok {
 		sg.planes.bodyIndices = append(sg.planes.bodyIndices, bodyIndex)
@@ -98,6 +71,7 @@ func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
 	}
 }
 
+// Clear - Resets the spatial grid by clearing all body indices from cells and planes
 func (sg *SpatialGrid) Clear() {
 	sg.planes.bodyIndices = sg.planes.bodyIndices[:0]
 
@@ -106,6 +80,7 @@ func (sg *SpatialGrid) Clear() {
 	}
 }
 
+// SortCells - Sorts body indices within each cell for optimized collision detection
 func (sg *SpatialGrid) SortCells() {
 	for i := range sg.cells {
 		if len(sg.cells[i].bodyIndices) > 1 {
@@ -114,61 +89,7 @@ func (sg *SpatialGrid) SortCells() {
 	}
 }
 
-// FindPairs - Version séquentielle
-func (sg *SpatialGrid) FindPairs(bodies []*actor.RigidBody) []Pair {
-	pairs := make([]Pair, 0, len(bodies)/2)
-
-	// ========== BOUCLE SUR BODIES ==========
-	for bodyIdx := 0; bodyIdx < len(bodies); bodyIdx++ {
-		bodyA := bodies[bodyIdx]
-
-		// Trouver cellules occupées par bodyA
-		minCell := sg.worldToCell(bodyA.Shape.GetAABB().Min)
-		maxCell := sg.worldToCell(bodyA.Shape.GetAABB().Max)
-
-		// Parcourir ces cellules
-		for x := minCell.X; x <= maxCell.X; x++ {
-			for y := minCell.Y; y <= maxCell.Y; y++ {
-				for z := minCell.Z; z <= maxCell.Z; z++ {
-					cellKey := CellKey{x, y, z}
-					cellIdx := sg.hashCell(cellKey)
-
-					// Tester contre tous les bodies dans cette cellule
-					for _, otherIdx := range sg.cells[cellIdx].bodyIndices {
-						// ========== ORDRE DÉTERMINISTE ==========
-						if otherIdx <= bodyIdx {
-							continue // Évite doublons (A,B) et (B,A)
-						}
-
-						bodyB := bodies[otherIdx]
-
-						// Checks
-						if bodyA.BodyType == actor.BodyTypeStatic && bodyB.BodyType == actor.BodyTypeStatic {
-							continue
-						}
-						if bodyA.IsSleeping && bodyB.IsSleeping {
-							continue
-						}
-
-						_, aIsPlane := bodyA.Shape.(*actor.Plane)
-						_, bIsPlane := bodyB.Shape.(*actor.Plane)
-						if aIsPlane || bIsPlane {
-							pairs = append(pairs, Pair{BodyA: bodyA, BodyB: bodyB})
-							continue
-						}
-						if bodyA.Shape.GetAABB().Overlaps(bodyB.Shape.GetAABB()) {
-							pairs = append(pairs, Pair{BodyA: bodyA, BodyB: bodyB})
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return pairs
-}
-
-// FindPairsParallel - Version parallèle retournant un channel
+// FindPairsParallel - Parallel version returning a channel
 func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers int) <-chan Pair {
 	var wg sync.WaitGroup
 	pairsChan := make(chan Pair, numWorkers*10)
@@ -205,18 +126,18 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 
 				copy(seen, clearSeen)
 
-				// Trouver cellules occupées par bodyA
+				// Find cells occupied by bodyA
 				minCell := sg.worldToCell(bodyA.Shape.GetAABB().Min)
 				maxCell := sg.worldToCell(bodyA.Shape.GetAABB().Max)
 
-				// Parcourir ces cellules
+				// Iterate through these cells
 				for x := minCell.X; x <= maxCell.X; x++ {
 					for y := minCell.Y; y <= maxCell.Y; y++ {
 						for z := minCell.Z; z <= maxCell.Z; z++ {
 							cellKey := CellKey{x, y, z}
 							cellIdx := sg.hashCell(cellKey)
 
-							// Tester contre tous les bodies dans cette cellule
+							// Test against all bodies in this cell
 							for _, otherIdx := range sg.cells[cellIdx].bodyIndices {
 								// Avoid duplicates
 								if otherIdx <= bodyIdx || seen[otherIdx] {
@@ -251,7 +172,7 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 	return pairsChan
 }
 
-// worldToCell - Convertit une position monde en coordonnées de cellule
+// worldToCell - Converts a world position to cell coordinates
 func (sg *SpatialGrid) worldToCell(pos mgl64.Vec3) CellKey {
 	return CellKey{
 		X: int(math.Floor(pos.X() / sg.cellSize)),
@@ -260,8 +181,35 @@ func (sg *SpatialGrid) worldToCell(pos mgl64.Vec3) CellKey {
 	}
 }
 
-// hashCell - Hash une cellule vers un index dans l'array
+// hashCell - Hashes a cell to an index in the array
+// Uses a hash function inspired by MurmurHash3 for better distribution
+// and to reduce collisions. The constants used are known prime numbers
+// for their good bit mixing properties.
 func (sg *SpatialGrid) hashCell(key CellKey) int {
-	h := (key.X * 73856093) ^ (key.Y * 19349663) ^ (key.Z * 83492791)
-	return h & sg.cellMask
+	// Mixing constants inspired by MurmurHash3
+	// These values were chosen empirically for their diffusion properties
+	const (
+		prime1 = uint32(16777619)   // First prime number for initial mixing
+		prime2 = uint32(2166136261) // Second prime number for mixing
+		prime3 = uint32(1681692777) // Third prime number for mixing
+
+		// Constants for final mixing (avalanche effect)
+		mix1 = uint32(0x85ebca6b) // Mixing constant for bit diffusion
+		mix2 = uint32(0xc2b2ae35) // Second mixing constant
+	)
+
+	// Conversion to uint32 to avoid unexpected overflows
+	h := uint32(key.X) * prime1
+	h = (h ^ uint32(key.Y)) * prime2
+	h = (h ^ uint32(key.Z)) * prime3
+
+	// Final mixing to improve distribution (avalanche effect)
+	// This sequence creates complete bit diffusion to reduce collisions
+	h ^= h >> 16
+	h *= mix1
+	h ^= h >> 13
+	h *= mix2
+	h ^= h >> 16
+
+	return int(h) % len(sg.cells)
 }
