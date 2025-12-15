@@ -358,9 +358,7 @@ func TestClipPolygonAgainstPlane(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Copy input to buffer
 			var inputBuf [8]mgl64.Vec3
-			for i, p := range tt.input {
-				inputBuf[i] = p
-			}
+			copy(inputBuf[:], tt.input)
 
 			var outputBuf [8]mgl64.Vec3
 			var outputCount int
