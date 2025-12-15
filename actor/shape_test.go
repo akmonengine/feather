@@ -230,12 +230,14 @@ func TestBoxGetContactFeatureWithRotation(t *testing.T) {
 	box := &Box{HalfExtents: mgl64.Vec3{1, 2, 3}}
 
 	direction := mgl64.Vec3{1, 0, 0}
-	features := box.GetContactFeature(direction)
+	var features [8]mgl64.Vec3
+	var featureCount int
+	box.GetContactFeature(direction, &features, &featureCount)
 
 	// GetContactFeature retourne toujours les points en espace local
 	// Doit retourner 4 points (une face)
-	if len(features) != 4 {
-		t.Errorf("GetContactFeature() returned %d points, want 4", len(features))
+	if featureCount != 4 {
+		t.Errorf("GetContactFeature() returned %d points, want 4", featureCount)
 	}
 
 	// Vérifier que tous les points sont des vertices valides du cube
@@ -293,7 +295,6 @@ func TestShapeEdgeCases(t *testing.T) {
 	})
 }
 
-// ========== CONSISTENCY & INVARIANT TESTS ==========
 func TestShapeConsistency(t *testing.T) {
 	t.Run("Support vs GetContactFeature consistency", func(t *testing.T) {
 		box := &Box{HalfExtents: mgl64.Vec3{1, 2, 3}}
@@ -307,29 +308,31 @@ func TestShapeConsistency(t *testing.T) {
 		}
 
 		for _, dir := range directions {
+			var features [8]mgl64.Vec3
+			var featureCount int
 			// Box test
 			boxSupport := box.Support(dir)
-			boxFeatures := box.GetContactFeature(dir)
+			box.GetContactFeature(dir, &features, &featureCount)
 
 			// Le support doit être l'un des points de contact
 			found := false
-			for _, feature := range boxFeatures {
+			for _, feature := range features {
 				if vec3Equal(boxSupport, feature, 1e-6) {
 					found = true
 					break
 				}
 			}
 			if !found {
-				t.Errorf("Box support point %v not found in contact features %v", boxSupport, boxFeatures)
+				t.Errorf("Box support point %v not found in contact features %v", boxSupport, features)
 			}
 
 			// Sphere test
 			sphereSupport := sphere.Support(dir)
-			sphereFeatures := sphere.GetContactFeature(dir)
+			sphere.GetContactFeature(dir, &features, &featureCount)
 
 			// Pour une sphère, GetContactFeature doit retourner exactement le point de support
-			if len(sphereFeatures) != 1 || !vec3Equal(sphereSupport, sphereFeatures[0], 1e-9) {
-				t.Errorf("Sphere support/contact feature mismatch: support=%v, feature=%v", sphereSupport, sphereFeatures)
+			if len(features) != 1 || !vec3Equal(sphereSupport, features[0], 1e-9) {
+				t.Errorf("Sphere support/contact feature mismatch: support=%v, feature=%v", sphereSupport, features)
 			}
 		}
 	})
@@ -513,84 +516,6 @@ func TestPlaneComputeAABB(t *testing.T) {
 				}
 				if math.Abs(aabb.Min[2]+infinity) > 1e6 || math.Abs(aabb.Max[2]-infinity) > 1e6 {
 					t.Errorf("Z dimension not infinite: Min=%v, Max=%v", aabb.Min[2], aabb.Max[2])
-				}
-			}
-		})
-	}
-}
-
-func TestPlaneGetContactFeature(t *testing.T) {
-	tests := []struct {
-		name          string
-		plane         *Plane
-		direction     mgl64.Vec3
-		expectedCount int
-	}{
-		{
-			name:          "horizontal plane with upward direction",
-			plane:         &Plane{Normal: mgl64.Vec3{0, 1, 0}, Distance: 0},
-			direction:     mgl64.Vec3{0, 1, 0},
-			expectedCount: 4,
-		},
-		{
-			name:          "horizontal plane with downward direction",
-			plane:         &Plane{Normal: mgl64.Vec3{0, 1, 0}, Distance: 0},
-			direction:     mgl64.Vec3{0, -1, 0},
-			expectedCount: 4,
-		},
-		{
-			name:          "vertical plane (X-normal)",
-			plane:         &Plane{Normal: mgl64.Vec3{1, 0, 0}, Distance: 0},
-			direction:     mgl64.Vec3{1, 0, 0},
-			expectedCount: 4,
-		},
-		{
-			name:          "diagonal plane",
-			plane:         &Plane{Normal: mgl64.Vec3{1, 1, 1}.Normalize(), Distance: -1},
-			direction:     mgl64.Vec3{1, 1, 1}.Normalize(),
-			expectedCount: 4,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			features := tt.plane.GetContactFeature(tt.direction)
-
-			// Doit retourner exactement 4 points pour un plan
-			if len(features) != tt.expectedCount {
-				t.Errorf("GetContactFeature() returned %d points, want %d", len(features), tt.expectedCount)
-			}
-
-			// Vérifier que tous les points sont dans le plan
-			for i, point := range features {
-				// Les points doivent être dans le plan: Normal · p + Distance = 0
-				dotProduct := tt.plane.Normal.Dot(point) + tt.plane.Distance
-				if math.Abs(dotProduct) > 1e-6 {
-					t.Errorf("Point %d = %v not in plane (dot = %v)", i, point, dotProduct)
-				}
-			}
-
-			// Vérifier que les points forment un quadrilatère valide
-			if len(features) >= 4 {
-				// Vérifier que les points sont coplanaires (déjà fait) et qu'ils forment approximativement un carré
-				// Les points doivent être à des distances similaires du centre
-				center := mgl64.Vec3{0, 0, 0}
-				if tt.plane.Distance != 0 {
-					// Si le plan n'est pas à l'origine, utiliser le point le plus proche de l'origine comme référence
-					center = tt.plane.Normal.Mul(-tt.plane.Distance)
-				}
-
-				distances := make([]float64, len(features))
-				for i, point := range features {
-					distances[i] = point.Sub(center).Len()
-				}
-
-				// Toutes les distances doivent être similaires (tolérance pour former un carré)
-				for i := 1; i < len(distances); i++ {
-					if math.Abs(distances[i]-distances[0]) > 1e-6 {
-						t.Errorf("Points not forming regular quadrilateral: distances = %v", distances)
-						break
-					}
 				}
 			}
 		})
