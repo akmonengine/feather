@@ -25,9 +25,6 @@ type PolytopeBuilder struct {
 
 	// Visible face tracking
 	visibleIndices []int
-
-	// Temporary workspace for face construction
-	tempFace Face
 }
 
 // EdgeEntry represents an edge with occurrence counting for boundary detection.

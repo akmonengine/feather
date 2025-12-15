@@ -1,6 +1,7 @@
 package epa
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -618,7 +619,11 @@ func BenchmarkBuildInitialFaces(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		builder.Reset()
-		builder.BuildInitialFaces(simplex)
+		err := builder.BuildInitialFaces(simplex)
+
+		if err != nil {
+			fmt.Printf("error building initial faces: %v", err)
+		}
 	}
 }
 
@@ -646,7 +651,10 @@ func BenchmarkFindBoundaryEdges(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		builder.findBoundaryEdges()
+		err := builder.findBoundaryEdges()
+		if err != nil {
+			fmt.Printf("error finding boundary edges: %v", err)
+		}
 	}
 }
 
@@ -666,6 +674,9 @@ func BenchmarkAddPointAndRebuildFaces(b *testing.B) {
 			Face{Points: [3]mgl64.Vec3{{0, 0, 0}, {0, 0, 1}, {1, 0, 0}}, Normal: mgl64.Vec3{0, 1, 0}, Distance: 0.1})
 		b.StartTimer()
 
-		builder.AddPointAndRebuildFaces(support, closestIndex)
+		err := builder.AddPointAndRebuildFaces(support, closestIndex)
+		if err != nil {
+			fmt.Printf("error adding faces: %v", err)
+		}
 	}
 }

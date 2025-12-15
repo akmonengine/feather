@@ -121,7 +121,7 @@ func TestBroadPhaseTwoStaticBodies(t *testing.T) {
 	}
 
 	// Static-static collisions should be skipped
-	if len(pairs) != 0 {
+	if len(contactPairs) != 0 {
 		t.Errorf("BroadPhase with two static bodies returned %d pairs, want 0 (should skip static-static)", len(pairs))
 	}
 }
@@ -563,9 +563,7 @@ func BenchmarkLargeBroadPhase2(b *testing.B) {
 }
 
 // BenchmarkLargeGJK2-16    	    1010	   1174808 ns/op	  133546 B/op	    2362 allocs/op
-// BenchmarkLargeGJK2-16    	     100	  10239257 ns/op	 1073609 B/op	   24118 allocs/op
-// BenchmarkLargeGJK2-16    	     100	  19060863 ns/op	 1000860 B/op	   10399 allocs/op
-// BenchmarkLargeGJK2-16    	     126	   9732729 ns/op	 1172060 B/op	   10395 allocs/op
+// BenchmarkLargeGJK2-16    	   32847	     40166 ns/op	   16228 B/op	      53 allocs/op
 func BenchmarkLargeGJK2(b *testing.B) {
 	const cubesCount = 1000
 	const rowSize = 100.0
@@ -587,12 +585,14 @@ func BenchmarkLargeGJK2(b *testing.B) {
 	f, _ := os.Create("trace.out")
 	fcpu, _ := os.Create(`cpu.prof`)
 	fheap, _ := os.Create(`heap.prof`)
-	defer f.Close()
-	defer fcpu.Close()
-	defer fheap.Close()
-	pprof.StartCPUProfile(fcpu)
-	pprof.WriteHeapProfile(fheap)
-	trace.Start(f)
+	defer func() {
+		_ = f.Close()
+		_ = fcpu.Close()
+		_ = fheap.Close()
+	}()
+	_ = pprof.StartCPUProfile(fcpu)
+	_ = pprof.WriteHeapProfile(fheap)
+	_ = trace.Start(f)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -602,11 +602,8 @@ func BenchmarkLargeGJK2(b *testing.B) {
 		b.StartTimer()
 
 		collisionPair := GJK(pair)
-
-		for cp := range collisionPair {
-			s := cp.simplex.Count
-			s++
-		}
+		cp := <-collisionPair
+		cp.BodyA.IsSleeping = false
 	}
 
 	b.StopTimer()
@@ -643,12 +640,14 @@ func BenchmarkLargeEPA2(b *testing.B) {
 	f, _ := os.Create("trace.out")
 	fcpu, _ := os.Create(`cpu.prof`)
 	fheap, _ := os.Create(`heap.prof`)
-	defer f.Close()
-	defer fcpu.Close()
-	defer fheap.Close()
-	pprof.StartCPUProfile(fcpu)
-	pprof.WriteHeapProfile(fheap)
-	trace.Start(f)
+	defer func() {
+		_ = f.Close()
+		_ = fcpu.Close()
+		_ = fheap.Close()
+	}()
+	_ = pprof.StartCPUProfile(fcpu)
+	_ = pprof.WriteHeapProfile(fheap)
+	_ = trace.Start(f)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -756,12 +755,14 @@ func BenchmarkLargeWorldStep(b *testing.B) {
 	f, _ := os.Create("trace.out")
 	fcpu, _ := os.Create(`cpu.prof`)
 	fheap, _ := os.Create(`heap.prof`)
-	defer f.Close()
-	defer fcpu.Close()
-	defer fheap.Close()
-	pprof.StartCPUProfile(fcpu)
-	pprof.WriteHeapProfile(fheap)
-	trace.Start(f)
+	defer func() {
+		_ = f.Close()
+		_ = fcpu.Close()
+		_ = fheap.Close()
+	}()
+	_ = pprof.StartCPUProfile(fcpu)
+	_ = pprof.WriteHeapProfile(fheap)
+	_ = trace.Start(f)
 
 	b.ReportAllocs()
 	b.ResetTimer()
