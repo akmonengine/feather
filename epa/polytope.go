@@ -212,6 +212,8 @@ func (b *PolytopeBuilder) calculateCentroid() mgl64.Vec3 {
 				b.uniquePoints = append(b.uniquePoints, mgl64.Vec3{}) // Add space
 				copy(b.uniquePoints[insertIdx+1:], b.uniquePoints[insertIdx:])
 				b.uniquePoints[insertIdx] = point
+			} else {
+				b.uniquePoints = append(b.uniquePoints, point)
 			}
 		}
 	}
