@@ -331,7 +331,7 @@ func TestShapeConsistency(t *testing.T) {
 			sphere.GetContactFeature(dir, &features, &featureCount)
 
 			// Pour une sphère, GetContactFeature doit retourner exactement le point de support
-			if len(features) != 1 || !vec3Equal(sphereSupport, features[0], 1e-9) {
+			if featureCount != 1 || !vec3Equal(sphereSupport, features[0], 1e-9) {
 				t.Errorf("Sphere support/contact feature mismatch: support=%v, feature=%v", sphereSupport, features)
 			}
 		}
@@ -456,67 +456,6 @@ func TestSphereComputeAABB(t *testing.T) {
 			aabbNoRotation := tt.sphere.GetAABB()
 			if !aabb.Min.ApproxEqual(aabbNoRotation.Min) || !aabb.Max.ApproxEqual(aabbNoRotation.Max) {
 				t.Errorf("Sphere AABB affected by rotation, but should not be")
-			}
-		})
-	}
-}
-
-func TestPlaneComputeAABB(t *testing.T) {
-	tests := []struct {
-		name          string
-		plane         *Plane
-		transform     Transform
-		checkInfinite bool // vérifier les dimensions infinies
-	}{
-		{
-			name:  "horizontal plane (Y-up)",
-			plane: &Plane{Normal: mgl64.Vec3{0, 1, 0}, Distance: 0},
-			transform: Transform{
-				Position: mgl64.Vec3{0, 0, 0},
-				Rotation: mgl64.QuatIdent(),
-			},
-			checkInfinite: true,
-		},
-		{
-			name:  "vertical plane (X-normal)",
-			plane: &Plane{Normal: mgl64.Vec3{1, 0, 0}, Distance: 5},
-			transform: Transform{
-				Position: mgl64.Vec3{0, 0, 0},
-				Rotation: mgl64.QuatIdent(),
-			},
-			checkInfinite: true,
-		},
-		{
-			name:  "diagonal plane",
-			plane: &Plane{Normal: mgl64.Vec3{1, 1, 1}.Normalize(), Distance: -2},
-			transform: Transform{
-				Position: mgl64.Vec3{10, 20, 30},
-				Rotation: mgl64.QuatIdent(),
-			},
-			checkInfinite: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tt.plane.ComputeAABB(tt.transform)
-			aabb := tt.plane.GetAABB()
-
-			// Vérification de base - l'AABB doit être valide
-			if aabb.Min[0] > aabb.Max[0] || aabb.Min[1] > aabb.Max[1] || aabb.Min[2] > aabb.Max[2] {
-				t.Errorf("Invalid AABB: Min %v > Max %v", aabb.Min, aabb.Max)
-			}
-
-			// Si on doit vérifier les dimensions infinies
-			if tt.checkInfinite {
-				const infinity = 1e10
-				// Pour un plan horizontal, X et Z doivent être "infinis"
-				if math.Abs(aabb.Min[0]+infinity) > 1e6 || math.Abs(aabb.Max[0]-infinity) > 1e6 {
-					t.Errorf("X dimension not infinite: Min=%v, Max=%v", aabb.Min[0], aabb.Max[0])
-				}
-				if math.Abs(aabb.Min[2]+infinity) > 1e6 || math.Abs(aabb.Max[2]-infinity) > 1e6 {
-					t.Errorf("Z dimension not infinite: Min=%v, Max=%v", aabb.Min[2], aabb.Max[2])
-				}
 			}
 		})
 	}

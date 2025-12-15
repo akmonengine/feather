@@ -110,8 +110,8 @@ func TestClampSmallVelocities(t *testing.T) {
 		},
 		{
 			name:             "small but above threshold velocity is not clamped",
-			initialVelocity:  mgl64.Vec3{1e-7, 0, 0},
-			expectedVelocity: mgl64.Vec3{1e-7, 0, 0},
+			initialVelocity:  mgl64.Vec3{2e-5, 0, 0},
+			expectedVelocity: mgl64.Vec3{2e-5, 0, 0},
 			shouldClamp:      false,
 		},
 		{
