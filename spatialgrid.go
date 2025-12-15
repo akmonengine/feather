@@ -90,24 +90,15 @@ func (sg *SpatialGrid) SortCells() {
 }
 
 // FindPairsParallel - Parallel version returning a channel
-func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers int) <-chan Pair {
+func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, workersCount int) <-chan Pair {
 	var wg sync.WaitGroup
-	pairsChan := make(chan Pair, numWorkers*10)
-
-	bodiesPerWorker := len(bodies) / numWorkers
-	if bodiesPerWorker == 0 {
-		bodiesPerWorker = 1
-	}
-
+	pairsChan := make(chan Pair, workersCount*10)
 	clearSeen := make([]bool, len(bodies))
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
 
-		startIdx := w * bodiesPerWorker
-		endIdx := startIdx + bodiesPerWorker
-		if w == numWorkers-1 {
-			endIdx = len(bodies)
-		}
+	dataSize := len(bodies)
+	chunkSize := (dataSize + workersCount - 1) / workersCount
+	for workerID := 0; workerID < workersCount; workerID++ {
+		wg.Add(1)
 
 		go func(start, end int) {
 			defer wg.Done()
@@ -161,7 +152,7 @@ func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, numWorkers i
 					}
 				}
 			}
-		}(startIdx, endIdx)
+		}(workerID*chunkSize, min((workerID+1)*chunkSize, dataSize))
 	}
 
 	go func() {
