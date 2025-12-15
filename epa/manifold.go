@@ -48,7 +48,6 @@ type ManifoldBuilder struct {
 	worldFeatureB [maxBufferSize]mgl64.Vec3
 	clipBuffer1   [maxBufferSize]mgl64.Vec3
 	clipBuffer2   [maxBufferSize]mgl64.Vec3
-	clippedResult [maxBufferSize]mgl64.Vec3 // Dedicated buffer for final clipping result
 	tempPoints    [maxBufferSize]constraint.ContactPoint
 
 	// Counters
