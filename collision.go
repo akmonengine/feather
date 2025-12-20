@@ -32,22 +32,22 @@ type CollisionPair struct {
 // BroadPhase performs broad-phase collision detection using AABB overlap tests
 // It returns pairs of bodies whose AABBs overlap and might be colliding
 // This is an O(n²) brute-force approach suitable for small numbers of bodies
-func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody) <-chan Pair {
+func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody, workersCount int) <-chan Pair {
 	spatialGrid.Clear()
 	for i, body := range bodies {
 		spatialGrid.Insert(i, body)
 	}
 	spatialGrid.SortCells()
 
-	checkingPairs := spatialGrid.FindPairsParallel(bodies, WORKERS)
+	checkingPairs := spatialGrid.FindPairsParallel(bodies, workersCount)
 
 	return checkingPairs
 }
 
-func NarrowPhase(pairs <-chan Pair) []*constraint.ContactConstraint {
+func NarrowPhase(pairs <-chan Pair, workersCount int) []*constraint.ContactConstraint {
 	// Dispatcher: separate pairs with planes, and normal convex objects
-	planePairs := make(chan Pair, WORKERS)
-	gjkPairs := make(chan Pair, WORKERS)
+	planePairs := make(chan Pair, workersCount)
+	gjkPairs := make(chan Pair, workersCount)
 
 	go func() {
 		defer close(planePairs)
@@ -66,14 +66,14 @@ func NarrowPhase(pairs <-chan Pair) []*constraint.ContactConstraint {
 	}()
 
 	// Canal pour collecter tous les contacts
-	allContacts := make(chan *constraint.ContactConstraint, WORKERS*2)
+	allContacts := make(chan *constraint.ContactConstraint, workersCount*2)
 	var wg sync.WaitGroup
 	// Path 1: GJK/EPA for convex objects
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		collisionPairs := GJK(gjkPairs)
-		contactsChan := EPA(collisionPairs)
+		collisionPairs := GJK(gjkPairs, workersCount)
+		contactsChan := EPA(collisionPairs, workersCount)
 		for contact := range contactsChan {
 			allContacts <- contact
 		}
@@ -83,7 +83,7 @@ func NarrowPhase(pairs <-chan Pair) []*constraint.ContactConstraint {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		contactsChan := collidePlane(planePairs)
+		contactsChan := collidePlane(planePairs, workersCount)
 		for contact := range contactsChan {
 			allContacts <- contact
 		}
@@ -104,14 +104,14 @@ func NarrowPhase(pairs <-chan Pair) []*constraint.ContactConstraint {
 	return contacts
 }
 
-func GJK(pairChan <-chan Pair) <-chan CollisionPair {
-	collisionChan := make(chan CollisionPair, WORKERS)
+func GJK(pairChan <-chan Pair, workersCount int) <-chan CollisionPair {
+	collisionChan := make(chan CollisionPair, workersCount)
 
 	go func() {
 		var wg sync.WaitGroup
 		defer close(collisionChan)
 
-		for range WORKERS {
+		for range workersCount {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -139,14 +139,14 @@ func GJK(pairChan <-chan Pair) <-chan CollisionPair {
 	return collisionChan
 }
 
-func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
-	ch := make(chan *constraint.ContactConstraint, WORKERS)
+func EPA(p <-chan CollisionPair, workersCount int) <-chan *constraint.ContactConstraint {
+	ch := make(chan *constraint.ContactConstraint, workersCount)
 
 	go func() {
 		var wg sync.WaitGroup
 		defer close(ch)
 
-		for range WORKERS {
+		for range workersCount {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -167,14 +167,14 @@ func EPA(p <-chan CollisionPair) <-chan *constraint.ContactConstraint {
 	return ch
 }
 
-func collidePlane(pairs <-chan Pair) <-chan *constraint.ContactConstraint {
-	ch := make(chan *constraint.ContactConstraint, WORKERS)
+func collidePlane(pairs <-chan Pair, workersCount int) <-chan *constraint.ContactConstraint {
+	ch := make(chan *constraint.ContactConstraint, workersCount)
 
 	go func() {
 		var wg sync.WaitGroup
 		defer close(ch)
 
-		for range WORKERS {
+		for range workersCount {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

@@ -6,7 +6,7 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const WORKERS = 8
+const DEFAULT_WORKERS = 1
 
 type World struct {
 	// List of all rigid bodies in the world
@@ -15,6 +15,7 @@ type World struct {
 	Gravity     mgl64.Vec3
 	Substeps    int
 	SpatialGrid *SpatialGrid
+	Workers     int
 }
 
 // AddBody adds a rigid body to the world
@@ -38,6 +39,7 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 }
 
 func (w *World) Step(dt float64) {
+	w.Workers = max(DEFAULT_WORKERS, w.Workers)
 	h := dt / float64(w.Substeps)
 
 	for range w.Substeps {
@@ -45,7 +47,7 @@ func (w *World) Step(dt float64) {
 
 		// Phase 2.0: Collision pair finding - Broad phase
 		// Phase 2.1: Collision pair finding - narrow phase
-		constraints := NarrowPhase(BroadPhase(w.SpatialGrid, w.Bodies))
+		constraints := w.detectCollision()
 
 		// Phase 3: Solver, only one iteration is required thanks to substeps
 		w.solvePosition(h, constraints)
@@ -62,25 +64,29 @@ func (w *World) Step(dt float64) {
 }
 
 func (w *World) integrate(h float64) {
-	task(WORKERS, w.Bodies, func(body *actor.RigidBody) {
+	task(w.Workers, w.Bodies, func(body *actor.RigidBody) {
 		body.Integrate(h, w.Gravity)
 	})
 }
 
+func (w *World) detectCollision() []*constraint.ContactConstraint {
+	return NarrowPhase(BroadPhase(w.SpatialGrid, w.Bodies, w.Workers), w.Workers)
+}
+
 func (w *World) solvePosition(h float64, constraints []*constraint.ContactConstraint) {
-	task(WORKERS, constraints, func(constraint *constraint.ContactConstraint) {
+	task(w.Workers, constraints, func(constraint *constraint.ContactConstraint) {
 		constraint.SolvePosition(h)
 	})
 }
 
 func (w *World) update(h float64) {
-	task(WORKERS, w.Bodies, func(body *actor.RigidBody) {
+	task(w.Workers, w.Bodies, func(body *actor.RigidBody) {
 		body.Update(h)
 	})
 }
 
 func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstraint) {
-	task(WORKERS, constraints, func(constraint *constraint.ContactConstraint) {
+	task(w.Workers, constraints, func(constraint *constraint.ContactConstraint) {
 		constraint.SolveVelocity(h)
 	})
 }
