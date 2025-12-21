@@ -37,6 +37,9 @@ func (material Material) GetMass() float64 {
 
 // RigidBody represents a rigid body in the physics simulation
 type RigidBody struct {
+	// Useful to map to user data (e.g. entity id)
+	Id any
+
 	// Spatial properties
 	PreviousTransform Transform
 	Transform         Transform
@@ -55,6 +58,7 @@ type RigidBody struct {
 	accumulatedForce  mgl64.Vec3
 	accumulatedTorque mgl64.Vec3
 
+	IsTrigger  bool
 	IsSleeping bool
 	SleepTimer float64
 
@@ -108,15 +112,23 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 	return rb
 }
 
-func (rb *RigidBody) TrySleep(dt float64, timethreshold float64, velocityThreshold float64) {
+// TrySleep check if a body can be set to sleep.
+// returns 0 if no changes, 1 if set to sleep, 2 if waken
+func (rb *RigidBody) TrySleep(dt float64, timethreshold float64, velocityThreshold float64) uint8 {
 	if rb.Velocity.Len() < velocityThreshold && rb.AngularVelocity.Len() < velocityThreshold {
 		rb.SleepTimer += dt // Incrémente le timer
 		if !rb.IsSleeping && rb.SleepTimer >= timethreshold {
 			rb.Sleep()
+
+			return 1
 		}
 	} else {
 		rb.WakeUp()
+
+		return 2
 	}
+
+	return 0
 }
 
 func (rb *RigidBody) Sleep() {

@@ -16,6 +16,8 @@ type World struct {
 	Substeps    int
 	SpatialGrid *SpatialGrid
 	Workers     int
+
+	Events Events
 }
 
 // AddBody adds a rigid body to the world
@@ -36,6 +38,13 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	if k != -1 {
 		w.Bodies = append(w.Bodies[:k], w.Bodies[k+1:]...)
 	}
+
+	delete(w.Events.sleepStates, body)
+	for pair := range w.Events.previousActivePairs {
+		if pair.bodyA == body || pair.bodyB == body {
+			delete(w.Events.previousActivePairs, pair)
+		}
+	}
 }
 
 func (w *World) Step(dt float64) {
@@ -49,6 +58,8 @@ func (w *World) Step(dt float64) {
 		// Phase 2.1: Collision pair finding - narrow phase
 		constraints := w.detectCollision()
 
+		constraints = w.Events.recordCollisions(constraints)
+
 		// Phase 3: Solver, only one iteration is required thanks to substeps
 		w.solvePosition(h, constraints)
 
@@ -61,6 +72,9 @@ func (w *World) Step(dt float64) {
 
 		w.trySleep(h)
 	}
+
+	w.Events.processSleepEvents(w.Bodies)
+	w.Events.flush()
 }
 
 func (w *World) integrate(h float64) {
@@ -94,7 +108,7 @@ func (w *World) solveVelocity(h float64, constraints []*constraint.ContactConstr
 // trySleep sets the body to sleep if its velocity is lower than the threshold, for a given duration
 // this method is too simple to use a task, it slows down in multiple goroutines
 func (w *World) trySleep(h float64) {
-	task(1, w.Bodies, func(body *actor.RigidBody) {
-		body.TrySleep(h, 0.1, 0.05) // Seuil de vitesse pour le sleeping
-	})
+	for _, body := range w.Bodies {
+		body.TrySleep(h, 0.1, 0.05)
+	}
 }
