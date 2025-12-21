@@ -153,21 +153,22 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	halfSize := b.HalfExtents
 
 	// Générer les 4 coins selon la face
-	if bestAxisIdx == 0 { // Face X
+	switch bestAxisIdx {
+	case 0:
 		x := sign * halfSize.X()
 		output[0] = mgl64.Vec3{x, -halfSize.Y(), -halfSize.Z()}
 		output[1] = mgl64.Vec3{x, -halfSize.Y(), halfSize.Z()}
 		output[2] = mgl64.Vec3{x, halfSize.Y(), halfSize.Z()}
 		output[3] = mgl64.Vec3{x, halfSize.Y(), -halfSize.Z()}
 		*count = 4
-	} else if bestAxisIdx == 1 { // Face Y
+	case 1:
 		y := sign * halfSize.Y()
 		output[0] = mgl64.Vec3{-halfSize.X(), y, -halfSize.Z()}
 		output[1] = mgl64.Vec3{-halfSize.X(), y, halfSize.Z()}
 		output[2] = mgl64.Vec3{halfSize.X(), y, halfSize.Z()}
 		output[3] = mgl64.Vec3{halfSize.X(), y, -halfSize.Z()}
 		*count = 4
-	} else { // Face Z
+	default:
 		z := sign * halfSize.Z()
 		output[0] = mgl64.Vec3{-halfSize.X(), -halfSize.Y(), z}
 		output[1] = mgl64.Vec3{halfSize.X(), -halfSize.Y(), z}
@@ -247,7 +248,7 @@ func (s *Sphere) GetAABB() AABB {
 // ComputeMass calculates mass data for the sphere
 func (s *Sphere) ComputeMass(density float64) float64 {
 	// Volume of sphere = (4/3) * π * r³
-	volume := (4.0 / 3.0) * math.Pi * math.Pow(s.Radius, 3)
+	volume := (4.0 / 3.0) * math.Pi * s.Radius * s.Radius * s.Radius
 
 	return density * volume
 }

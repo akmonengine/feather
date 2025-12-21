@@ -139,7 +139,7 @@ func (e *Events) recordCollisions(constraints []*constraint.ContactConstraint) [
 		pair := makePairKey(c.BodyA, c.BodyB)
 		e.currentActivePairs[pair] = true
 
-		if c.BodyA.IsTrigger == false && c.BodyB.IsTrigger == false {
+		if !c.BodyA.IsTrigger && !c.BodyB.IsTrigger {
 			constraints[n] = c
 			n++
 		}
@@ -147,16 +147,6 @@ func (e *Events) recordCollisions(constraints []*constraint.ContactConstraint) [
 	constraints = constraints[:n]
 
 	return constraints
-}
-
-// emitSleep emits a sleep event (called from trySleep)
-func (e *Events) emitSleep(body *actor.RigidBody) {
-	e.buffer = append(e.buffer, SleepEvent{Body: body})
-}
-
-// emitWake emits a wake event (called from WakeUp)
-func (e *Events) emitWake(body *actor.RigidBody) {
-	e.buffer = append(e.buffer, WakeEvent{Body: body})
 }
 
 // processCollisionEvents compares current and previous pairs to detect Enter/Stay/Exit
