@@ -194,7 +194,7 @@ compression impulse (`ImpactVelocity`, `CompressionImpulse`, warm started like t
 the second step, with the whole impulse. Bounced at the end of the first step, a ball dropped from 1 m at 60 Hz gave
 back 10 % of its height instead of 92 % (`TestBounceRestitution`, at every rate).
 Both are needed: a pile of balls bouncing with `e = 1` gains energy with Newton alone (411 J) or Poisson alone
-(3523 J), not with both (`TestRestitutionNeverAddsEnergy`). The bounce uses the velocity before the step: a body not
+(3523 J), not with both (`TestRestitutionNeverAddsEnergy`). The bounce uses the approach velocity of the impact: a body not
 round and spinning fast can turn its point away before the end of the step, and bounce higher than it fell over
 `e = 0.5` (see ARCHITECTURE.md, as documented by Jolt). Newton's law is the one of the game engines (Box2D, Jolt).
 
