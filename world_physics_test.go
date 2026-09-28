@@ -11,11 +11,10 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-// Physical scenarios with a known answer, at the rate AkmonEngine runs Feather:
-// 50 Hz, 12 sub-steps.
+// Physical scenarios with a known answer, at the setting of Feather for the games: 60 Hz, 8 sub-steps.
 const (
-	sceneDt       = 1.0 / 50
-	sceneSubsteps = 12
+	sceneDt       = 1.0 / 60
+	sceneSubsteps = 8
 	sceneGravity  = 9.81
 	cubeHalf      = 0.25
 )
@@ -189,13 +188,14 @@ func TestBounceRestitution(t *testing.T) {
 		ground := addGround(w, 0)
 		ground.Material.Restitution = e
 		ball := addBody(w, mgl64.Vec3{0, 1 + cubeHalf, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: cubeHalf}, actor.BodyTypeDynamic, 0, e)
+		// the apex of the rebound: the height reached while going up after the hit
 		hit, apex := false, 0.0
 		simulate(w, 2.5, func() {
 			h := ball.Transform.Position.Y() - cubeHalf
 			if h < 0.01 {
 				hit = true
 			}
-			if hit {
+			if hit && ball.Velocity.Y() > 0 {
 				apex = math.Max(apex, h)
 			}
 		})
@@ -217,7 +217,7 @@ func TestForcesAreSI(t *testing.T) {
 	m := ball.Material.GetMass()
 	inertia := ball.InertiaLocal.At(0, 0)
 	const force, torque = 10.0, 3.0
-	for i := 0; i < 50; i++ {
+	for i := 0; i < int(math.Round(1/sceneDt)); i++ {
 		ball.AddForce(mgl64.Vec3{force, 0, 0})
 		ball.AddTorque(mgl64.Vec3{0, torque, 0})
 		w.Step(sceneDt)
@@ -250,8 +250,12 @@ func TestTumblingKeepsAngularMomentum(t *testing.T) {
 			flipped = true
 		}
 	})
-	if drift := momentum().Sub(l0).Len() / l0.Len(); drift > 0.01 {
-		t.Errorf("angular momentum drifted by %.2f%% over 10 s", drift*100)
+	// the gyroscopic torque is integrated to the first order: each substep h can lose |L| (ω h)² at most, as the
+	// invariants (measure.gyroscopicError); over 10 s, T ω² h. Measured: 30 times under the bound, linear in h
+	h := sceneDt / sceneSubsteps
+	bound := 10 * box.AngularVelocity.LenSqr() * h
+	if drift := momentum().Sub(l0).Len() / l0.Len(); drift > bound {
+		t.Errorf("angular momentum drifted by %.2f%% over 10 s, bound %.1f%%", drift*100, bound*100)
 	}
 	if e := energy(); e > e0*1.001 || e < e0*0.9 {
 		t.Errorf("rotational energy went from %.4f to %.4f J", e0, e)
@@ -270,7 +274,7 @@ func TestDamping(t *testing.T) {
 	ball.Velocity, ball.AngularVelocity = mgl64.Vec3{1, 0, 0}, mgl64.Vec3{0, 0, 1}
 	simulate(w, 1, nil)
 	h := sceneDt / sceneSubsteps
-	steps := float64(50 * sceneSubsteps)
+	steps := math.Round(1/sceneDt) * sceneSubsteps
 	if want := math.Pow(1/(1+h*0.5), steps); math.Abs(ball.Velocity.X()-want) > 1e-9 {
 		t.Errorf("linear speed %.6f, want %.6f", ball.Velocity.X(), want)
 	}

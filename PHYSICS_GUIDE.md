@@ -128,7 +128,7 @@ are twice as stiff.
 - Higher values = less overlap under load (stacks), but it is capped at 1/8 of the substeps rate: `substeps / dt / 8`.
 - Lower values = softer contacts.
 
-With 12 substeps at 50 Hz, a stack of 10 boxes of 50 cm sinks by ~23 mm (Box2D v3.1: 30 mm): a contact sinks by
+With 8 substeps at 60 Hz, a stack of 10 boxes of 50 cm sinks by ~32 mm (Box2D v3.1: 30 mm): a contact sinks by
 (load / mass) g / (2π hertz)² under its load. A stiffer world sinks less, but a heavy body landing on a light one bounces
 more.
 
@@ -138,7 +138,7 @@ travel during the step. Between 2 dynamic bodies, from 2 cm only: a fast body ca
 spring of the contact pushes it out.
 A fast body is also moved back to its first impact with a static body (continuous collision). Set `IsBullet` on a small
 fast body (a projectile) to stop it on the dynamic bodies too.
-A ball at 40 m/s does not go through a 4 cm wall at 50 Hz.
+A ball at 40 m/s does not go through a 4 cm wall at 60 Hz (nor at 80 m/s).
 
 ### Sleep
 The bodies touching each other form an island. An island resting for 0.5 s (all its bodies under 0.05 m/s and 0.05 rad/s)

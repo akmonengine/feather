@@ -113,9 +113,9 @@ restitution, continuous collision, islands), without allocation.
   of contact never stops (no sleep).
 - A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
   the feature of the body above the triangle, the middle of the capsule is missed.
-- The restitution is applied once per step, with the velocity before the step: a body not round (box, capsule),
-  bouncy (`e` over 0.5) and spinning fast (20-50 rad/s) can bounce higher than it fell. Measured: up to +60 % of
-  energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
+- The restitution is applied once per step, with the approach velocity of the impact: a body not round (box,
+  capsule), bouncy (`e` over 0.5) and spinning fast (10-20 rad/s) can bounce higher than it fell. Measured at 60 Hz
+  with 8 substeps: up to +21 % of energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
 - No kinematic bodies (moving platforms): a body is static or dynamic.
 - The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
   not the other pairs: 2 fast dynamic bodies rely on their speculative contacts (2 cm) and on the spring of the contact.

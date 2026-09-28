@@ -7,7 +7,8 @@
 //	go run . -update                                          # write baseline.json, after a wanted change
 //	go run . -scenes ; go run . -compare                      # the scenes of Solver2D (reference.go)
 //
-// Every scene runs at AkmonEngine's rate: 50 Hz, 12 sub-steps, one worker.
+// Every scene runs at the setting of each version, one worker: 60 Hz with 8 sub-steps for the working tree (the
+// setting of Feather for the games), 50 Hz with 12 sub-steps for v0.2.0 (the setting AkmonEngine ran it with).
 package main
 
 import (
@@ -24,9 +25,7 @@ import (
 )
 
 const (
-	dt       = 1.0 / 50
-	substeps = 12
-	g        = 9.81
+	g = 9.81
 )
 
 func body(w *feather.World, t actor.Transform, s actor.ShapeInterface, typ actor.BodyType, mu, e float64) *actor.RigidBody {
@@ -182,7 +181,7 @@ func force() {
 	b := body(w, tr(mgl64.Vec3{}, mgl64.QuatIdent()), &actor.Sphere{Radius: 0.25}, actor.BodyTypeDynamic, 0, 0)
 	m := b.Material.GetMass()
 	F := 10.0
-	for i := 0; i < 50; i++ {
+	for i := 0; i < int(math.Round(1/dt)); i++ {
 		b.AddForce(mgl64.Vec3{F, 0, 0})
 		w.Step(dt)
 	}

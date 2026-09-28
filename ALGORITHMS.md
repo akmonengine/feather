@@ -183,14 +183,18 @@ The center is the average of the points, weighted by their separation (as Box3D:
 twice). µ is the static friction when the center slides slower than 1 cm/s, the dynamic friction otherwise.
 
 ### Restitution
-Applied once after the substeps, for the contacts hitting faster than 1 m/s. The bounce impulse goes towards the
-velocity `-e * vn_before` (Newton), and is at most `e` times the impulse which stopped the point, its normal impulse of
-the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics):
+Applied once after the substeps, for the contacts hitting faster than 1 m/s, once their compression is over (the
+point doesn't approach anymore). The bounce impulse goes towards the velocity `-e * vn_impact` (Newton), and is at most
+`e` times the impulse of the compression (Poisson's hypothesis, W. J. Stronge, Impact Mechanics):
 ````
-λ = max(0, min(-m (vn + e * vn_before), e * λ_step))
+λ = max(0, min(-m (vn + e * vn_impact), e * λ_compression))
 ````
+An impact starting at the very end of a step is compressed over 2 steps: the point keeps its approach velocity and its
+compression impulse (`ImpactVelocity`, `CompressionImpulse`, warm started like the impulses) and bounces at the end of
+the second step, with the whole impulse. Bounced at the end of the first step, a ball dropped from 1 m at 60 Hz gave
+back 10 % of its height instead of 92 % (`TestBounceRestitution`, at every rate).
 Both are needed: a pile of balls bouncing with `e = 1` gains energy with Newton alone (411 J) or Poisson alone
-(3523 J), not with both (`TestRestitutionNeverAddsEnergy`). The bounce uses the velocity before the step: a body not
+(3523 J), not with both (`TestRestitutionNeverAddsEnergy`). The bounce uses the approach velocity of the impact: a body not
 round and spinning fast can turn its point away before the end of the step, and bounce higher than it fell over
 `e = 0.5` (see ARCHITECTURE.md, as documented by Jolt). Newton's law is the one of the game engines (Box2D, Jolt).
 

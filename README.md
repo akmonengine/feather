@@ -74,18 +74,20 @@ end
 - The bodies touching each other sleep and wake up together (islands).
 
 ### Why not XPBD anymore
-Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`, 50 Hz, 12 substeps):
+Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`), each version at its own setting:
+TGS Soft at 60 Hz with 8 substeps (the setting of Feather for the games), v0.2.0 at 50 Hz with 12 substeps (the
+setting AkmonEngine ran it with; v0.2.0 has no default):
 
 | Scene | v0.2.0 (XPBD) | TGS Soft | Expected |
 |---|---|---|---|
-| Pyramid of 55 boxes, 3 s | explodes (top box at 134 m) | stands (4.748 m) | 4.750 m |
+| Pyramid of 55 boxes, 3 s | explodes (top box at 93 m) | stands (4.744 m) | 4.750 m |
 | Box on a 20° slope, µ = 0.6 | slides 9.9 m | 0 m | 0 m |
-| Box on a 35° slope, µ = 0.3 | slides 16.9 m | 9.654 m | 9.648 m |
-| Bounce from 1 m, restitution 0.5 | 0.06 m | 0.24 m | 0.25 m |
+| Box on a 35° slope, µ = 0.3 | slides 16.9 m | 9.657 m | 9.648 m |
+| Bounce from 1 m, restitution 0.5 | 0.06 m | 0.23 m | 0.25 m |
 | 10 N during 1 s on 32.7 kg | 15279 m/s | 0.306 m/s | 0.306 m/s |
-| Same scene, run twice | 39/40 bodies differ | identical | identical |
+| Same scene, run twice | 38/40 bodies differ | identical | identical |
 | EPA sphere-box normal (p99) | 2.7° | 0.03° | 0° |
-| Step, 10 / 100 / 500 bodies resting on the ground (one layer of boxes & spheres), 1 worker | 0.41 / 1.94 / 8.8 ms | 0.03 / 0.27 / 1.28 ms | |
+| Step, 10 / 100 / 500 bodies resting on the ground (one layer of boxes & spheres), 1 worker | 0.39 / 1.82 / 8.3 ms | 0.017 / 0.11 / 0.57 ms | |
 
 ```
 cd bench
@@ -93,8 +95,8 @@ go run .                                            # current version
 go run -tags v020 -modfile=go.v020.mod .            # v0.2.0
 ```
 
-Both versions run 12 substeps at 50 Hz. A heavier scene, 500 boxes & spheres falling on each other (`BenchmarkWorldStep`),
-takes ~5.5 ms per step on 1 worker, ~1.9 ms on 8 workers.
+A heavier scene, 500 boxes & spheres falling on each other (`BenchmarkWorldStep`, 60 Hz, 8 substeps), takes ~2.1 ms
+per step on 1 worker, ~0.8 ms on 8 workers; 2000 bodies awake, 6.5 ms and 2 ms.
 
 ### Constraints
 - Contact: generated when a collision is detected between two rigid bodies, up to 4 points (manifold), with friction,

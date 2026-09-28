@@ -43,6 +43,13 @@ func moved(b *actor.RigidBody) {
 	b.UpdateAABB()
 }
 
+// the setting of Feather for the games: 60 Hz (the default rate of Box3D, the reference, which runs its default 4
+// substeps) with 8 substeps
+const (
+	Dt       = 1.0 / 60
+	substeps = 8
+)
+
 func newWorld() *feather.World {
 	return &feather.World{
 		Gravity:  mgl64.Vec3{0, -gravity, 0},

@@ -39,6 +39,12 @@ func ball(w *feather.World, a, b *actor.RigidBody, anchor mgl64.Vec3) {
 // moved: v0.2.0 computes the AABB at each step
 func moved(b *actor.RigidBody) {}
 
+// the setting AkmonEngine ran v0.2.0 with: 50 Hz, 12 substeps (v0.2.0 has no default)
+const (
+	Dt       = 1.0 / 50
+	substeps = 12
+)
+
 func newWorld() *feather.World {
 	return &feather.World{
 		Gravity:     mgl64.Vec3{0, -gravity, 0},
