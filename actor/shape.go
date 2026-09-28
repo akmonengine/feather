@@ -13,11 +13,14 @@ const (
 	ShapeTypeSphere ShapeType = iota
 	ShapeTypeBox
 	ShapeTypePlane
+	ShapeTypeCapsule
 )
 
+// ContactPoint is a contact against a plane: Position lies halfway between the shape's
+// surface and the plane, Separation is their signed distance (negative when overlapping).
 type ContactPoint struct {
-	Position    mgl64.Vec3
-	Penetration float64
+	Position   mgl64.Vec3
+	Separation float64
 }
 
 type PlaneContact []ContactPoint
@@ -33,7 +36,9 @@ type ShapeInterface interface {
 	ComputeInertia(mass float64) mgl64.Mat3
 	Support(direction mgl64.Vec3) mgl64.Vec3
 	GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int)
-	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact)
+	// CollideWithPlane returns the contacts of the shape with the plane
+	// (planeNormal·p + planeDistance = 0) whose separation is at most margin.
+	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact)
 }
 
 // Box represents an oriented box collision shape
@@ -178,8 +183,8 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	}
 }
 
-// CollideWithPlane - Collision Box/Plane
-func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+// CollideWithPlane returns the corners of the box within margin of the plane.
+func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
 	h := b.HalfExtents
 	localVertices := [8]mgl64.Vec3{
 		{-h.X(), -h.Y(), -h.Z()},
@@ -193,24 +198,16 @@ func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, my
 	}
 
 	var contactPoints []ContactPoint
-	maxDepth := 0.0
-
 	for _, vertex := range localVertices {
-		worldVertex := myTransform.Rotation.Rotate(vertex).Add(myTransform.Position)
-		distance := worldVertex.Sub(planeNormal.Mul(-planeDistance)).Dot(planeNormal)
-
-		if distance < 0 {
-			depth := -distance
-			if depth > maxDepth {
-				maxDepth = depth
-			}
-			pointOnPlane := worldVertex.Sub(planeNormal.Mul(distance))
-
-			contactPoints = append(contactPoints, ContactPoint{
-				Position:    pointOnPlane,
-				Penetration: depth,
-			})
+		worldVertex := myTransform.ToWorld(vertex)
+		separation := worldVertex.Dot(planeNormal) + planeDistance
+		if separation > margin {
+			continue
 		}
+		contactPoints = append(contactPoints, ContactPoint{
+			Position:   worldVertex.Sub(planeNormal.Mul(separation / 2)),
+			Separation: separation,
+		})
 	}
 
 	if len(contactPoints) == 0 {
@@ -266,7 +263,11 @@ func (s *Sphere) ComputeInertia(mass float64) mgl64.Mat3 {
 }
 
 func (s *Sphere) Support(direction mgl64.Vec3) mgl64.Vec3 {
-	return direction.Normalize().Mul(s.Radius)
+	length := direction.Len()
+	if length == 0 {
+		return mgl64.Vec3{0, s.Radius, 0}
+	}
+	return direction.Mul(s.Radius / length)
 }
 
 func (s *Sphere) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
@@ -274,22 +275,18 @@ func (s *Sphere) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, 
 	*count = 1
 }
 
-func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+// CollideWithPlane returns the lowest point of the sphere when it is within margin of the plane.
+func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
 	center := myTransform.Position
-	distance := center.Sub(planeNormal.Mul(-planeDistance)).Dot(planeNormal)
-	depth := s.Radius - distance
-
-	if depth <= 0 {
+	separation := center.Dot(planeNormal) + planeDistance - s.Radius
+	if separation > margin {
 		return false, PlaneContact{}
 	}
 
-	contactPoint := center.Sub(planeNormal.Mul(distance))
-
-	return true, []ContactPoint{{
-		Position:    contactPoint,
-		Penetration: depth,
-	},
-	}
+	return true, PlaneContact{{
+		Position:   center.Sub(planeNormal.Mul(s.Radius + separation/2)),
+		Separation: separation,
+	}}
 }
 
 // Plane represents an infinite plane collision shape
@@ -371,7 +368,7 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, c
 }
 
 // CollideWithPlane - Plane/Plane collision (not supported)
-func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform) (bool, PlaneContact) {
+func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
 	return false, PlaneContact{}
 }
 

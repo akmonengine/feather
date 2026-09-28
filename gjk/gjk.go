@@ -4,6 +4,8 @@
 // contains the origin. The algorithm builds a simplex incrementally, converging toward
 // the origin in typically 3-6 iterations.
 //
+// Each vertex of the simplex keeps its support points on A and B, for the witness points of EPA.
+//
 // For detailed algorithm explanation with pseudocode and visual examples, see:
 // ALGORITHMS.md - "GJK Algorithm" section
 //
@@ -20,16 +22,46 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
+const (
+	// maxIterations: safety limit to prevent infinite loops
+	maxIterations = 64
+
+	// degenerateEpsilon: the direction is null (the origin is on the simplex), relative to the size of the simplex
+	degenerateEpsilon = 1e-24
+
+	// hullEpsilon: the new point is on the same point/line/plane as the simplex, relative to its size
+	hullEpsilon = 1e-18
+)
+
+// Vertex of the Minkowski difference, with its support points: W = A - B
+type Vertex struct {
+	W mgl64.Vec3
+	A mgl64.Vec3
+	B mgl64.Vec3
+}
+
 // Simplex represents a set of 1-4 points in the Minkowski difference space.
-// The simplex evolves during GJK iterations, always containing the most recent support points.
-// Size progression: 1 point → 2 points (line) → 3 points (triangle) → 4 points (tetrahedron)
+// The last point is always the most recent
 type Simplex struct {
 	Points [4]mgl64.Vec3
+	A      [4]mgl64.Vec3
+	B      [4]mgl64.Vec3
 	Count  int
 }
 
 func (s *Simplex) Reset() {
 	s.Count = 0
+}
+
+func (s *Simplex) Vertex(i int) Vertex {
+	return Vertex{W: s.Points[i], A: s.A[i], B: s.B[i]}
+}
+
+func (s *Simplex) set(vertices ...Vertex) {
+	for i, v := range vertices {
+		s.Points[i], s.A[i], s.B[i] = v.W, v.A, v.B
+	}
+	s.Count = len(vertices)
 }
 
 var SimplexPool = sync.Pool{
@@ -38,360 +70,236 @@ var SimplexPool = sync.Pool{
 	},
 }
 
-// MinkowskiSupport computes a support point in the Minkowski difference (A - B).
-//
-// The Minkowski difference A - B is the set of all vectors (a - b) where a ∈ A and b ∈ B.
-// For collision detection, we only need the extreme points (support points) in any direction.
-//
-// Parameters:
-//   - a, b: The two rigid bodies to test
-//   - direction: The direction to find the furthest point
-//
-// Returns:
-//
-//	Support point: furthestPoint(A, direction) - furthestPoint(B, -direction)
-//
-// This is the fundamental query that makes GJK work for any convex shape - shapes only
-// need to implement a Support() function, not expose their full geometry.
+// MinkowskiSupport computes a support point in the Minkowski difference (A - B):
+// furthestPoint(A, direction) - furthestPoint(B, -direction)
 func MinkowskiSupport(a, b *actor.RigidBody, direction mgl64.Vec3) mgl64.Vec3 {
-	supportA := a.SupportWorld(direction)
-	supportB := b.SupportWorld(direction.Mul(-1))
-	return supportA.Sub(supportB)
+	return Support(a, b, direction, 0).W
 }
 
-// GJK performs collision detection between two convex rigid bodies.
-//
-// Algorithm overview:
-//  1. Start with initial search direction (toward B from A)
-//  2. Get first support point in Minkowski difference
-//  3. Iteratively refine simplex toward origin
-//  4. If origin is contained → collision
-//  5. If can't reach origin → no collision
-//
-// Typical convergence: 3-6 iterations for most shapes.
-//
-// Returns:
-//   - bool: true if collision detected, false otherwise
-//
-// The simplex is modified in place and contains 1-4 points. For collisions, it's always
-// a tetrahedron (4 points) containing the origin, which EPA uses as its initial polytope.
+// Support computes the support point of (A + margin) - B.
+// With a margin, shapes closer than the margin overlap: EPA can compute their distance (margin - depth)
+func Support(a, b *actor.RigidBody, direction mgl64.Vec3, margin float64) Vertex {
+	supportA := a.SupportWorld(direction)
+	if margin > 0 {
+		if length := direction.Len(); length > 0 {
+			supportA = supportA.Add(direction.Mul(margin / length))
+		}
+	}
+	supportB := b.SupportWorld(direction.Mul(-1))
+	return Vertex{W: supportA.Sub(supportB), A: supportA, B: supportB}
+}
+
+// GJK returns true if both bodies overlap. The simplex is then a tetrahedron containing the origin, for EPA
 func GJK(a, b *actor.RigidBody, simplex *Simplex) bool {
-	// Compute initial direction from A to B (optimization over random direction)
-	// Starting toward the other shape typically reduces iterations
+	return GJKMargin(a, b, 0, simplex)
+}
+
+// GJKMargin returns true if A + margin overlaps B
+func GJKMargin(a, b *actor.RigidBody, margin float64, simplex *Simplex) bool {
 	direction := b.Transform.Position.Sub(a.Transform.Position)
-	if direction.LenSqr() < 1e-8 {
-		direction = mgl64.Vec3{1, 0, 0} // Fallback if positions are identical
+	if direction.LenSqr() == 0 {
+		direction = mgl64.Vec3{1, 0, 0}
 	}
 
-	// Get first point of the simplex in the Minkowski difference
-	simplex.Points[0] = MinkowskiSupport(a, b, direction)
-	simplex.Count = 1
-
-	// New direction towards the origin from this first point
+	simplex.set(Support(a, b, direction, margin))
 	direction = simplex.Points[0].Mul(-1)
 
-	// If first support point is at/near origin, shapes are touching
-	if direction.LenSqr() < 1e-16 {
-		return true // Collision detected (rare: shapes exactly touching at point)
-	}
-
-	maxIterations := 32 // Safety limit to prevent infinite loops
 	for i := 0; i < maxIterations; i++ {
-		// Find a new support point in the direction towards the origin
-		newPoint := MinkowskiSupport(a, b, direction)
-
-		// Early exit test: If the new point doesn't pass the origin in the search direction,
-		// the origin cannot be reached, therefore no collision.
-		// This is the key optimization that makes GJK fast - we prove separation
-		// without building the full Minkowski difference.
-		if newPoint.Dot(direction) <= 0 {
-			return false // No collision detected - shapes are separated
+		if direction.LenSqr() <= degenerateEpsilon*simplexSize(simplex) {
+			// The origin is on the simplex: the shapes are touching
+			fillTetrahedron(a, b, margin, simplex)
+			return true
 		}
 
-		// Add the new point to the simplex
-		simplex.Points[simplex.Count] = newPoint
+		v := Support(a, b, direction, margin)
+		if v.W.Dot(direction) <= 0 {
+			return false
+		}
+
+		simplex.Points[simplex.Count], simplex.A[simplex.Count], simplex.B[simplex.Count] = v.W, v.A, v.B
 		simplex.Count++
 
-		// Check if the simplex contains the origin
-		// This function also updates the simplex and direction for the next iteration
-		// by reducing the simplex to its closest feature to the origin
 		if containsOrigin(simplex, &direction) {
-			return true // Collision detected - origin is inside simplex
+			return true
 		}
 	}
 
-	// Failed to converge after maxIterations (very rare, may indicate numerical issues)
-	// In practice this almost never happens for valid convex shapes
 	return false
 }
 
-// containsOrigin tests if the simplex contains the origin and refines the simplex.
-//
-// This is the heart of GJK - it determines which feature of the simplex (point, edge, face)
-// is closest to the origin, keeps only the relevant points, and updates the search direction.
-//
-// Behavior by simplex dimension:
-//   - 2 points (line): Test Voronoi regions, reduce to closest point or keep edge
-//   - 3 points (triangle): Test Voronoi regions, reduce to closest edge or keep face
-//   - 4 points (tetrahedron): Test if origin is inside; if not, reduce to closest face
-//
-// Returns:
-//   - true: Origin is contained (only possible for tetrahedron) → collision!
-//   - false: Origin is outside, simplex and direction updated for next iteration
+// containsOrigin reduces the simplex to its closest feature to the origin, and updates the direction.
+// Returns true if the tetrahedron contains the origin
 func containsOrigin(simplex *Simplex, direction *mgl64.Vec3) bool {
 	switch simplex.Count {
 	case 2:
-		return line(simplex, direction)
+		line(simplex, direction)
 	case 3:
-		return triangle(simplex, direction)
+		triangle(simplex, direction)
 	case 4:
 		return tetrahedron(simplex, direction)
 	}
 	return false
 }
 
-// line handles the line simplex case (2 points: A and B).
-//
-// Tests which Voronoi region contains the origin:
-//   - Region A: Origin is closest to point A alone
-//   - Region B: Origin is closest to point B alone
-//   - Region AB: Origin is closest to the line segment AB
-//
-// Returns true only if origin is on the line segment (not just the infinite line).
-// Updates direction to point toward origin from the closest feature.
-func line(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := simplex.Points[1]
-	b := simplex.Points[0]
-	ab := b.Sub(a)
-	ao := a.Mul(-1)
+// line: segment [b, a], a is the most recent point
+func line(simplex *Simplex, direction *mgl64.Vec3) {
+	a, b := simplex.Vertex(1), simplex.Vertex(0)
+	ab := b.W.Sub(a.W)
+	ao := a.W.Mul(-1)
 
-	// Handle degenerate case: identical points
-	if ab.LenSqr() < 1e-8 {
-		if ao.LenSqr() < 1e-8 {
-			return true // origin is at the point
-		}
-		// Origin is not at the point, but simplex is degenerate
-		simplex.Points[0] = a
-		simplex.Count = 1
-		*direction = ao
-		return false
+	if ab.Dot(ao) > 0 {
+		*direction = ab.Cross(ao).Cross(ab)
+		return
 	}
-
-	// Check if origin is in Voronoi region A (behind A, opposite direction from B)
-	// If ab.Dot(ao) <= 0, the origin is closest to point A alone
-	if ab.Dot(ao) <= 0 {
-		// Reduce simplex to point A
-		simplex.Points[0] = a
-		simplex.Count = 1
-		*direction = ao
-		return false
-	}
-
-	// Check if origin is in Voronoi region B (behind B, opposite direction from A)
-	bo := b.Mul(-1)
-	if ab.Dot(bo) >= 0 {
-		// Reduce simplex to point B
-		simplex.Points[0] = b
-		simplex.Count = 1
-		*direction = bo
-		return false
-	}
-
-	// Origin is in Voronoi region AB (between A and B direction-wise)
-	abPerp := ab.Cross(ao).Cross(ab)
-	if abPerp.LenSqr() < 1e-8 {
-		// Origin is on the line, but check if it's on the segment [A, B]
-		abLengthSqr := ab.LenSqr()
-		t := ao.Dot(ab) / abLengthSqr
-
-		// Check if origin is on the segment [A, B] with tolerance
-		// Using 1e-6 tolerance for segment inclusion
-		if t >= -1e-6 && t <= 1.0+1e-6 {
-			return true // Collision - origin is on the segment
-		}
-
-		// Origin is on the infinite line but not on the segment
-		// Find closest point on segment and continue
-		if t < 0 {
-			// Closest to A
-			simplex.Points[0] = a
-			simplex.Count = 1
-			*direction = ao
-		} else {
-			// Closest to B
-			simplex.Points[0] = b
-			simplex.Count = 1
-			*direction = bo
-		}
-		return false
-	}
-
-	*direction = abPerp
-	return false
+	simplex.set(a)
+	*direction = ao
 }
 
-// triangle handles the triangle simplex case (3 points: A, B, C).
-//
-// Tests which Voronoi region contains the origin:
-//   - Region A: Origin closest to point A alone
-//   - Region AB: Origin closest to edge AB
-//   - Region AC: Origin closest to edge AC
-//   - Region ABC (above): Origin above triangle plane
-//   - Region ABC (below): Origin below triangle plane
-//
-// Degenerate case: If points are collinear (flat triangle), treats as line instead.
-//
-// Returns false (a triangle cannot contain origin in 3D, we need tetrahedron).
-// Reduces simplex to closest feature and updates direction.
-func triangle(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := simplex.Points[2] // Most recent point
-	b := simplex.Points[1]
-	c := simplex.Points[0]
+// triangle: [c, b, a], a is the most recent point
+func triangle(simplex *Simplex, direction *mgl64.Vec3) {
+	a, b, c := simplex.Vertex(2), simplex.Vertex(1), simplex.Vertex(0)
+	ab := b.W.Sub(a.W)
+	ac := c.W.Sub(a.W)
+	ao := a.W.Mul(-1)
+	abc := ab.Cross(ac)
 
-	ab := b.Sub(a)
-	ac := c.Sub(a)
-	ao := a.Mul(-1)
-
-	abc := ab.Cross(ac) // Triangle normal
-
-	// Check for degenerate triangle (colinear points)
-	// If normal is nearly zero, points are on a line
-	if abc.LenSqr() < 1e-10 {
-		// Treat as line instead of triangle
-		// Keep A and B (discard C which is furthest from recent history)
-		simplex.Points[0] = b
-		simplex.Points[1] = a
-		simplex.Count = 2
-		return line(simplex, direction)
+	if abc.Cross(ac).Dot(ao) > 0 {
+		if ac.Dot(ao) > 0 {
+			simplex.set(c, a)
+			*direction = ac.Cross(ao).Cross(ac)
+			return
+		}
+		simplex.set(b, a)
+		line(simplex, direction)
+		return
 	}
 
-	// Test the 3 regions around the triangle
-
-	// Region AB (edge)
-	abPerp := ab.Cross(abc)
-	if abPerp.Dot(ao) > 0 {
-		simplex.Points[0] = b
-		simplex.Points[1] = a
-		simplex.Count = 2
-		*direction = ab.Cross(ao).Cross(ab)
-		return false
+	if ab.Cross(abc).Dot(ao) > 0 {
+		simplex.set(b, a)
+		line(simplex, direction)
+		return
 	}
 
-	// Region AC (edge)
-	acPerp := abc.Cross(ac)
-	if acPerp.Dot(ao) > 0 {
-		simplex.Points[0] = c
-		simplex.Points[1] = a
-		simplex.Count = 2
-		*direction = ac.Cross(ao).Cross(ac)
-		return false
-	}
-
-	// Origin is above or below the triangle
 	if abc.Dot(ao) > 0 {
-		// Above the triangle
+		simplex.set(c, b, a)
 		*direction = abc
 	} else {
-		// Below, reverse order to maintain correct orientation
-		simplex.Points[0] = a
-		simplex.Points[1] = c
-		simplex.Points[2] = b
-		simplex.Count = 3
+		simplex.set(b, c, a)
 		*direction = abc.Mul(-1)
 	}
-
-	return false // Triangle never contains origin in 3D (we need tetrahedron)
 }
 
-// tetrahedron handles the tetrahedron simplex case (4 points: A, B, C, D).
-//
-// This is the only case that can return true (collision detected).
-//
-// Tests if origin is inside the tetrahedron by checking which side of each face
-// the origin lies on:
-//   - If outside face ABC → reduce to triangle ABC
-//   - If outside face ACD → reduce to triangle ACD
-//   - If outside face ADB → reduce to triangle ADB
-//   - If inside all faces → origin contained, collision!
-//
-// Face normals must point outward (away from the 4th vertex) to correctly test
-// which side of each face the origin is on.
-//
-// Returns true if origin is inside tetrahedron, false otherwise.
+// tetrahedron: [d, c, b, a], a is the most recent point
 func tetrahedron(simplex *Simplex, direction *mgl64.Vec3) bool {
-	a := simplex.Points[3] // Most recent point
-	b := simplex.Points[2]
-	c := simplex.Points[1]
-	d := simplex.Points[0]
+	a, b, c, d := simplex.Vertex(3), simplex.Vertex(2), simplex.Vertex(1), simplex.Vertex(0)
+	ab := b.W.Sub(a.W)
+	ac := c.W.Sub(a.W)
+	ad := d.W.Sub(a.W)
+	ao := a.W.Mul(-1)
 
-	ab := b.Sub(a)
-	ac := c.Sub(a)
-	ad := d.Sub(a)
-	ao := a.Mul(-1)
-
-	// Compute face normals
-	// IMPORTANT: Normal direction must point AWAY from the 4th vertex
-	// to correctly represent the "outside" of each face
-
-	// Face ABC (opposite to D)
 	abc := ab.Cross(ac)
-	// Check if normal points toward D or away from D
+	acd := ac.Cross(ad)
+	adb := ad.Cross(ab)
+
+	// The normals must point away from the opposite vertex
 	if abc.Dot(ad) > 0 {
-		// Normal points toward D, we want it pointing away
 		abc = abc.Mul(-1)
 	}
-
-	// Face ACD (opposite to B)
-	acd := ac.Cross(ad)
 	if acd.Dot(ab) > 0 {
 		acd = acd.Mul(-1)
 	}
-
-	// Face ADB (opposite to C)
-	adb := ad.Cross(ab)
 	if adb.Dot(ac) > 0 {
 		adb = adb.Mul(-1)
 	}
 
-	// Check for degenerate tetrahedron
-	if abc.LenSqr() < 1e-10 || acd.LenSqr() < 1e-10 || adb.LenSqr() < 1e-10 {
-		simplex.Points[0] = c
-		simplex.Points[1] = b
-		simplex.Points[2] = a
-		simplex.Count = 3
-		return triangle(simplex, direction)
-	}
-
-	// Now test if origin is outside any face
-	// If abc.Dot(ao) > 0, origin is on the outside of face ABC
-
-	// Face ABC
 	if abc.Dot(ao) > 0 {
-		simplex.Points[0] = c
-		simplex.Points[1] = b
-		simplex.Points[2] = a
-		simplex.Count = 3
-		return triangle(simplex, direction)
+		simplex.set(c, b, a)
+		triangle(simplex, direction)
+		return false
 	}
-
-	// Face ACD
 	if acd.Dot(ao) > 0 {
-		simplex.Points[0] = d
-		simplex.Points[1] = c
-		simplex.Points[2] = a
-		simplex.Count = 3
-		return triangle(simplex, direction)
+		simplex.set(d, c, a)
+		triangle(simplex, direction)
+		return false
 	}
-
-	// Face ADB
 	if adb.Dot(ao) > 0 {
-		simplex.Points[0] = b
-		simplex.Points[1] = d
-		simplex.Points[2] = a
-		simplex.Count = 3
-		return triangle(simplex, direction)
+		simplex.set(b, d, a)
+		triangle(simplex, direction)
+		return false
 	}
 
-	// The origin is inside the tetrahedron
 	return true
+}
+
+// simplexSize returns the largest squared distance of a vertex to the origin
+func simplexSize(simplex *Simplex) float64 {
+	size := 0.0
+	for i := 0; i < simplex.Count; i++ {
+		size = max(size, simplex.Points[i].LenSqr())
+	}
+	return size
+}
+
+// fillTetrahedron completes the simplex into a tetrahedron when the shapes are only touching,
+// so that EPA can start. Returns false if the Minkowski difference is flat
+func fillTetrahedron(a, b *actor.RigidBody, margin float64, simplex *Simplex) bool {
+	axes := [6]mgl64.Vec3{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
+
+	for simplex.Count < 4 {
+		added := false
+		for _, axis := range candidateDirections(simplex, axes) {
+			v := Support(a, b, axis, margin)
+			if isNewVertex(simplex, v.W) {
+				simplex.Points[simplex.Count], simplex.A[simplex.Count], simplex.B[simplex.Count] = v.W, v.A, v.B
+				simplex.Count++
+				added = true
+				break
+			}
+		}
+		if !added {
+			return false
+		}
+	}
+	return true
+}
+
+// candidateDirections to add a dimension to the simplex:
+// the axes for a point, perpendicular directions for a segment, both normals for a triangle
+func candidateDirections(simplex *Simplex, axes [6]mgl64.Vec3) []mgl64.Vec3 {
+	switch simplex.Count {
+	case 1:
+		return axes[:]
+	case 2:
+		edge := simplex.Points[1].Sub(simplex.Points[0])
+		var out []mgl64.Vec3
+		for _, axis := range axes {
+			if d := edge.Cross(axis); d.LenSqr() > 0 {
+				out = append(out, d)
+			}
+		}
+		return out
+	default:
+		n := simplex.Points[1].Sub(simplex.Points[0]).Cross(simplex.Points[2].Sub(simplex.Points[0]))
+		return []mgl64.Vec3{n, n.Mul(-1)}
+	}
+}
+
+// isNewVertex returns true if w is not on the point/line/plane of the simplex
+func isNewVertex(simplex *Simplex, w mgl64.Vec3) bool {
+	p0 := simplex.Points[0]
+	scale := max(simplexSize(simplex), w.LenSqr())
+	if scale == 0 {
+		return false
+	}
+	switch simplex.Count {
+	case 1:
+		return w.Sub(p0).LenSqr() > hullEpsilon*scale
+	case 2:
+		edge := simplex.Points[1].Sub(p0)
+		return edge.Cross(w.Sub(p0)).LenSqr() > hullEpsilon*scale*edge.LenSqr()
+	default:
+		n := simplex.Points[1].Sub(p0).Cross(simplex.Points[2].Sub(p0))
+		h := n.Dot(w.Sub(p0))
+		return h*h > hullEpsilon*scale*n.LenSqr()
+	}
 }

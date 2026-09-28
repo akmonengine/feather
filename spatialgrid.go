@@ -47,25 +47,24 @@ func NewSpatialGrid(cellSize float64, numCells int) *SpatialGrid {
 
 // Insert - Inserts a body into all cells it occupies
 func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
+	sg.InsertAABB(bodyIndex, body, body.Shape.GetAABB())
+}
+
+// InsertAABB - Inserts a body into all cells of the given AABB (e.g. an enlarged AABB)
+func (sg *SpatialGrid) InsertAABB(bodyIndex int, body *actor.RigidBody, aabb actor.AABB) {
 	if _, ok := body.Shape.(*actor.Plane); ok {
 		sg.planes.bodyIndices = append(sg.planes.bodyIndices, bodyIndex)
 		return
 	}
 
-	aabb := body.Shape.GetAABB()
 	minCell := sg.worldToCell(aabb.Min)
 	maxCell := sg.worldToCell(aabb.Max)
 
 	for x := minCell.X; x <= maxCell.X; x++ {
 		for y := minCell.Y; y <= maxCell.Y; y++ {
 			for z := minCell.Z; z <= maxCell.Z; z++ {
-				cellKey := CellKey{x, y, z}
-				cellIdx := sg.hashCell(cellKey)
-
-				sg.cells[cellIdx].bodyIndices = append(
-					sg.cells[cellIdx].bodyIndices,
-					bodyIndex,
-				)
+				cellIdx := sg.hashCell(CellKey{x, y, z})
+				sg.cells[cellIdx].bodyIndices = append(sg.cells[cellIdx].bodyIndices, bodyIndex)
 			}
 		}
 	}
@@ -89,78 +88,96 @@ func (sg *SpatialGrid) SortCells() {
 	}
 }
 
-// FindPairsParallel - Parallel version returning a channel
-func (sg *SpatialGrid) FindPairsParallel(bodies []*actor.RigidBody, workersCount int) <-chan Pair {
+// FindPairs - Finds the pairs of bodies with overlapping AABBs, always in the same order:
+// sorted by index of the first body, then of the second body, planes first.
+// Pairs without any awake dynamic body are ignored.
+func (sg *SpatialGrid) FindPairs(bodies []*actor.RigidBody, boxes []actor.AABB, workersCount int) []Pair {
+	workersCount = max(1, min(workersCount, len(bodies)))
+	chunks := make([][]Pair, workersCount)
+	chunkSize := (len(bodies) + workersCount - 1) / workersCount
+
 	var wg sync.WaitGroup
-	pairsChan := make(chan Pair, workersCount*10)
-	clearSeen := make([]bool, len(bodies))
-
-	dataSize := len(bodies)
-	chunkSize := (dataSize + workersCount - 1) / workersCount
 	for workerID := 0; workerID < workersCount; workerID++ {
+		start, end := workerID*chunkSize, min((workerID+1)*chunkSize, len(bodies))
+		work := func() {
+			chunks[workerID] = sg.findPairsRange(bodies, boxes, start, end)
+		}
+		if workersCount == 1 {
+			work()
+			continue
+		}
 		wg.Add(1)
-
-		go func(start, end int) {
+		go func() {
 			defer wg.Done()
+			work()
+		}()
+	}
+	wg.Wait()
 
-			seen := make([]bool, len(bodies))
-			for bodyIdx := start; bodyIdx < end; bodyIdx++ {
-				if _, isPlane := bodies[bodyIdx].Shape.(*actor.Plane); isPlane {
-					continue
-				}
-				bodyA := bodies[bodyIdx]
+	count := 0
+	for _, c := range chunks {
+		count += len(c)
+	}
+	pairs := make([]Pair, 0, count)
+	for _, c := range chunks {
+		pairs = append(pairs, c...)
+	}
+	return pairs
+}
 
-				// write all planes/body collisions
-				for _, planeId := range sg.planes.bodyIndices {
-					pairsChan <- Pair{BodyA: bodies[planeId], BodyB: bodyA}
-				}
+func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.AABB, start, end int) []Pair {
+	var pairs []Pair
+	seen := make([]bool, len(bodies))
+	var found []int
 
-				copy(seen, clearSeen)
+	for bodyIdx := start; bodyIdx < end; bodyIdx++ {
+		bodyA := bodies[bodyIdx]
+		if _, isPlane := bodyA.Shape.(*actor.Plane); isPlane {
+			continue
+		}
 
-				// Find cells occupied by bodyA
-				minCell := sg.worldToCell(bodyA.Shape.GetAABB().Min)
-				maxCell := sg.worldToCell(bodyA.Shape.GetAABB().Max)
+		for _, planeIdx := range sg.planes.bodyIndices {
+			if needsSolving(bodies[planeIdx], bodyA) {
+				pairs = append(pairs, Pair{BodyA: bodies[planeIdx], BodyB: bodyA})
+			}
+		}
 
-				// Iterate through these cells
-				for x := minCell.X; x <= maxCell.X; x++ {
-					for y := minCell.Y; y <= maxCell.Y; y++ {
-						for z := minCell.Z; z <= maxCell.Z; z++ {
-							cellKey := CellKey{x, y, z}
-							cellIdx := sg.hashCell(cellKey)
-
-							// Test against all bodies in this cell
-							for _, otherIdx := range sg.cells[cellIdx].bodyIndices {
-								// Avoid duplicates
-								if otherIdx <= bodyIdx || seen[otherIdx] {
-									continue
-								}
-								seen[otherIdx] = true
-
-								bodyB := bodies[otherIdx]
-								if bodyA.BodyType == actor.BodyTypeStatic && bodyB.BodyType == actor.BodyTypeStatic {
-									continue
-								}
-								if bodyA.IsSleeping && bodyB.IsSleeping {
-									continue
-								}
-
-								if bodyA.Shape.GetAABB().Overlaps(bodyB.Shape.GetAABB()) {
-									pairsChan <- Pair{BodyA: bodyA, BodyB: bodyB}
-								}
-							}
+		found = found[:0]
+		minCell := sg.worldToCell(boxes[bodyIdx].Min)
+		maxCell := sg.worldToCell(boxes[bodyIdx].Max)
+		for x := minCell.X; x <= maxCell.X; x++ {
+			for y := minCell.Y; y <= maxCell.Y; y++ {
+				for z := minCell.Z; z <= maxCell.Z; z++ {
+					for _, otherIdx := range sg.cells[sg.hashCell(CellKey{x, y, z})].bodyIndices {
+						if otherIdx <= bodyIdx || seen[otherIdx] {
+							continue
 						}
+						seen[otherIdx] = true
+						found = append(found, otherIdx)
 					}
 				}
 			}
-		}(workerID*chunkSize, min((workerID+1)*chunkSize, dataSize))
+		}
+
+		sort.Ints(found)
+		for _, otherIdx := range found {
+			seen[otherIdx] = false
+			bodyB := bodies[otherIdx]
+			if needsSolving(bodyA, bodyB) && boxes[bodyIdx].Overlaps(boxes[otherIdx]) {
+				pairs = append(pairs, Pair{BodyA: bodyA, BodyB: bodyB})
+			}
+		}
 	}
+	return pairs
+}
 
-	go func() {
-		wg.Wait()
-		close(pairsChan)
-	}()
+// needsSolving - At least one body must be dynamic and awake
+func needsSolving(a, b *actor.RigidBody) bool {
+	return isAwakeDynamic(a) || isAwakeDynamic(b)
+}
 
-	return pairsChan
+func isAwakeDynamic(body *actor.RigidBody) bool {
+	return body.BodyType == actor.BodyTypeDynamic && !body.IsSleeping
 }
 
 // worldToCell - Converts a world position to cell coordinates

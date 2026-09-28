@@ -2,486 +2,329 @@ package epa
 
 import (
 	"math"
-	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-// Manifold generation configuration constants
 const (
-	// maxContactPoints is the maximum number of contact points in a manifold.
-	// Limited to 4 for constraint solver stability (see Erin Catto, GDC 2007).
-	maxContactPoints = 4
-
-	// maxBufferSize is the size of pre-allocated working buffers.
-	// Must be >= maxContactPoints * 2 to handle worst-case Sutherland-Hodgman clipping.
+	// maxBufferSize: a quad clipped by 4 planes has at most 8 vertices
 	maxBufferSize = 8
+
+	// minFaceAlignment: a face is in contact if its normal is aligned with the contact normal (0.5°).
+	// Otherwise the contact is an edge or a vertex
+	minFaceAlignment = 0.99996
+
+	// edgeTolerance: 2 points at the same height along the normal (relative to the size of the feature) form an edge
+	edgeTolerance = 1e-4
+
+	// parallelSin: 2 edges closer to parallel than ~1.1° touch along a line
+	parallelSin = 0.02
+
+	// faceTieTolerance: if both faces are aligned, the face of A is the reference (the choice must not change between 2 steps)
+	faceTieTolerance = 1e-3
+
+	// epsilonDistance of the Sutherland-Hodgman clipping
+	epsilonDistance = 1e-9
+
+	epsilonLength = 1e-12
 )
 
-// Numerical tolerance constants for geometric computation stability
-const (
-	// epsilonColinear is the tolerance for detecting colinear edges.
-	// If |edge.Cross(normal)| < epsilonColinear, the edge is parallel to the normal.
-	epsilonColinear = 1e-6
-
-	// epsilonDistance is the distance tolerance for Sutherland-Hodgman clipping.
-	// Points at distance >= -epsilonDistance from the plane are considered "inside".
-	epsilonDistance = 1e-6
-
-	// epsilonParallel is the tolerance for detecting a line parallel to a plane.
-	// If |direction.Dot(planeNormal)| < epsilonParallel, the line is parallel.
-	epsilonParallel = 1e-10
-
-	// tangentBasisThreshold determines which axis to use for building the tangent basis.
-	// If |normal.X()| > tangentBasisThreshold, use Y instead of X as the first tangent.
-	tangentBasisThreshold = 0.9
-)
-
-// ManifoldBuilder contains all working buffers with fixed-size arrays to avoid allocations.
-type ManifoldBuilder struct {
-	// Fixed-size arrays to avoid allocations
-	localFeatureA [maxBufferSize]mgl64.Vec3
-	localFeatureB [maxBufferSize]mgl64.Vec3
-	worldFeatureA [maxBufferSize]mgl64.Vec3
-	worldFeatureB [maxBufferSize]mgl64.Vec3
-	clipBuffer1   [maxBufferSize]mgl64.Vec3
-	clipBuffer2   [maxBufferSize]mgl64.Vec3
-	tempPoints    [maxBufferSize]constraint.ContactPoint
-
-	// Counters
-	localFeatureACount int
-	localFeatureBCount int
-	worldFeatureACount int
-	worldFeatureBCount int
-	clipBuffer1Count   int
-	clipBuffer2Count   int
-	clippedResultCount int
-	tempPointsCount    int
+type polygon struct {
+	points [maxBufferSize]mgl64.Vec3
+	count  int
 }
 
-// Pool of builders for reuse
-var manifoldBuilderPool = sync.Pool{
-	New: func() interface{} {
-		return &ManifoldBuilder{}
-	},
+func (p *polygon) add(v mgl64.Vec3) {
+	if p.count < maxBufferSize {
+		p.points[p.count] = v
+		p.count++
+	}
 }
 
-// Reset prepares the builder for a new use
-func (b *ManifoldBuilder) Reset() {
-	b.localFeatureACount = 0
-	b.localFeatureBCount = 0
-	b.worldFeatureACount = 0
-	b.worldFeatureBCount = 0
-	b.clipBuffer1Count = 0
-	b.clipBuffer2Count = 0
-	b.clippedResultCount = 0
-	b.tempPointsCount = 0
-}
+// Manifold generates the contact points of A and B, from the result of EPA:
+//   - face contact (a face aligned with the normal): the other feature is clipped by the sides of this face (Sutherland-Hodgman)
+//   - parallel edges (a box on an edge, a capsule along an edge): one edge is clipped by the other
+//   - otherwise (crossing edges, vertex, sphere): the witness point of EPA
+//
+// The deepest point has the separation of EPA, the other points are higher along the normal.
+// Points further than the margin are removed, and 4 points are kept at most
+func Manifold(a, b *actor.RigidBody, result Result, margin float64, m *constraint.Manifold) {
+	m.Reset(a, b)
+	normal := result.Normal
+	m.Normal = normal
+	separation := margin - result.Depth
 
-// GenerateManifold is the main entry point
-func GenerateManifold(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) []constraint.ContactPoint {
-	builder := manifoldBuilderPool.Get().(*ManifoldBuilder)
-	defer manifoldBuilderPool.Put(builder)
+	var featureA, featureB polygon
+	feature(a, normal, &featureA)
+	feature(b, normal.Mul(-1), &featureB)
 
-	builder.Reset()
-
-	return builder.Generate(bodyA, bodyB, normal, depth)
-}
-
-// Generate generates the manifold using internal buffers
-func (b *ManifoldBuilder) Generate(bodyA, bodyB *actor.RigidBody, normal mgl64.Vec3, depth float64) []constraint.ContactPoint {
-	// Convert normal to local space
-	localNormalA := bodyA.Transform.Rotation.Conjugate().Rotate(normal)
-	localNormalB := bodyB.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))
-
-	// Get features into buffers
-	bodyA.Shape.GetContactFeature(localNormalA, &b.localFeatureA, &b.localFeatureACount)
-	bodyB.Shape.GetContactFeature(localNormalB, &b.localFeatureB, &b.localFeatureBCount)
-
-	// Transform into buffers
-	b.transformFeature(&b.localFeatureA, b.localFeatureACount, bodyA.Transform, bodyA.Shape, &b.worldFeatureA, &b.worldFeatureACount)
-	b.transformFeature(&b.localFeatureB, b.localFeatureBCount, bodyB.Transform, bodyB.Shape, &b.worldFeatureB, &b.worldFeatureBCount)
-
-	// Determine incident and reference
-	var incident *[8]mgl64.Vec3
-	var incidentCount int
-	var reference *[8]mgl64.Vec3
-	var referenceCount int
-
-	if b.worldFeatureBCount <= b.worldFeatureACount {
-		incident = &b.worldFeatureB
-		incidentCount = b.worldFeatureBCount
-		reference = &b.worldFeatureA
-		referenceCount = b.worldFeatureACount
+	if referenceIsA, ok := chooseReference(&featureA, &featureB, normal); ok {
+		reference, incident := &featureA, &featureB
+		direction := normal // from the reference body towards the incident one
+		if !referenceIsA {
+			reference, incident = &featureB, &featureA
+			direction = normal.Mul(-1)
+		}
+		clipFeatures(reference, incident, direction, separation, margin, m)
 	} else {
-		incident = &b.worldFeatureA
-		incidentCount = b.worldFeatureACount
-		reference = &b.worldFeatureB
-		referenceCount = b.worldFeatureBCount
-	}
-
-	// Trivial case: single incident point
-	if incidentCount == 1 {
-		b.tempPoints[0] = constraint.ContactPoint{
-			Position:    incident[0],
-			Penetration: depth,
+		edgeA := deepest(&featureA, normal)
+		edgeB := deepest(&featureB, normal.Mul(-1))
+		if edgeA.count == 2 && edgeB.count == 2 && parallel(&edgeA, &edgeB) {
+			clipped := edgeB
+			clipToSlab(&clipped, edgeA.points[0], edgeA.points[1])
+			keepPoints(&clipped, normal, separation, margin, m)
 		}
-		b.tempPointsCount = 1
-		return b.buildResult()
 	}
 
-	// Clip incident against reference
-	clippedCount := b.clipIncidentAgainstReference(incident, incidentCount, reference, referenceCount, normal)
-
-	// Final clip against reference plane
-	if clippedCount > 0 && referenceCount > 0 {
-		b.clipAgainstReferencePlane(clippedCount, reference, referenceCount, normal, depth)
+	if m.Count == 0 {
+		// Witness point, halfway between A and B. WitnessA is on A + margin
+		onA := result.WitnessA.Sub(normal.Mul(margin))
+		m.Add(onA.Add(result.WitnessB).Mul(0.5), separation)
 	}
-
-	// Fallback
-	if b.tempPointsCount == 0 {
-		deepest := bodyB.SupportWorld(normal.Mul(-1))
-		b.tempPoints[0] = constraint.ContactPoint{
-			Position:    deepest,
-			Penetration: depth,
-		}
-		b.tempPointsCount = 1
-	}
-
-	// Limit to maxContactPoints
-	if b.tempPointsCount > maxContactPoints {
-		b.reduceTo4Points(normal)
-	}
-
-	return b.buildResult()
 }
 
-// transformFeature transforms features to world space
-func (b *ManifoldBuilder) transformFeature(input *[8]mgl64.Vec3, inputCount int, transform actor.Transform, shape actor.ShapeInterface, output *[8]mgl64.Vec3, outputCount *int) {
-	*outputCount = 0
-
-	// Transform points from local to world space
-	for i := 0; i < inputCount; i++ {
-		rotated := transform.Rotation.Rotate(input[i])
-		output[i] = transform.Position.Add(rotated)
+// deepest keeps the points of the feature the furthest along the direction: the deepest edge or vertex of a face
+func deepest(p *polygon, direction mgl64.Vec3) polygon {
+	var out polygon
+	if p.count == 0 {
+		return out
 	}
-	*outputCount = inputCount
+	size := 0.0
+	top := math.Inf(-1)
+	for i := 0; i < p.count; i++ {
+		top = math.Max(top, p.points[i].Dot(direction))
+		size = math.Max(size, p.points[i].Sub(p.points[0]).Len())
+	}
+	for i := 0; i < p.count; i++ {
+		if top-p.points[i].Dot(direction) <= edgeTolerance*size {
+			out.add(p.points[i])
+		}
+	}
+	return out
 }
 
-// clipIncidentAgainstReference clips the incident feature against the reference feature.
-// Always returns the result in clipBuffer1 for consistent downstream consumption.
-func (b *ManifoldBuilder) clipIncidentAgainstReference(incident *[8]mgl64.Vec3, incidentCount int, reference *[8]mgl64.Vec3, referenceCount int, normal mgl64.Vec3) int {
-	// Handle insufficient reference (need at least 2 points for edges)
-	if referenceCount < 2 {
-		for i := 0; i < incidentCount; i++ {
-			b.clipBuffer1[i] = incident[i]
-		}
-		b.clipBuffer1Count = incidentCount
-		return incidentCount
-	}
-
-	// Copy incident to clipBuffer1
-	for i := 0; i < incidentCount; i++ {
-		b.clipBuffer1[i] = incident[i]
-	}
-	b.clipBuffer1Count = incidentCount
-	b.clipBuffer2Count = 0
-
-	useBuffer1 := true
-
-	// Clip against each edge
-	for i := 0; i < referenceCount; i++ {
-		var inputBuffer *[8]mgl64.Vec3
-		var inputCount int
-		var outputBuffer *[8]mgl64.Vec3
-		var outputCount *int
-
-		if useBuffer1 {
-			inputBuffer = &b.clipBuffer1
-			inputCount = b.clipBuffer1Count
-			outputBuffer = &b.clipBuffer2
-			outputCount = &b.clipBuffer2Count
-		} else {
-			inputBuffer = &b.clipBuffer2
-			inputCount = b.clipBuffer2Count
-			outputBuffer = &b.clipBuffer1
-			outputCount = &b.clipBuffer1Count
-		}
-
-		*outputCount = 0
-
-		if inputCount == 0 {
-			break
-		}
-
-		v1 := reference[i]
-		v2 := reference[(i+1)%referenceCount]
-
-		edge := v2.Sub(v1)
-		edgeCrossNormal := edge.Cross(normal)
-
-		// Skip if edge is colinear with normal (no lateral clipping needed)
-		edgeCrossLen := edgeCrossNormal.Len()
-		if edgeCrossLen < epsilonColinear {
-			continue
-		}
-
-		clipNormal := edgeCrossNormal.Mul(1.0 / edgeCrossLen)
-
-		// Verify direction
-		center := b.computeCenter(reference, referenceCount)
-		toCenter := center.Sub(v1)
-		if toCenter.Dot(clipNormal) < 0 {
-			clipNormal = clipNormal.Mul(-1)
-		}
-
-		// Clip
-		b.clipPolygonAgainstPlane(inputBuffer, inputCount, v1, clipNormal, outputBuffer, outputCount)
-
-		useBuffer1 = !useBuffer1
-	}
-
-	// Always put the result in clipBuffer1
-	var finalCount int
-	if useBuffer1 {
-		// Result already in clipBuffer1
-		finalCount = b.clipBuffer1Count
-	} else {
-		// Result in clipBuffer2, copy to clipBuffer1
-		finalCount = b.clipBuffer2Count
-		for i := 0; i < finalCount; i++ {
-			b.clipBuffer1[i] = b.clipBuffer2[i]
-		}
-		b.clipBuffer1Count = finalCount
-	}
-
-	return finalCount
+func parallel(a, b *polygon) bool {
+	da := a.points[1].Sub(a.points[0])
+	db := b.points[1].Sub(b.points[0])
+	lengths := da.Len() * db.Len()
+	return lengths > epsilonLength && da.Cross(db).Len() <= parallelSin*lengths
 }
 
-// clipPolygonAgainstPlane clips a polygon against a plane using the Sutherland-Hodgman algorithm
-func (b *ManifoldBuilder) clipPolygonAgainstPlane(input *[8]mgl64.Vec3, inputCount int, planePoint, planeNormal mgl64.Vec3, output *[8]mgl64.Vec3, outputCount *int) {
-	if inputCount == 0 {
-		*outputCount = 0
+// clipToSlab keeps the part of the segment between the planes at both ends of [start, end]
+func clipToSlab(segment *polygon, start, end mgl64.Vec3) {
+	axis := end.Sub(start)
+	length := axis.Len()
+	if length < epsilonLength {
 		return
 	}
+	axis = axis.Mul(1 / length)
+	var scratch polygon
+	clipAgainstPlane(segment, start, axis, &scratch)
+	clipAgainstPlane(&scratch, end, axis.Mul(-1), segment)
+}
 
-	*outputCount = 0
-
-	for i := 0; i < inputCount; i++ {
-		current := input[i]
-		next := input[(i+1)%inputCount]
-
-		currentDist := current.Sub(planePoint).Dot(planeNormal)
-		nextDist := next.Sub(planePoint).Dot(planeNormal)
-
-		if currentDist >= -epsilonDistance {
-			if *outputCount < maxBufferSize {
-				output[*outputCount] = current
-				*outputCount++
-			}
-
-			if nextDist < -epsilonDistance && *outputCount < maxBufferSize {
-				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
-				output[*outputCount] = intersection
-				*outputCount++
-			}
-		} else {
-			if nextDist >= -epsilonDistance && *outputCount < maxBufferSize {
-				intersection := lineIntersectPlane(current, next, planePoint, planeNormal)
-				output[*outputCount] = intersection
-				*outputCount++
-			}
-		}
+// feature returns the feature of the body facing the direction, in world space
+func feature(body *actor.RigidBody, direction mgl64.Vec3, out *polygon) {
+	var local [8]mgl64.Vec3
+	count := 0
+	body.Shape.GetContactFeature(body.Transform.Rotation.Conjugate().Rotate(direction), &local, &count)
+	out.count = 0
+	for i := 0; i < count; i++ {
+		out.add(body.Transform.ToWorld(local[i]))
 	}
 }
 
-// clipAgainstReferencePlane performs final clipping against the reference plane.
-// Reads from clipBuffer1 and writes results to tempPoints.
-func (b *ManifoldBuilder) clipAgainstReferencePlane(clippedCount int, reference *[8]mgl64.Vec3, referenceCount int, normal mgl64.Vec3, depth float64) {
-	b.tempPointsCount = 0
+// chooseReference returns the reference face: the face aligned with the normal (the face of A if both are)
+func chooseReference(featureA, featureB *polygon, normal mgl64.Vec3) (bool, bool) {
+	alignA := -1.0
+	if featureA.count >= 3 {
+		alignA = math.Abs(faceNormal(featureA).Dot(normal))
+	}
+	alignB := -1.0
+	if featureB.count >= 3 {
+		alignB = math.Abs(faceNormal(featureB).Dot(normal))
+	}
 
-	// Compute reference normal
-	edge1 := reference[1].Sub(reference[0])
-	edge2 := reference[2].Sub(reference[0])
-	refNormal := edge1.Cross(edge2).Normalize()
+	switch {
+	case alignA >= minFaceAlignment && alignA >= alignB-faceTieTolerance:
+		return true, true
+	case alignB >= minFaceAlignment:
+		return false, true
+	}
+	return false, false
+}
 
-	if refNormal.Dot(normal) < 0 {
+// faceNormal returns the normal of the polygon, in any orientation
+func faceNormal(p *polygon) mgl64.Vec3 {
+	n := p.points[1].Sub(p.points[0]).Cross(p.points[2].Sub(p.points[0]))
+	length := n.Len()
+	if length < epsilonLength {
+		return mgl64.Vec3{}
+	}
+	return n.Mul(1 / length)
+}
+
+// clipFeatures clips the incident feature with the side planes of the reference face
+func clipFeatures(reference, incident *polygon, direction mgl64.Vec3, separation, margin float64, m *constraint.Manifold) {
+	refNormal := faceNormal(reference)
+	if refNormal.Dot(direction) < 0 {
 		refNormal = refNormal.Mul(-1)
 	}
 
-	refPoint := reference[0]
-	offset := refPoint.Dot(refNormal)
-
-	// Always read from clipBuffer1
-	for i := 0; i < clippedCount && b.tempPointsCount < maxBufferSize; i++ {
-		point := b.clipBuffer1[i]
-		distance := point.Dot(refNormal) - offset
-
-		if distance <= 0.0 {
-			b.tempPoints[b.tempPointsCount] = constraint.ContactPoint{
-				Position:    point,
-				Penetration: depth,
-			}
-			b.tempPointsCount++
-		}
+	center := mgl64.Vec3{}
+	for i := 0; i < reference.count; i++ {
+		center = center.Add(reference.points[i])
 	}
+	center = center.Mul(1 / float64(reference.count))
+
+	clipped := *incident
+	var scratch polygon
+	for i := 0; i < reference.count && clipped.count > 0; i++ {
+		v1 := reference.points[i]
+		v2 := reference.points[(i+1)%reference.count]
+		sideNormal := v2.Sub(v1).Cross(refNormal)
+		length := sideNormal.Len()
+		if length < epsilonLength {
+			continue
+		}
+		sideNormal = sideNormal.Mul(1 / length)
+		if sideNormal.Dot(center.Sub(v1)) < 0 {
+			sideNormal = sideNormal.Mul(-1)
+		}
+		clipAgainstPlane(&clipped, v1, sideNormal, &scratch)
+		clipped, scratch = scratch, clipped
+	}
+
+	keepPoints(&clipped, direction, separation, margin, m)
 }
 
-// reduceTo4Points reduces contact points to maxContactPoints, using Farthest Point Sampling (FPS).
-//
-// Valid manifold sizes before reduction: 1, 2, 3, or 4 points
-// - 1 point: Sphere-sphere, point-face contacts
-// - 2 points: Edge-face contacts
-// - 3 points: Triangular contact region (asymmetric clipping of quadrilateral)
-// - 4 points: Face-face contacts (full quadrilateral overlap)
-//
-// This reduction only applies when tempPointsCount > 4, preserving 3-point manifolds.
-func (b *ManifoldBuilder) reduceTo4Points(normal mgl64.Vec3) {
-	if b.tempPointsCount <= maxContactPoints {
+// keepPoints converts the clipped points into contact points.
+// The deepest point has the separation of EPA, the others are higher along the direction (from the reference towards the incident body)
+func keepPoints(clipped *polygon, direction mgl64.Vec3, separation, margin float64, m *constraint.Manifold) {
+	if clipped.count == 0 {
+		return
+	}
+	lowest := clipped.points[0].Dot(direction)
+	for i := 1; i < clipped.count; i++ {
+		lowest = math.Min(lowest, clipped.points[i].Dot(direction))
+	}
+
+	var candidates [maxBufferSize]constraint.ContactPoint
+	count := 0
+	for i := 0; i < clipped.count; i++ {
+		p := clipped.points[i]
+		pointSeparation := separation + p.Dot(direction) - lowest
+		if pointSeparation > margin {
+			continue
+		}
+		candidates[count] = constraint.ContactPoint{
+			Position:   p.Sub(direction.Mul(pointSeparation / 2)),
+			Separation: pointSeparation,
+		}
+		count++
+	}
+
+	reduce(candidates[:count], direction, m)
+}
+
+// clipAgainstPlane keeps the part of the polygon (or segment) in front of the plane
+func clipAgainstPlane(in *polygon, point, normal mgl64.Vec3, out *polygon) {
+	out.count = 0
+	if in.count == 1 {
+		if in.points[0].Sub(point).Dot(normal) >= -epsilonDistance {
+			out.add(in.points[0])
+		}
 		return
 	}
 
-	// 1. Initialization: choose the point farthest from the center of mass
-	center := mgl64.Vec3{0, 0, 0}
-	for i := 0; i < b.tempPointsCount; i++ {
-		center = center.Add(b.tempPoints[i].Position)
+	edges := in.count
+	if in.count == 2 {
+		edges = 1 // an open segment, not a closed polygon
 	}
-	center = center.Mul(1.0 / float64(b.tempPointsCount))
 
-	// Find the point farthest from the center
-	maxDistSq := -1.0
-	firstIdx := 0
-	for i := 0; i < b.tempPointsCount; i++ {
-		diff := b.tempPoints[i].Position.Sub(center)
-		distSq := diff.Dot(diff)
-		if distSq > maxDistSq {
-			maxDistSq = distSq
-			firstIdx = i
+	for i := 0; i < edges; i++ {
+		current := in.points[i]
+		next := in.points[(i+1)%in.count]
+		dc := current.Sub(point).Dot(normal)
+		dn := next.Sub(point).Dot(normal)
+
+		if dc >= -epsilonDistance {
+			out.add(current)
+		}
+		if (dc >= -epsilonDistance) != (dn >= -epsilonDistance) {
+			t := dc / (dc - dn)
+			out.add(current.Add(next.Sub(current).Mul(t)))
+		}
+		if in.count == 2 && dn >= -epsilonDistance {
+			out.add(next)
 		}
 	}
+}
 
-	// 2. Farthest Point Sampling (FPS)
-	selectedIndices := [maxContactPoints]int{firstIdx}
-	selectedCount := 1
-
-	// Array to store minimum squared distances
-	var minDistSq [8]float64
-	for i := 0; i < b.tempPointsCount; i++ {
-		diff := b.tempPoints[i].Position.Sub(b.tempPoints[firstIdx].Position)
-		minDistSq[i] = diff.Dot(diff)
+// reduce keeps 4 points: the deepest, the furthest from it, then the points adding the most area to the contact polygon
+func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.Manifold) {
+	if len(points) <= constraint.MaxContactPoints {
+		for _, p := range points {
+			m.Add(p.Position, p.Separation)
+		}
+		return
 	}
 
-	// Iterate until we have 4 points
-	for selectedCount < maxContactPoints {
-		// Find the point with the largest minimum distance
-		maxMinDistSq := -1.0
-		nextIdx := -1
-		for i := 0; i < b.tempPointsCount; i++ {
-			if minDistSq[i] > maxMinDistSq {
-				// Check if the point is not already selected
-				isSelected := false
-				for j := 0; j < selectedCount; j++ {
-					if selectedIndices[j] == i {
-						isSelected = true
-						break
-					}
-				}
-				if !isSelected {
-					maxMinDistSq = minDistSq[i]
-					nextIdx = i
-				}
+	chosen := [constraint.MaxContactPoints]int{}
+	deepest := 0
+	for i, p := range points {
+		if p.Separation < points[deepest].Separation {
+			deepest = i
+		}
+	}
+	chosen[0] = deepest
+
+	farthest, best := -1, -1.0
+	for i, p := range points {
+		d := planar(p.Position.Sub(points[deepest].Position), normal).LenSqr()
+		if d > best {
+			farthest, best = i, d
+		}
+	}
+	chosen[1] = farthest
+
+	third, best := -1, -1.0
+	for i, p := range points {
+		area := math.Abs(signedArea(points[deepest].Position, points[farthest].Position, p.Position, normal))
+		if area > best {
+			third, best = i, area
+		}
+	}
+	chosen[2] = third
+
+	orientation := math.Copysign(1, signedArea(points[deepest].Position, points[farthest].Position, points[third].Position, normal))
+	fourth, best := -1, 0.0
+	triangle := [3]int{deepest, farthest, third}
+	for i, p := range points {
+		for e := 0; e < 3; e++ {
+			// area added outside the edge e
+			added := -orientation * signedArea(points[triangle[e]].Position, points[triangle[(e+1)%3]].Position, p.Position, normal)
+			if added > best {
+				fourth, best = i, added
 			}
 		}
-
-		if nextIdx == -1 {
-			break // Safety case (should not happen)
-		}
-
-		// Add the selected point
-		selectedIndices[selectedCount] = nextIdx
-		selectedCount++
-
-		// Update minimum distances
-		for i := 0; i < b.tempPointsCount; i++ {
-			diff := b.tempPoints[i].Position.Sub(b.tempPoints[nextIdx].Position)
-			distSq := diff.Dot(diff)
-			if distSq < minDistSq[i] {
-				minDistSq[i] = distSq
-			}
-		}
 	}
 
-	// 3. Copy the selected points to a temporary buffer
-	// Use a temporary buffer to avoid overwriting original data
-	var tempPoints [maxContactPoints]constraint.ContactPoint
-	for i := 0; i < maxContactPoints; i++ {
-		if i < selectedCount {
-			tempPoints[i] = b.tempPoints[selectedIndices[i]]
-		} else {
-			// Fallback (should not happen)
-			tempPoints[i] = b.tempPoints[0]
-		}
+	for k := 0; k < 3; k++ {
+		m.Add(points[chosen[k]].Position, points[chosen[k]].Separation)
 	}
-
-	// 4. Copy the points from the temporary buffer to b.tempPoints
-	for i := 0; i < maxContactPoints; i++ {
-		b.tempPoints[i] = tempPoints[i]
+	if fourth >= 0 {
+		m.Add(points[fourth].Position, points[fourth].Separation)
 	}
-
-	b.tempPointsCount = maxContactPoints
 }
 
-// buildResult is the ONLY function that allocates (final copy)
-func (b *ManifoldBuilder) buildResult() []constraint.ContactPoint {
-	result := make([]constraint.ContactPoint, b.tempPointsCount)
-	for i := 0; i < b.tempPointsCount; i++ {
-		result[i] = b.tempPoints[i]
-	}
-	return result
+func planar(v, normal mgl64.Vec3) mgl64.Vec3 {
+	return v.Sub(normal.Mul(v.Dot(normal)))
 }
 
-// computeCenter computes the centroid of a set of points
-func (b *ManifoldBuilder) computeCenter(points *[8]mgl64.Vec3, count int) mgl64.Vec3 {
-	if count == 0 {
-		return mgl64.Vec3{0, 0, 0}
-	}
-
-	sum := mgl64.Vec3{0, 0, 0}
-	for i := 0; i < count; i++ {
-		sum = sum.Add(points[i])
-	}
-	return sum.Mul(1.0 / float64(count))
-}
-
-// lineIntersectPlane computes the intersection point between a line segment and a plane.
-// Returns p1 if the line is parallel to the plane. Clamps t to [0,1].
-func lineIntersectPlane(p1, p2, planePoint, planeNormal mgl64.Vec3) mgl64.Vec3 {
-	dir := p2.Sub(p1)
-	dist := p1.Sub(planePoint).Dot(planeNormal)
-	denom := dir.Dot(planeNormal)
-
-	if math.Abs(denom) < epsilonParallel {
-		return p1
-	}
-
-	t := -dist / denom
-	t = math.Max(0, math.Min(1, t))
-
-	return p1.Add(dir.Mul(t))
-}
-
-// getTangentBasis constructs an orthonormal tangent basis from a normal vector.
-// Returns two tangent vectors perpendicular to the normal and to each other.
-func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
-	tangent1 := mgl64.Vec3{1, 0, 0}
-	if math.Abs(normal.X()) > tangentBasisThreshold {
-		tangent1 = mgl64.Vec3{0, 1, 0}
-	}
-
-	tangent1 = tangent1.Sub(normal.Mul(tangent1.Dot(normal))).Normalize()
-	tangent2 := normal.Cross(tangent1).Normalize()
-
-	return tangent1, tangent2
+// signedArea returns 2x the signed area of the triangle, seen along the normal
+func signedArea(a, b, c, normal mgl64.Vec3) float64 {
+	return b.Sub(a).Cross(c.Sub(a)).Dot(normal)
 }

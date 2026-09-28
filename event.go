@@ -111,6 +111,9 @@ type Events struct {
 	buffer []Event
 
 	// Collision tracking for Enter/Stay/Exit detection
+	// The slices keep the order of the pairs, so the events are always sent in the same order
+	previousPairs       []pairKey
+	currentPairs        []pairKey
 	previousActivePairs map[pairKey]bool
 	currentActivePairs  map[pairKey]bool
 
@@ -132,28 +135,57 @@ func (e *Events) Subscribe(eventType EventType, listener EventListener) {
 	e.listeners[eventType] = append(e.listeners[eventType], listener)
 }
 
-// recordCollision is called during substeps to record a collision/trigger
-func (e *Events) recordCollisions(constraints []*constraint.ContactConstraint) []*constraint.ContactConstraint {
-	n := 0
-	for _, c := range constraints {
-		pair := makePairKey(c.BodyA, c.BodyB)
-		e.currentActivePairs[pair] = true
+// touchingDistance: bodies closer than this distance are touching (for the collision events)
+const touchingDistance = LinearSlop
 
-		if !c.BodyA.IsTrigger && !c.BodyB.IsTrigger {
-			constraints[n] = c
+// recordCollisions records the pairs in contact, and returns the manifolds to solve (triggers are removed).
+// Speculative contacts are solved but do not send events
+func (e *Events) recordCollisions(manifolds []constraint.Manifold) []constraint.Manifold {
+	n := 0
+	for i := range manifolds {
+		m := &manifolds[i]
+		isTrigger := m.BodyA.IsTrigger || m.BodyB.IsTrigger
+		if isTrigger || m.MinSeparation() <= touchingDistance {
+			e.record(makePairKey(m.BodyA, m.BodyB))
+		}
+		if !isTrigger {
+			manifolds[n] = *m
 			n++
 		}
 	}
-	constraints = constraints[:n]
+	return manifolds[:n]
+}
 
-	return constraints
+func (e *Events) record(pair pairKey) {
+	if e.currentActivePairs == nil {
+		*e = NewEvents()
+	}
+	if !e.currentActivePairs[pair] {
+		e.currentActivePairs[pair] = true
+		e.currentPairs = append(e.currentPairs, pair)
+	}
+}
+
+// forget a removed body
+func (e *Events) forget(body *actor.RigidBody) {
+	delete(e.sleepStates, body)
+	n := 0
+	for _, pair := range e.previousPairs {
+		if pair.bodyA == body || pair.bodyB == body {
+			delete(e.previousActivePairs, pair)
+			continue
+		}
+		e.previousPairs[n] = pair
+		n++
+	}
+	e.previousPairs = e.previousPairs[:n]
 }
 
 // processCollisionEvents compares current and previous pairs to detect Enter/Stay/Exit
 // Should be called after all substeps
 func (e *Events) processCollisionEvents() {
 	// Detect Enter and Stay events
-	for pair := range e.currentActivePairs {
+	for _, pair := range e.currentPairs {
 		// Skip if both bodies are sleeping, to avoid spamming events
 		if pair.bodyA.IsSleeping && pair.bodyB.IsSleeping {
 			continue
@@ -191,7 +223,12 @@ func (e *Events) processCollisionEvents() {
 	}
 
 	// Detect Exit events
-	for pair := range e.previousActivePairs {
+	for _, pair := range e.previousPairs {
+		// Sleeping pairs are not detected anymore, but they are still touching
+		if !e.currentActivePairs[pair] && pair.bodyA.IsSleeping && pair.bodyB.IsSleeping {
+			e.record(pair)
+			continue
+		}
 		if !e.currentActivePairs[pair] {
 			// Pair was active but is no longer, Exit
 			isTrigger := pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
@@ -212,10 +249,14 @@ func (e *Events) processCollisionEvents() {
 
 	// Swap for next frame and clear current
 	e.previousActivePairs, e.currentActivePairs = e.currentActivePairs, e.previousActivePairs
+	e.previousPairs, e.currentPairs = e.currentPairs, e.previousPairs[:0]
 	clear(e.currentActivePairs)
 }
 
 func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
+	if e.sleepStates == nil {
+		*e = NewEvents()
+	}
 	for _, body := range bodies {
 		trackedState, exists := e.sleepStates[body]
 		if !exists {

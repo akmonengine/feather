@@ -283,7 +283,7 @@ func TestSortCells(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelNoCollision(t *testing.T) {
+func TestFindPairsNoCollision(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	bodies := []*actor.RigidBody{
 		createTestBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{0.4, 0.4, 0.4}),
@@ -297,9 +297,7 @@ func TestFindPairsParallelNoCollision(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Ne devrait pas avoir de collision (pas de planes dans ce test)
 	if len(pairs) != 0 {
@@ -307,7 +305,7 @@ func TestFindPairsParallelNoCollision(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelWithCollision(t *testing.T) {
+func TestFindPairsWithCollision(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	bodies := []*actor.RigidBody{
 		createTestBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{0.4, 0.4, 0.4}),
@@ -321,9 +319,7 @@ func TestFindPairsParallelWithCollision(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Devrait avoir une collision
 	if len(pairs) != 1 {
@@ -343,7 +339,7 @@ func TestFindPairsParallelWithCollision(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelWithPlane(t *testing.T) {
+func TestFindPairsWithPlane(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	plane := createTestPlane()
 	body := createTestBox(mgl64.Vec3{0, 5, 0}, mgl64.Vec3{0.4, 0.4, 0.4})
@@ -356,9 +352,7 @@ func TestFindPairsParallelWithPlane(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Devrait détecter la paire plane-body (TOUJOURS ajoutée sans test de collision)
 	// Note: Le plane est dans la liste des bodies, donc il sera traité normalement
@@ -380,7 +374,7 @@ func TestFindPairsParallelWithPlane(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelStaticBodies(t *testing.T) {
+func TestFindPairsStaticBodies(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	staticBody1 := actor.NewRigidBody(
 		actor.Transform{Position: mgl64.Vec3{0, 0, 0}, Rotation: mgl64.QuatIdent()},
@@ -404,9 +398,7 @@ func TestFindPairsParallelStaticBodies(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Ne devrait pas détecter de collision entre bodies statiques
 	if len(pairs) != 0 {
@@ -414,7 +406,7 @@ func TestFindPairsParallelStaticBodies(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelSleepingBodies(t *testing.T) {
+func TestFindPairsSleepingBodies(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	body1 := createTestBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{0.4, 0.4, 0.4})
 	body2 := createTestBox(mgl64.Vec3{0.5, 0.5, 0.5}, mgl64.Vec3{0.4, 0.4, 0.4})
@@ -431,9 +423,7 @@ func TestFindPairsParallelSleepingBodies(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Ne devrait pas détecter de collision entre bodies endormis
 	if len(pairs) != 0 {
@@ -441,7 +431,7 @@ func TestFindPairsParallelSleepingBodies(t *testing.T) {
 	}
 }
 
-func TestFindPairsParallelMultiplePlanes(t *testing.T) {
+func TestFindPairsMultiplePlanes(t *testing.T) {
 	grid := NewSpatialGrid(1.0, 16)
 	plane1 := createTestPlane()
 	plane2 := actor.NewRigidBody(
@@ -461,9 +451,7 @@ func TestFindPairsParallelMultiplePlanes(t *testing.T) {
 
 	// Trouver les paires avec la version parallèle
 	pairs := make([]Pair, 0)
-	for pair := range grid.FindPairsParallel(bodies, 2) {
-		pairs = append(pairs, pair)
-	}
+	pairs = append(pairs, findPairs(grid, bodies, 2)...)
 
 	// Devrait détecter les paires avec les deux planes (TOUJOURS ajoutées sans test de collision)
 	// Note: Les planes sont dans la liste des bodies, donc ils seront traités normalement
@@ -546,7 +534,7 @@ func TestLargeBodySpanningManyCells(t *testing.T) {
 	}
 }
 
-func BenchmarkFindPairsParallel(b *testing.B) {
+func BenchmarkFindPairs(b *testing.B) {
 	grid := NewSpatialGrid(1.0, 1024)
 	bodies := make([]*actor.RigidBody, 100)
 
@@ -567,8 +555,17 @@ func BenchmarkFindPairsParallel(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for range grid.FindPairsParallel(bodies, 4) {
+		for range findPairs(grid, bodies, 4) {
 			// Consume the channel
 		}
 	}
+}
+
+// findPairs runs the broad phase on the current AABB of the bodies, already inserted.
+func findPairs(grid *SpatialGrid, bodies []*actor.RigidBody, workers int) []Pair {
+	boxes := make([]actor.AABB, len(bodies))
+	for i, body := range bodies {
+		boxes[i] = body.Shape.GetAABB()
+	}
+	return grid.FindPairs(bodies, boxes, workers)
 }

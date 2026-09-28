@@ -23,19 +23,11 @@ func createTestBody(id interface{}, isTrigger, isSleeping bool) *actor.RigidBody
 	return rb
 }
 
-// createTestConstraint creates a ContactConstraint for testing
-func createTestConstraint(bodyA, bodyB *actor.RigidBody) *constraint.ContactConstraint {
-	return &constraint.ContactConstraint{
-		BodyA:  bodyA,
-		BodyB:  bodyB,
-		Normal: mgl64.Vec3{1, 0, 0},
-		Points: []constraint.ContactPoint{
-			{
-				Position:    mgl64.Vec3{0, 0, 0},
-				Penetration: 0.1,
-			},
-		},
-	}
+// createTestConstraint creates a touching manifold for testing
+func createTestConstraint(bodyA, bodyB *actor.RigidBody) constraint.Manifold {
+	m := constraint.Manifold{BodyA: bodyA, BodyB: bodyB, Normal: mgl64.Vec3{1, 0, 0}}
+	m.Add(mgl64.Vec3{0, 0, 0}, -0.1)
+	return m
 }
 
 type eventCapture struct {
@@ -100,7 +92,7 @@ func TestEvents_MultipleListeners(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// All listeners should have received the event
@@ -128,7 +120,7 @@ func TestEvents_DifferentEventTypes(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Only collision listener should receive event
@@ -198,7 +190,7 @@ func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	constraints := []*constraint.ContactConstraint{c}
+	constraints := []constraint.Manifold{c}
 	result := events.recordCollisions(constraints)
 
 	// Normal collision should remain in constraints
@@ -221,7 +213,7 @@ func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	constraints := []*constraint.ContactConstraint{c}
+	constraints := []constraint.Manifold{c}
 	result := events.recordCollisions(constraints)
 
 	// Trigger collision should be filtered out
@@ -248,7 +240,7 @@ func TestEvents_RecordCollisions_Mixed(t *testing.T) {
 	c1 := createTestConstraint(bodyA, bodyB) // Normal
 	c2 := createTestConstraint(bodyC, bodyD) // Trigger
 
-	constraints := []*constraint.ContactConstraint{c1, c2}
+	constraints := []constraint.Manifold{c1, c2}
 	result := events.recordCollisions(constraints)
 
 	// Only normal collision should remain
@@ -276,7 +268,7 @@ func TestEvents_TriggerEnter(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should receive TRIGGER_ENTER event
@@ -305,7 +297,7 @@ func TestEvents_TriggerStay(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter (should not trigger STAY)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if capture.hasEventType(TRIGGER_STAY) {
@@ -315,7 +307,7 @@ func TestEvents_TriggerStay(t *testing.T) {
 	capture.reset()
 
 	// Frame 2: Stay
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should receive TRIGGER_STAY event
@@ -334,13 +326,13 @@ func TestEvents_TriggerExit(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Exit (no collision)
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	// Should receive TRIGGER_EXIT event
@@ -360,13 +352,13 @@ func TestEvents_TriggerStay_SleepingBodies(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Stay (but both sleeping)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should NOT receive TRIGGER_STAY when both bodies are sleeping
@@ -389,7 +381,7 @@ func TestEvents_CollisionEnter(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should receive COLLISION_ENTER event
@@ -418,7 +410,7 @@ func TestEvents_CollisionStay(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter (should not trigger STAY)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if capture.hasEventType(COLLISION_STAY) {
@@ -428,7 +420,7 @@ func TestEvents_CollisionStay(t *testing.T) {
 	capture.reset()
 
 	// Frame 2: Stay
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should receive COLLISION_STAY event
@@ -447,13 +439,13 @@ func TestEvents_CollisionExit(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Exit (no collision)
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	// Should receive COLLISION_EXIT event
@@ -473,13 +465,13 @@ func TestEvents_CollisionStay_SleepingBodies(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Stay (but both sleeping)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should NOT receive COLLISION_STAY when both bodies are sleeping
@@ -639,7 +631,7 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {
@@ -654,7 +646,7 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 
 	// Frame 2: Stay
 	captureEnter.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 0 {
@@ -669,7 +661,7 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 
 	// Frame 3: Exit
 	captureStay.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	if captureEnter.count() != 0 {
@@ -700,7 +692,7 @@ func TestEvents_MixedTriggerAndCollision(t *testing.T) {
 	c1 := createTestConstraint(bodyA, bodyB) // Normal
 	c2 := createTestConstraint(bodyC, bodyD) // Trigger
 
-	events.recordCollisions([]*constraint.ContactConstraint{c1, c2})
+	events.recordCollisions([]constraint.Manifold{c1, c2})
 	events.flush()
 
 	// Should receive both event types
@@ -761,7 +753,7 @@ func TestEvents_Flush_ClearsBuffer(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Add events to buffer
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Buffer should be cleared after flush
@@ -796,7 +788,7 @@ func TestEvents_NoListeners(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Process events without any listeners
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should succeed without error
@@ -815,7 +807,7 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {
@@ -824,7 +816,7 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 
 	// Frame 2: Exit
 	captureEnter.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	if captureExit.count() != 1 {
@@ -833,7 +825,7 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 
 	// Frame 3: Enter again
 	captureExit.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {
