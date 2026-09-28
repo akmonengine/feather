@@ -62,11 +62,17 @@ func (si *sleepIslands) update(s *solver, dt float64) {
 		si.island[i] = -1
 	}
 
-	// ========== 2. Islands: the dynamic bodies linked by a contact ==========
+	// ========== 2. Islands: the dynamic bodies linked by a contact or a joint ==========
 	for i := range s.constraints {
 		c := &s.constraints[i]
 		if c.indexA >= 0 && c.indexB >= 0 && c.pointsCount > 0 {
 			si.union(c.indexA, c.indexB)
+		}
+	}
+	for _, joint := range s.joints {
+		base := joint.base()
+		if base.indexA >= 0 && base.indexB >= 0 {
+			si.union(base.indexA, base.indexB)
 		}
 	}
 	for i := range s.states {

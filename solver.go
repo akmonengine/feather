@@ -130,6 +130,7 @@ type contactConstraint struct {
 type solver struct {
 	states      []bodyState
 	constraints []contactConstraint
+	joints      []Joint
 	graph       constraintGraph
 	pool        *workerPool
 	jobs        solverJobs
@@ -236,7 +237,12 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	s.pool.run(len(manifolds), constraintsChunk, s.jobs.prepareConstraint)
 	s.manifolds = nil
 
-	// ========== 3. Graph coloring ==========
+	// ========== 3. Joints ==========
+	for _, joint := range s.joints {
+		joint.prepare(s)
+	}
+
+	// ========== 4. Graph coloring ==========
 	s.graph.color(s.constraints, len(s.states))
 }
 
@@ -475,7 +481,11 @@ func integrateRotation(q mgl64.Quat, theta mgl64.Vec3) mgl64.Quat {
 	return q.Add(qDot).Normalize()
 }
 
+// The joints are solved before the contacts, on a single goroutine
 func (s *solver) warmStart() {
+	for _, joint := range s.joints {
+		joint.warmStart(s)
+	}
 	s.solveConstraints(s.jobs.warmStart)
 }
 
@@ -495,6 +505,9 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 
 // push solves the contacts with the soft constraint, to remove the overlap. No friction here.
 func (s *solver) push() {
+	for _, joint := range s.joints {
+		joint.solve(s, true)
+	}
 	s.solveConstraints(s.jobs.push)
 }
 
@@ -529,6 +542,9 @@ func (s *solver) pushConstraint(c *contactConstraint) {
 
 // relax solves the contacts again without the soft constraint (it adds energy), then the friction
 func (s *solver) relax() {
+	for _, joint := range s.joints {
+		joint.solve(s, false)
+	}
 	s.solveConstraints(s.jobs.relax)
 }
 

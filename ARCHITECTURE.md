@@ -8,6 +8,8 @@ feather/
 ├── graph.go            # graph coloring of the contacts, for the parallel solver
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
+├── joint.go            # joints: distance, ball, hinge, fixed
+├── joint_configurable.go # configurable joint: each axis locked, limited or free
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── spatialgrid.go      # broad phase: uniform grid
@@ -29,7 +31,7 @@ Step(dt)
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── events: pairs touching or overlapping (triggers are not solved)
 │   └── warm start: each point takes the impulses of the same point in the previous step
-├── Phase 2: solver (substeps), then restitution
+├── Phase 2: solver (substeps: joints, then contacts), then restitution
 └── Phase 3: sleep islands & events
 ```
 
@@ -62,6 +64,5 @@ the static and sleeping bodies share a state with no mass.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Current limitations
-- No joints yet (distance, hinge...).
 - The broad phase is a uniform grid: very large and very small bodies in the same scene are slow.
 - No continuous collision for very fast rotating bodies (the speculative margin covers the translation).

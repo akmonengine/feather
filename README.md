@@ -93,13 +93,22 @@ go run -tags v020 -modfile=go.v020.mod .            # v0.2.0
 ```
 
 ### Constraints
-- Contact: generated when a collision is detected between two rigid bodies, up to 4 points (manifold), with friction and restitution.
+- Contact: generated when a collision is detected between two rigid bodies, up to 4 points (manifold), with friction,
+  rolling resistance and restitution.
+- Distance: fixed length, a range [min, max] (a rope), or a spring. Usage: ropes, chains, springs
+- Ball (ball and socket): the anchors stay together, with an optional elliptic cone for the swing and a range for the twist,
+  and an optional drive towards a target rotation. Usage: ragdolls, physical bones, tails
+- Hinge: rotation around one axis only, with an optional angle range, motor and spring. Usage: doors, wheels, knees
+- Fixed: the position and the rotation of the 2 bodies are frozen together
+- Configurable: each of the 6 axes is locked, limited or free, with optional drives. Usage: sliders, shoulders, vehicles,
+  anything the other joints don't cover
 
-A not exhaustive list of possible constraints (not implemented yet):
-- Distance: Maintains constant distance between two points. Usage: Ropes, chains, rigid connections, ragdoll bones
-- Distance Range: Keeps distance within [min, max] range. Usage: Elastic ropes, springs with limits, telescopic joints
-- Hinge: Allows rotation around one axis only (like a door). Usage: Doors, wheels, joints, rotating platforms
-- Angular Range: limits rotation within [min/max]. Usage: articulation
+```go
+hinge := feather.NewHingeJoint(frame, door, mgl64.Vec3{0, 1, 0}, mgl64.Vec3{0, 1, 0}) // anchor, axis (world space)
+hinge.EnableLimit = true
+hinge.LowerAngle, hinge.UpperAngle = -math.Pi/2, math.Pi/2
+world.AddJoint(hinge)
+```
 
 ## GJK
 Detects if two convex shapes overlap. With a margin, it also detects the shapes closer than the margin (speculative contacts).

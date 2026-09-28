@@ -14,6 +14,8 @@ const DEFAULT_WORKERS = 1
 type World struct {
 	// List of all rigid bodies in the world
 	Bodies []*actor.RigidBody
+	// Joints between the bodies
+	Joints []Joint
 	// Gravity acceleration (m/s², or N/kg)
 	Gravity     mgl64.Vec3
 	Substeps    int
@@ -35,6 +37,9 @@ type World struct {
 	contactsIndex map[pairKey]int
 	previous      []constraint.Manifold
 	aabbs         []actor.AABB
+	// pairs of bodies linked by a joint that must not collide
+	jointPairs   map[pairKey]int
+	solverJoints []Joint
 	// 2 buffers: one for the contacts of this step, one for the previous step
 	buffers [2][]constraint.Manifold
 	buffer  int
@@ -54,6 +59,40 @@ func (w *World) AddBody(body *actor.RigidBody) {
 	w.Bodies = append(w.Bodies, body)
 }
 
+// AddJoint adds a joint between 2 bodies, and wakes them up
+func (w *World) AddJoint(joint Joint) {
+	w.Joints = append(w.Joints, joint)
+	base := joint.base()
+	w.islands.wake(base.BodyA)
+	w.islands.wake(base.BodyB)
+	if !base.CollideConnected {
+		if w.jointPairs == nil {
+			w.jointPairs = make(map[pairKey]int)
+		}
+		w.jointPairs[makePairKey(base.BodyA, base.BodyB)]++
+	}
+}
+
+// RemoveJoint removes a joint, and wakes its bodies up
+func (w *World) RemoveJoint(joint Joint) {
+	for i, other := range w.Joints {
+		if other != joint {
+			continue
+		}
+		w.Joints = append(w.Joints[:i], w.Joints[i+1:]...)
+		base := joint.base()
+		w.islands.wake(base.BodyA)
+		w.islands.wake(base.BodyB)
+		if !base.CollideConnected {
+			key := makePairKey(base.BodyA, base.BodyB)
+			if w.jointPairs[key]--; w.jointPairs[key] <= 0 {
+				delete(w.jointPairs, key)
+			}
+		}
+		return
+	}
+}
+
 // RemoveBody removes a rigid body from the world
 func (w *World) RemoveBody(body *actor.RigidBody) {
 	k := -1
@@ -66,6 +105,13 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 
 	if k != -1 {
 		w.Bodies = append(w.Bodies[:k], w.Bodies[k+1:]...)
+	}
+
+	// the joints of the body are removed too
+	for i := len(w.Joints) - 1; i >= 0; i-- {
+		if base := w.Joints[i].base(); base.BodyA == body || base.BodyB == body {
+			w.RemoveJoint(w.Joints[i])
+		}
 	}
 
 	w.Events.forget(body)
@@ -143,6 +189,7 @@ func (w *World) Step(dt float64) {
 
 	// Phase 2: Solver, with substeps
 	s := &w.solver
+	s.joints = w.activeJoints()
 	s.prepare(w.Bodies, manifolds, dt, substeps, contactHertz, pool)
 	for range substeps {
 		s.integrateVelocities(w.Gravity)
@@ -206,6 +253,18 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	return compactManifolds(w.manifolds, w.found)
 }
 
+// activeJoints: the joints with at least one awake dynamic body
+func (w *World) activeJoints() []Joint {
+	w.solverJoints = w.solverJoints[:0]
+	for _, joint := range w.Joints {
+		base := joint.base()
+		if isAwakeDynamic(base.BodyA) || isAwakeDynamic(base.BodyB) {
+			w.solverJoints = append(w.solverJoints, joint)
+		}
+	}
+	return w.solverJoints
+}
+
 // computeAABB of the body i, enlarged by the distance it can travel during the step
 func (w *World) computeAABB(i int) {
 	body := w.Bodies[i]
@@ -220,6 +279,10 @@ func (w *World) computeAABB(i int) {
 // collide the pair i. The triggers only need the real overlaps, the other pairs get speculative contacts
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
+	if w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
+		w.found[i] = false
+		return
+	}
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
 		margin = SpeculativeDistance + relativeSpeed(pair.BodyA, pair.BodyB)*w.dt
@@ -309,6 +372,14 @@ func (w *World) indexContacts() {
 // otherwise it would be pushed without moving
 func (w *World) wakeTouchedBodies() {
 	w.islands.wakeWoken()
+	for _, joint := range w.Joints {
+		base := joint.base()
+		if base.BodyA.IsSleeping && isAwakeDynamic(base.BodyB) {
+			w.islands.wake(base.BodyA)
+		} else if base.BodyB.IsSleeping && isAwakeDynamic(base.BodyA) {
+			w.islands.wake(base.BodyB)
+		}
+	}
 	for i := range w.contacts {
 		bodyA, bodyB := w.contacts[i].BodyA, w.contacts[i].BodyB
 		if bodyA.IsSleeping && isMoving(bodyB) {

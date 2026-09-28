@@ -60,6 +60,31 @@ radius (0 for a box). A ball rolling at v stops after `v² / (2 * 5/7 * resistan
 
 ## Simulation
 
+### Joints
+```go
+ball := feather.NewBallJoint(parent, child, anchor, twistAxis) // world space
+ball.EnableSwingLimit, ball.SwingLimitY, ball.SwingLimitZ = true, 0.5, 0.3 // rad
+ball.EnableTwistLimit, ball.TwistMin, ball.TwistMax = true, -0.2, 0.2
+world.AddJoint(ball)
+```
+- `Hertz` & `DampingRatio`: the softness of the joint (60 Hz and 2 by default, capped at 1/4 of the substeps rate).
+- `CollideConnected` (false by default): the 2 bodies of the joint don't collide with each other.
+- The drive of the ball joint (`DriveTarget`, `DriveHertz`, `DriveDampingRatio`) brings the child to a target rotation,
+  like a muscle: a damping ratio of 1 reaches it without overshoot.
+- The motor of the hinge turns at `MotorSpeed` with at most `MaxMotorTorque`.
+- A body removed from the world removes its joints.
+
+```go
+slider := feather.NewConfigurableJoint(frame, carriage, anchor, mgl64.Vec3{1, 0, 0}) // everything locked
+slider.LinearMotion[0] = feather.MotionLimited
+slider.LinearMin, slider.LinearMax = mgl64.Vec3{-1, 0, 0}, mgl64.Vec3{1, 0, 0}
+world.AddJoint(slider)
+```
+- The configurable joint sets each axis: `MotionLocked`, `MotionLimited` or `MotionFree`. 3 linear axes, the twist
+  and 2 swings (a cone if both are limited).
+- Its drives bring B to `DriveTargetPosition` and `DriveTargetRotation` (in the frame A).
+- The limits are soft: a huge force bends them a little (under 0.5° for 5 g at the end of an arm).
+
 ### Timestep & substeps
 ```go
 world := feather.World{

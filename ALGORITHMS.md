@@ -4,6 +4,7 @@
 2. [EPA Algorithm](#epa-algorithm)
 3. [Contact points](#contact-points)
 4. [Solver](#solver)
+5. [Joints](#joints)
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -125,3 +126,26 @@ at the same time. The contacts without a free color (16 colors) are solved first
 | `RestitutionThreshold` | 1 m/s |
 | `SpeculativeDistance` | 2 cm |
 | `LinearSlop` | 5 mm |
+
+## Joints
+The joints are solved like the contacts (as in Box2D v3): warm starting, soft constraints in `Push` (60 Hz, damping ratio 2
+by default), rigid constraints in `Relax`. They are solved before the contacts, on a single goroutine.
+
+Each joint has a frame on each body. The X axis of the frames is the axis of the hinge, and the twist axis of the ball
+joint (as in PhysX).
+
+- **Point** (ball, hinge, fixed): the anchors stay together, 3 rows solved together:
+  `K = (mA + mB) I - [rA]x IA [rA]x - [rB]x IB [rB]x`
+- **Hinge axis**: the X axis of B stays on the X axis of A: 2 rows along the Y & Z axes of A, the error is `xA × xB`.
+- **Angle limits** (hinge, twist): like the contacts, speculative above the limit, soft under it.
+- **Cone** (ball): the X axis of B seen in the frame A, `p`, must stay in the elliptic cone of the 2 half angles.
+  `p` moves as `dp/dt = ω × p`: the rate of the cone function `f(p)` is `ω · (p × ∇f)`, so the constraint turns around
+  `p × ∇f`. This axis is orthogonal to `p`: it doesn't twist B, and it also follows the cone when B slides along its
+  border (the limit changes with the direction).
+- **Twist** (ball): swing-twist decomposition of the rotation of B relative to A. The rate of the twist isn't exactly
+  `ω · x`: it is measured numerically, to follow the twist when B also swings.
+- **Distance**: 1 row along the axis between the anchors, rigid, or a spring with the limits.
+- **Fixed & drive**: 3 angular rows, `K = IA + IB`, the error is the rotation vector between the frames.
+- **Configurable**: each axis chooses its row. Linear: 1 row along the axis of A (locked, or 2 limits), all locked = the
+  point. Angular: the twist row, the cone if both swings are limited, else 1 row per swing
+  (`atan2(-p.z, p.x)` around Y, `atan2(p.y, p.x)` around Z), all locked = the 3 angular rows.
