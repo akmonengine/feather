@@ -152,6 +152,9 @@ type contactPoint struct {
 	normalImpulse      float64
 	totalNormalImpulse float64 // the normal impulse of the step: the impulse which stopped the point, for the restitution
 	normalVelocity     float64 // before the solver, for the restitution
+	// the impact in progress (see ContactPoint): its approach velocity, and the impulse of its compression so far
+	impactVelocity     float64
+	compressionImpulse float64
 	leverArm           float64 // distance to the friction center: the twist friction it can hold
 }
 
@@ -403,8 +406,9 @@ func (s *solver) prepareConstraint(i int) {
 		cp.baseSeparation = point.Separation - cp.coreB.Sub(cp.coreA).Dot(c.normal)
 		cp.normal = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.normal)
 
-		// Warm starting: the impulses of the previous step
+		// Warm starting: the impulses of the previous step, and the impact in progress
 		cp.normalImpulse = point.NormalImpulse
+		cp.impactVelocity, cp.compressionImpulse = point.ImpactVelocity, point.CompressionImpulse
 		cp.normalVelocity = relativeVelocity(stateA, stateB, cp.rA, cp.rB).Dot(c.normal)
 	}
 	c.prepareFriction(stateA, stateB, staticFriction, dynamicFriction)
@@ -1101,10 +1105,13 @@ func clampDisk(impulse *[2]float64, radius float64) {
 }
 
 // ========== RESTITUTION ==========
-// restitution, after the substeps: a point which hit faster than RestitutionThreshold bounces. Its impulse goes towards
-// the velocity -restitution * its velocity before the step (Newton), and is at most restitution times the impulse which
-// stopped it, its normal impulse of the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics): a pile of bodies
-// doesn't give back more than it absorbed
+// restitution, after the substeps: a point which hit faster than RestitutionThreshold bounces once its compression is
+// over (it doesn't approach anymore). Its impulse goes towards the velocity -restitution * its approach velocity
+// (Newton), and is at most restitution times the impulse of the compression (Poisson's hypothesis, W. J. Stronge,
+// Impact Mechanics): a pile of bodies doesn't give back more than it absorbed. An impact which starts at the very end of
+// a step is compressed over 2 steps: the point keeps its approach velocity and its compression impulse, and bounces at
+// the end of the second step, with the whole impulse. Bounced at the end of the first step, it would give back
+// restitution times a fraction of the impulse only
 func (s *solver) restitution() {
 	s.solveConstraints(s.jobs.restitution, nil)
 }
@@ -1116,15 +1123,24 @@ func (s *solver) restitutionConstraint(c *contactConstraint) {
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
-		if cp.normalVelocity >= -RestitutionThreshold || cp.totalNormalImpulse <= 0 {
+		if cp.impactVelocity == 0 {
+			if cp.normalVelocity >= -RestitutionThreshold || cp.totalNormalImpulse <= 0 {
+				continue
+			}
+			cp.impactVelocity = cp.normalVelocity
+		}
+		cp.compressionImpulse += cp.totalNormalImpulse
+		velocity := cp.normal.velocity(stateA, stateB, c.normal)
+		if velocity < -actor.DefaultSleepSpeed {
+			// still approaching: the compression goes on in the next step
 			continue
 		}
-		velocity := cp.normal.velocity(stateA, stateB, c.normal)
-		newton := -cp.normal.mass * (velocity + c.restitution*cp.normalVelocity)
-		poisson := c.restitution * cp.totalNormalImpulse
+		newton := -cp.normal.mass * (velocity + c.restitution*cp.impactVelocity)
+		poisson := c.restitution * cp.compressionImpulse
 		if impulse := math.Min(newton, poisson); impulse > 0 {
 			cp.addNormalImpulse(stateA, stateB, c.normal, impulse)
 		}
+		cp.impactVelocity, cp.compressionImpulse = 0, 0
 	}
 }
 
@@ -1140,6 +1156,7 @@ func (s *solver) storeImpulsesConstraint(i int) {
 		point := &c.manifold.Points[j]
 		cp := &c.points[j]
 		point.NormalImpulse = cp.normalImpulse
+		point.ImpactVelocity, point.CompressionImpulse = cp.impactVelocity, cp.compressionImpulse
 	}
 	c.manifold.FrictionImpulse = c.tangents[0].Mul(c.frictionImpulse[0]).Add(c.tangents[1].Mul(c.frictionImpulse[1]))
 	c.manifold.TwistImpulse = c.twistImpulse

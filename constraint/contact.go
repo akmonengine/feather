@@ -17,6 +17,12 @@ type ContactPoint struct {
 	// NormalImpulse applied by the solver during the last step (N·s), to warm start the next step
 	NormalImpulse float64
 
+	// Impact in progress, kept from a step to the next: the approach velocity when the point started to hit (m/s,
+	// 0 without impact) and the normal impulse of its compression so far (N·s). The point bounces once the
+	// compression is over, which can be during the next step when the impact starts at the very end of a step
+	ImpactVelocity     float64
+	CompressionImpulse float64
+
 	// LocalAnchorA is the point on the surface of A, in the local space of A, LocalAnchorB the point on the
 	// surface of B, in the local space of B. They find the same point in the next step (warm starting),
 	// and move the contact with the bodies (pair cache)

@@ -513,6 +513,7 @@ func warmStartPair(manifolds, previous []constraint.Manifold) {
 				used[closestManifold][closest] = true
 				point := &previous[closestManifold].Points[closest]
 				manifold.Points[j].NormalImpulse = point.NormalImpulse
+				manifold.Points[j].ImpactVelocity, manifold.Points[j].CompressionImpulse = point.ImpactVelocity, point.CompressionImpulse
 				if source < 0 {
 					source = closestManifold
 				}
