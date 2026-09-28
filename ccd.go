@@ -28,7 +28,7 @@ const (
 	toiIterations = 32
 
 	// coreFraction: if the body already touches the other body at the start, only its core (a sphere of this fraction of
-	// its smallest extent, at its center) is stopped (Box2D B2_CORE_FRACTION)
+	// its smallest extent, at its center) is stopped (B2_CORE_FRACTION of Box2D main, after v3.1)
 	coreFraction = 0.25
 )
 

@@ -9,10 +9,11 @@ import (
 
 // ========== BROAD PHASE ==========
 // The broad phase is a pair of dynamic AABB trees (Catto, "Dynamic Bounding Volume Hierarchies", GDC 2019; the
-// b2DynamicTree of Box2D, the btDbvt of Bullet, the QuadTree of Jolt): one for the static bodies, updated when a body is
-// added, removed or moved by the game, one for the dynamic bodies, awake or asleep. A dynamic body is stored with its
-// AABB enlarged by AABBMargin: a body which moves inside its enlarged AABB doesn't touch the tree, a sleeping body
-// never does. The planes and the heightfields are not in the trees: they are tested against every awake body.
+// b2DynamicTree of Box2D, the btDbvt of Bullet), one per kind of body as the trees of Box2D v3: one for the static
+// bodies, updated when a body is added, removed or moved by the game, one for the dynamic bodies, awake or asleep.
+// A dynamic body is stored with its AABB enlarged by AABBMargin: a body which moves inside its enlarged AABB doesn't
+// touch the tree, a sleeping body never does. The planes and the heightfields are not in the trees: they are tested
+// against every awake body.
 //
 // The pairs of overlapping stored AABBs are kept from a step to the next (see findPairs): only a body put back in a
 // tree queries it. The pairs of the step are those whose exact AABBs overlap, sorted by the index of the first body,
@@ -20,7 +21,7 @@ import (
 
 const (
 	// AABBMargin: the AABB of a dynamic body is enlarged by this margin in the tree (m). Larger: fewer updates of the
-	// tree, more candidates per query. 0.1 m as Box2D
+	// tree, more candidates per query. 0.1 m as Box2D v2.4 (v3 uses 0.05 m)
 	AABBMargin = 0.1
 
 	nullNode = -1
@@ -48,34 +49,36 @@ type treeNode struct {
 	body   int32 // index of the body (leaves)
 }
 
-// aabbTree: a binary tree of AABBs, the bodies at its leaves
+// aabbTree: a binary tree of AABBs, the bodies at its leaves, each node the union of its children. A leaf is inserted
+// next to the sibling which enlarges the tree the least (the surface area heuristic: the area of a node is the chance a
+// query visits it), found down the tree, then the ancestors are refitted and each of them tries the rotation which
+// shrinks it the most (Catto, "Dynamic Bounding Volume Hierarchies", GDC 2019). The heights are kept for the leaves
+// (0) and the tests; the balance comes from the areas, not from the heights
 type aabbTree struct {
 	nodes []treeNode
 	root  int32
-	free  int32 // first free node, linked by parent
+	free  []int32 // released nodes, reused first
 }
 
 func (t *aabbTree) allocate() int32 {
-	if t.free == nullNode {
-		t.nodes = append(t.nodes, treeNode{})
-		t.free = int32(len(t.nodes) - 1)
-		t.nodes[t.free].parent = nullNode
+	if n := len(t.free); n > 0 {
+		index := t.free[n-1]
+		t.free = t.free[:n-1]
+		t.nodes[index] = treeNode{parent: nullNode, child1: nullNode, child2: nullNode, body: nullNode}
+		return index
 	}
-	n := t.free
-	t.free = t.nodes[n].parent
-	t.nodes[n] = treeNode{parent: nullNode, child1: nullNode, child2: nullNode, body: nullNode}
-	return n
+	t.nodes = append(t.nodes, treeNode{parent: nullNode, child1: nullNode, child2: nullNode, body: nullNode})
+	return int32(len(t.nodes) - 1)
 }
 
 func (t *aabbTree) release(n int32) {
-	t.nodes[n].parent = t.free
-	t.nodes[n].height = -1
-	t.free = n
+	t.free = append(t.free, n)
 }
 
 func (t *aabbTree) clear() {
 	t.nodes = t.nodes[:0]
-	t.root, t.free = nullNode, nullNode
+	t.free = t.free[:0]
+	t.root = nullNode
 }
 
 // insert a leaf for the body with the AABB, returns the node
@@ -87,6 +90,7 @@ func (t *aabbTree) insert(aabb actor.AABB, body int32) int32 {
 	return leaf
 }
 
+// remove the leaf
 func (t *aabbTree) remove(leaf int32) {
 	t.removeLeaf(leaf)
 	t.release(leaf)
@@ -110,153 +114,168 @@ func contains(outer, inner actor.AABB) bool {
 		inner.Max.X() <= outer.Max.X() && inner.Max.Y() <= outer.Max.Y() && inner.Max.Z() <= outer.Max.Z()
 }
 
-// insertLeaf: the sibling is chosen down the tree by the surface area heuristic (the cost of the new parent plus the
-// cost inherited by the ancestors, as Box2D v2.4), then the ancestors are enlarged and balanced by rotations
+// insertLeaf under the best sibling, then refits and rotates the ancestors
 func (t *aabbTree) insertLeaf(leaf int32) {
 	if t.root == nullNode {
 		t.root = leaf
-		t.nodes[leaf].parent = nullNode
 		return
 	}
-	leafAABB := t.nodes[leaf].aabb
-	index := t.root
-	for t.nodes[index].height > 0 {
-		child1, child2 := t.nodes[index].child1, t.nodes[index].child2
-		area := surfaceArea(t.nodes[index].aabb)
-		combinedArea := surfaceArea(union(t.nodes[index].aabb, leafAABB))
-		// the cost of making a new parent for this node and the leaf
-		cost := 2 * combinedArea
-		// the cost of pushing the leaf further down the tree
-		inheritance := 2 * (combinedArea - area)
-		costOf := func(child int32) float64 {
-			childArea := surfaceArea(union(leafAABB, t.nodes[child].aabb))
-			if t.nodes[child].height == 0 {
-				return childArea + inheritance
-			}
-			return childArea - surfaceArea(t.nodes[child].aabb) + inheritance
-		}
-		cost1, cost2 := costOf(child1), costOf(child2)
-		if cost < cost1 && cost < cost2 {
-			break
-		}
-		if cost1 < cost2 {
-			index = child1
-		} else {
-			index = child2
-		}
-	}
-	sibling := index
+	sibling := t.bestSibling(t.nodes[leaf].aabb)
 
-	// a new parent above the sibling
-	oldParent := t.nodes[sibling].parent
-	newParent := t.allocate()
-	t.nodes[newParent].parent = oldParent
-	t.nodes[newParent].aabb = union(leafAABB, t.nodes[sibling].aabb)
-	t.nodes[newParent].height = t.nodes[sibling].height + 1
-	t.nodes[newParent].child1, t.nodes[newParent].child2 = sibling, leaf
-	t.nodes[sibling].parent, t.nodes[leaf].parent = newParent, newParent
-	if oldParent == nullNode {
-		t.root = newParent
-	} else if t.nodes[oldParent].child1 == sibling {
-		t.nodes[oldParent].child1 = newParent
+	// a new node takes the place of the sibling, with the sibling and the leaf under it
+	above := t.nodes[sibling].parent
+	pair := t.allocate()
+	t.nodes[pair].parent = above
+	t.link(pair, sibling, leaf)
+	if above == nullNode {
+		t.root = pair
+	} else if t.nodes[above].child1 == sibling {
+		t.nodes[above].child1 = pair
 	} else {
-		t.nodes[oldParent].child2 = newParent
+		t.nodes[above].child2 = pair
 	}
+	// the new node is fitted by link: its ancestors grow
+	t.refitUp(above)
+}
 
-	// the ancestors grow, and are balanced
-	for index = t.nodes[leaf].parent; index != nullNode; index = t.nodes[index].parent {
-		index = t.balance(index)
-		child1, child2 := t.nodes[index].child1, t.nodes[index].child2
-		t.nodes[index].height = 1 + max(t.nodes[child1].height, t.nodes[child2].height)
-		t.nodes[index].aabb = union(t.nodes[child1].aabb, t.nodes[child2].aabb)
+// bestSibling for a leaf: the node whose pairing with the leaf costs the least, the cost being the area of their union
+// plus the growth of every ancestor. The tree is descended greedily: at each node, the leaf stops there if pairing with
+// the node beats what any subtree of its children can reach (under a child, the leaf pairs with the child or with a
+// node below it, which costs at least the growth of the child plus the area of the leaf), else it goes under the child
+// with the better reach. O(log n), the tree quality of the surface area heuristic (Catto, GDC 2019)
+func (t *aabbTree) bestSibling(aabb actor.AABB) int32 {
+	leafArea := surfaceArea(aabb)
+	node, inherited := t.root, 0.0
+	for {
+		n := &t.nodes[node]
+		joined := surfaceArea(union(n.aabb, aabb))
+		if n.height == 0 {
+			return node
+		}
+		here := joined + inherited
+		growth := inherited + (joined - surfaceArea(n.aabb))
+		reach1, reach2 := t.reach(n.child1, aabb, growth, leafArea), t.reach(n.child2, aabb, growth, leafArea)
+		if here <= min(reach1, reach2) {
+			return node
+		}
+		if reach1 < reach2 {
+			node = n.child1
+		} else {
+			node = n.child2
+		}
+		inherited = growth
 	}
 }
 
+// reach: the least a pairing under the child can cost, the ancestors having grown by growth
+func (t *aabbTree) reach(child int32, aabb actor.AABB, growth, leafArea float64) float64 {
+	c := &t.nodes[child]
+	joined := surfaceArea(union(c.aabb, aabb))
+	pairing := joined + growth
+	if c.height == 0 {
+		return pairing
+	}
+	return min(pairing, growth+(joined-surfaceArea(c.aabb))+leafArea)
+}
+
+// removeLeaf: its sibling takes the place of their parent, the ancestors shrink
 func (t *aabbTree) removeLeaf(leaf int32) {
 	if leaf == t.root {
 		t.root = nullNode
 		return
 	}
-	parent := t.nodes[leaf].parent
-	grandParent := t.nodes[parent].parent
-	sibling := t.nodes[parent].child1
+	pair := t.nodes[leaf].parent
+	sibling := t.nodes[pair].child1
 	if sibling == leaf {
-		sibling = t.nodes[parent].child2
+		sibling = t.nodes[pair].child2
 	}
-	if grandParent == nullNode {
+	above := t.nodes[pair].parent
+	t.nodes[sibling].parent = above
+	if above == nullNode {
 		t.root = sibling
-		t.nodes[sibling].parent = nullNode
-		t.release(parent)
+	} else {
+		if t.nodes[above].child1 == pair {
+			t.nodes[above].child1 = sibling
+		} else {
+			t.nodes[above].child2 = sibling
+		}
+		t.refitUp(above)
+	}
+	t.release(pair)
+}
+
+// link the children to the node, and refit it
+func (t *aabbTree) link(node, child1, child2 int32) {
+	t.nodes[node].child1, t.nodes[node].child2 = child1, child2
+	t.nodes[child1].parent, t.nodes[child2].parent = node, node
+	t.refit(node)
+}
+
+// refit the node on its children: its AABB and its height
+func (t *aabbTree) refit(node int32) {
+	n := &t.nodes[node]
+	c1, c2 := &t.nodes[n.child1], &t.nodes[n.child2]
+	n.aabb = union(c1.aabb, c2.aabb)
+	n.height = 1 + max(c1.height, c2.height)
+}
+
+// refitUp: the node and its ancestors are refitted, and each tries a rotation, up to the first ancestor which doesn't
+// change: the ones above it don't change either, and their rotations were tried when they last changed
+func (t *aabbTree) refitUp(node int32) {
+	for ; node != nullNode; node = t.nodes[node].parent {
+		before := t.nodes[node]
+		t.refit(node)
+		if n := &t.nodes[node]; n.aabb == before.aabb && n.height == before.height {
+			return
+		}
+		t.rotate(node)
+	}
+}
+
+// rotate: among the 4 exchanges of a child of the node with a grandchild, the one which shrinks the other child the
+// most (the child losing a grandchild takes the exchanged child instead). The AABB of the node itself doesn't change
+func (t *aabbTree) rotate(node int32) {
+	n := &t.nodes[node]
+	if n.height < 2 {
 		return
 	}
-	// the sibling takes the place of the parent
-	if t.nodes[grandParent].child1 == parent {
-		t.nodes[grandParent].child1 = sibling
+	children := [2]int32{n.child1, n.child2}
+	bestGain, bestChild, bestGrandchild := 0.0, int32(nullNode), int32(nullNode)
+	for k, child := range children {
+		other := &t.nodes[children[1-k]]
+		if other.height == 0 {
+			continue
+		}
+		// the child goes under the other child, in the place of one of its grandchildren
+		grandchildren := [2]int32{other.child1, other.child2}
+		for g, grandchild := range grandchildren {
+			kept := t.nodes[grandchildren[1-g]].aabb
+			shrunk := surfaceArea(union(kept, t.nodes[child].aabb))
+			if gain := surfaceArea(other.aabb) - shrunk; gain > bestGain {
+				bestGain, bestChild, bestGrandchild = gain, child, grandchild
+			}
+		}
+	}
+	if bestChild == nullNode {
+		return
+	}
+	// exchange: the grandchild becomes a child of the node, the child a child of the other child
+	other := t.nodes[bestGrandchild].parent
+	if n.child1 == bestChild {
+		n.child1 = bestGrandchild
 	} else {
-		t.nodes[grandParent].child2 = sibling
+		n.child2 = bestGrandchild
 	}
-	t.nodes[sibling].parent = grandParent
-	t.release(parent)
-	for index := grandParent; index != nullNode; index = t.nodes[index].parent {
-		index = t.balance(index)
-		child1, child2 := t.nodes[index].child1, t.nodes[index].child2
-		t.nodes[index].aabb = union(t.nodes[child1].aabb, t.nodes[child2].aabb)
-		t.nodes[index].height = 1 + max(t.nodes[child1].height, t.nodes[child2].height)
-	}
-}
-
-// balance the subtree at a by a rotation if its children differ in height by more than 1 (an AVL rotation), returns
-// the new root of the subtree
-func (t *aabbTree) balance(a int32) int32 {
-	na := &t.nodes[a]
-	if na.height < 2 {
-		return a
-	}
-	b, c := na.child1, na.child2
-	balance := t.nodes[c].height - t.nodes[b].height
-	if balance > 1 {
-		return t.rotate(a, c, b)
-	}
-	if balance < -1 {
-		return t.rotate(a, b, c)
-	}
-	return a
-}
-
-// rotate the child up above a: up takes the place of a, a takes the place of the shallower child of up, the other
-// child (other) stays under a
-func (t *aabbTree) rotate(a, up, other int32) int32 {
-	nodes := t.nodes
-	f, g := nodes[up].child1, nodes[up].child2
-	// up replaces a
-	nodes[up].child1, nodes[up].child2 = a, f
-	nodes[up].parent = nodes[a].parent
-	nodes[a].parent = up
-	if nodes[up].parent == nullNode {
-		t.root = up
-	} else if nodes[nodes[up].parent].child1 == a {
-		nodes[nodes[up].parent].child1 = up
+	t.nodes[bestGrandchild].parent = node
+	o := &t.nodes[other]
+	if o.child1 == bestGrandchild {
+		o.child1 = bestChild
 	} else {
-		nodes[nodes[up].parent].child2 = up
+		o.child2 = bestChild
 	}
-	// the taller of f, g stays with up; the other goes under a, next to other
-	if nodes[f].height > nodes[g].height {
-		nodes[up].child2 = f
-		t.setChildren(a, other, g)
-	} else {
-		nodes[up].child2 = g
-		t.setChildren(a, other, f)
-	}
-	nodes[a].aabb = union(nodes[nodes[a].child1].aabb, nodes[nodes[a].child2].aabb)
-	nodes[a].height = 1 + max(nodes[nodes[a].child1].height, nodes[nodes[a].child2].height)
-	nodes[up].aabb = union(nodes[nodes[up].child1].aabb, nodes[nodes[up].child2].aabb)
-	nodes[up].height = 1 + max(nodes[nodes[up].child1].height, nodes[nodes[up].child2].height)
-	return up
-}
-
-func (t *aabbTree) setChildren(parent, child1, child2 int32) {
-	t.nodes[parent].child1, t.nodes[parent].child2 = child1, child2
-	t.nodes[child1].parent, t.nodes[child2].parent = parent, parent
+	t.nodes[bestChild].parent = other
+	t.refit(other)
+	t.refit(node)
 }
 
 // query appends the bodies of the leaves overlapping the AABB to out, in the order of the traversal. stack is reused
@@ -636,8 +655,9 @@ func (t *Tree) compact() {
 }
 
 const (
-	// movedPerChunk: queries of moved proxies per unit of work of the workers
-	movedPerChunk = 64
+	// movedPerChunk: queries of moved proxies per unit of work of the workers (a query costs ~1 µs, a unit of work
+	// about the same as one of fatPerChunk records)
+	movedPerChunk = 128
 	// fatPerChunk: stored pairs per unit of work of the workers
 	fatPerChunk = 1024
 )

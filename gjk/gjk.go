@@ -89,7 +89,8 @@ func NewProxy(body *actor.RigidBody) Proxy {
 }
 
 // ========== CORES ==========
-// The core of a rounded shape is the shape without its radius (the convex radius of Bullet & Jolt): a point for a
+// The core of a rounded shape is the shape without its radius (the collision margin of Bullet, the convex radius of
+// Jolt, the radius of the rounded polygons of Box2D v3): a point for a
 // sphere, a segment for a capsule. The distance between the cores is the distance between the shapes minus the radii,
 // and GJK finds it exactly against a polytope, where EPA on the rounded shape would tessellate it (13 iterations for a
 // sphere against a box)

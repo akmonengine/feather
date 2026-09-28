@@ -11,10 +11,13 @@
 ## Broad phase
 
 Two dynamic AABB trees (Catto, "Dynamic Bounding Volume Hierarchies", GDC 2019; the `b2DynamicTree` of Box2D, the
-`btDbvt` of Bullet): one for the static bodies, one for the dynamic bodies, awake or asleep. A dynamic body is stored
-with its AABB enlarged by `AABBMargin` (0.1 m): while it moves inside, the tree is not touched; a sleeping body never
-touches it. The leaves are inserted by the surface area heuristic and the tree is kept balanced by rotations
-(Box2D v2.4). The planes and the heightfields are not in the trees: they are tested against every awake body.
+`btDbvt` of Bullet), one per kind of body as in Box2D v3: one for the static bodies, one for the dynamic bodies, awake
+or asleep. A dynamic body is stored with its AABB enlarged by `AABBMargin` (0.1 m, as Box2D v2.4): while it moves
+inside, the tree is not touched; a sleeping body never touches it. A leaf is inserted next to the sibling which
+enlarges the tree the least (the surface area heuristic), found down the tree by the least reachable cost; the
+ancestors are then refitted and each tries the rotation of a child with a grandchild which shrinks it the most (the
+tree rotations of Catto's talk). The planes and the heightfields are not in the trees: they are tested against every
+awake body.
 
 The pairs of bodies whose stored AABBs overlap are kept from a step to the next (the persistent pairs of Box2D v3):
 only a body put in a tree since the last step (a dynamic body out of its enlarged AABB, a static body moved by the
@@ -24,6 +27,14 @@ settling: 1.6 ms for a traversal of the trees against each other, 0.3 ms with th
 are those whose exact AABBs overlap, with an awake dynamic body, sorted by the index of their first body (a counting
 sort): the list is the same as a search from scratch, and the same as the former uniform grid gave, so the solver keeps
 its order and its results bit for bit.
+
+## Pair cache and warm start
+
+The contacts of a pair are kept with the pair of the broad phase. If a body moved less than 1 mm and turned less than
+2° relative to the other since their contact points were computed, the points are moved with the bodies and their
+separations measured again, instead of running GJK/EPA (the body pair cache of Jolt, with its thresholds). The
+impulses of the previous step warm start the new points: each point takes the impulses of the closest previous point
+in the local space of body A, within 2 cm (as the contact cache of Jolt; Box2D matches the points by feature id).
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -84,7 +95,8 @@ A box touches a plane (or the face of a triangle) with its supporting face, the 
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
 Parallel capsules get 2 points.
-Against the other shapes, a rounded shape is its **core** with a radius (the convex radius of Bullet & Jolt): a point
+Against the other shapes, a rounded shape is its **core** with a radius (the collision margin of Bullet, the convex
+radius of Jolt, the rounded polygons of Box2D v3): a point
 for a sphere, a segment for a capsule. GJK gives the distance and the closest points of the cores (exact against a
 polytope, in 3 or 4 iterations), the radii and the margin are added along their direction, and the contact points are
 clipped as above. EPA runs on the full shapes only if the cores overlap (the center of a sphere inside a box): on the

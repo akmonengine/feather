@@ -180,7 +180,7 @@ func (p *polytope) firstTie(closest float64, a *gjk.Proxy) int {
 const (
 	// sameFeatureCos: 2 triangles of the polytope with normals closer than 1° belong to the same feature. On a rounded
 	// shape of 10 cm, the triangles within EPATieTolerance of the closest one are within 0.3° of it
-	sameFeatureCos = 0.99984769515639123916
+	sameFeatureCos = 0.9998476951563913 // cos(1°)
 	// sameDistance (m): 2 triangles of a flat face are at the same distance, to the rounding
 	sameDistance = 1e-12
 )

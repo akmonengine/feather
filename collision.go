@@ -11,13 +11,17 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
+// The pair cache and its thresholds are those of the body pair cache of Jolt (PhysicsSettings: 1 mm, 2°)
 const (
 	// pairCacheMaxDeltaPosition: the contact of a pair is computed again if B moved more than 1 mm relative to A (m)
 	pairCacheMaxDeltaPosition = 0.001
 
-	// pairCacheCosMaxDeltaRotationDiv2: or if B turned more than 2° relative to A, cos(2° / 2)
-	pairCacheCosMaxDeltaRotationDiv2 = 0.99984769515639123915701155881391
+	// pairCacheMaxDeltaRotation: or if B turned more than 2° relative to A (rad)
+	pairCacheMaxDeltaRotation = 2 * math.Pi / 180
 )
+
+// pairCacheCosMaxDeltaRotationDiv2: the dot product of 2 unit quaternions is the cosine of half their angle
+var pairCacheCosMaxDeltaRotationDiv2 = math.Cos(pairCacheMaxDeltaRotation / 2)
 
 // BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order (whatever the workers)
 func BroadPhase(bodies []*actor.RigidBody, workersCount int) []Pair {
@@ -105,7 +109,7 @@ func setLocalAnchors(m *constraint.Manifold) {
 
 // reuseManifold: if B moved less than 1 mm and 2° relative to A since the contact points were computed,
 // the previous contact points are moved with the bodies instead of running the collision detection again
-// (like the body pair cache of Jolt). The separation of each point is measured again.
+// (the body pair cache of Jolt). The separation of each point is measured again.
 func reuseManifold(previous *constraint.Manifold, margin float64, m *constraint.Manifold) bool {
 	transformA, transformB := &previous.BodyA.Transform, &previous.BodyB.Transform
 	rotationA := &transformA.Rotation
