@@ -35,8 +35,10 @@ type Material struct {
 	// StaticFriction when the surfaces stick, DynamicFriction when they slide
 	StaticFriction  float64
 	DynamicFriction float64
-	LinearDamping   float64 // 0.0 - 1.0, typique : 0.01
-	AngularDamping  float64 // 0.0 - 1.0, typique : 0.05
+	// RollingResistance slows down the rolling spheres and capsules, usually in the range [0,1]
+	RollingResistance float64
+	LinearDamping     float64 // 0.0 - 1.0, typique : 0.01
+	AngularDamping    float64 // 0.0 - 1.0, typique : 0.05
 }
 
 func (material Material) GetMass() float64 {
@@ -175,6 +177,34 @@ func (rb *RigidBody) AddTorque(torque mgl64.Vec3) {
 	if rb.BodyType != BodyTypeStatic {
 		rb.WakeUp()
 		rb.accumulatedTorque = rb.accumulatedTorque.Add(torque)
+	}
+}
+
+// AddForceAtPoint in N, applied at a point in world space: it also adds the torque (point - center) × force
+func (rb *RigidBody) AddForceAtPoint(force mgl64.Vec3, point mgl64.Vec3) {
+	rb.AddForce(force)
+	rb.AddTorque(point.Sub(rb.Transform.Position).Cross(force))
+}
+
+// AddImpulse in N·s: the velocity changes immediately (a hit, a jump)
+func (rb *RigidBody) AddImpulse(impulse mgl64.Vec3) {
+	if rb.BodyType != BodyTypeStatic {
+		rb.WakeUp()
+		rb.Velocity = rb.Velocity.Add(impulse.Mul(rb.InverseMass()))
+	}
+}
+
+// AddImpulseAtPoint in N·s, applied at a point in world space: the body also starts to spin
+func (rb *RigidBody) AddImpulseAtPoint(impulse mgl64.Vec3, point mgl64.Vec3) {
+	rb.AddImpulse(impulse)
+	rb.AddAngularImpulse(point.Sub(rb.Transform.Position).Cross(impulse))
+}
+
+// AddAngularImpulse in N·m·s (world space): the angular velocity changes immediately
+func (rb *RigidBody) AddAngularImpulse(impulse mgl64.Vec3) {
+	if rb.BodyType != BodyTypeStatic {
+		rb.WakeUp()
+		rb.AngularVelocity = rb.AngularVelocity.Add(rb.GetInverseInertiaWorld().Mul3x1(impulse))
 	}
 }
 

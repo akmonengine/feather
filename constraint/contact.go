@@ -33,6 +33,9 @@ type Manifold struct {
 	Points [MaxContactPoints]ContactPoint
 	Count  int
 
+	// RollingImpulse applied by the solver during the last step (N·m·s), to warm start the next step
+	RollingImpulse mgl64.Vec3
+
 	// When the contact points were computed: the normal in the local space of A,
 	// and the position & rotation of B in the local space of A (pair cache)
 	LocalNormal      mgl64.Vec3

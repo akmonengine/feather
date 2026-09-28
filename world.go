@@ -28,7 +28,8 @@ type World struct {
 
 	Events Events
 
-	solver solver
+	solver  solver
+	islands sleepIslands
 	// contacts of the previous step, to warm start the solver
 	contacts      []constraint.Manifold
 	contactsIndex map[pairKey]int
@@ -68,6 +69,17 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	}
 
 	w.Events.forget(body)
+	// the bodies touching the removed body wake up (with their islands): they may have to fall.
+	// The sleeping bodies have no contact anymore: their AABB is used
+	w.islands.remove(body)
+	aabb := body.Shape.GetAABB()
+	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
+	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
+	for _, other := range w.Bodies {
+		if other.IsSleeping && aabb.Overlaps(other.Shape.GetAABB()) {
+			w.islands.wake(other)
+		}
+	}
 	n := 0
 	for _, contact := range w.contacts {
 		if contact.BodyA != body && contact.BodyB != body {
@@ -150,9 +162,7 @@ func (w *World) Step(dt float64) {
 	w.indexContacts()
 
 	// Phase 3: Sleep & events
-	for _, body := range w.Bodies {
-		body.TrySleep(dt, actor.DefaultTimeToSleep, actor.DefaultSleepSpeed)
-	}
+	w.islands.update(s, dt)
 
 	w.Events.processSleepEvents(w.Bodies)
 	w.Events.flush()
@@ -295,15 +305,16 @@ func (w *World) indexContacts() {
 	}
 }
 
-// wakeTouchedBodies: a sleeping body touched by a moving body wakes up,
+// wakeTouchedBodies: a sleeping body touched by a moving body wakes up with its island,
 // otherwise it would be pushed without moving
 func (w *World) wakeTouchedBodies() {
+	w.islands.wakeWoken()
 	for i := range w.contacts {
 		bodyA, bodyB := w.contacts[i].BodyA, w.contacts[i].BodyB
 		if bodyA.IsSleeping && isMoving(bodyB) {
-			bodyA.WakeUp()
+			w.islands.wake(bodyA)
 		} else if bodyB.IsSleeping && isMoving(bodyA) {
-			bodyB.WakeUp()
+			w.islands.wake(bodyB)
 		}
 	}
 }

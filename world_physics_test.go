@@ -511,3 +511,166 @@ func TestPairCache(t *testing.T) {
 		t.Error("the contact was reused after 3°")
 	}
 }
+
+// A ball rolling on the ground: without rolling resistance it keeps rolling; with a rolling resistance c,
+// the torque c·R·N brakes it at 5/7·c·g (solid sphere, rolling without slipping), it stops after v0²/(2·5/7·c·g)
+func TestRollingResistance(t *testing.T) {
+	roll := func(resistance float64) (float64, bool) {
+		w := newScene(1)
+		addGround(w, 0.8).Material.RollingResistance = resistance
+		ball := addBody(w, mgl64.Vec3{0, cubeHalf, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: cubeHalf}, actor.BodyTypeDynamic, 0.8, 0)
+		ball.Velocity = mgl64.Vec3{2, 0, 0}
+		ball.AngularVelocity = mgl64.Vec3{0, 0, -2 / cubeHalf}
+		simulate(w, 6, nil)
+		return ball.Transform.Position.X(), ball.IsSleeping
+	}
+
+	if distance, _ := roll(0); distance < 11.5 {
+		t.Errorf("without rolling resistance: rolled %.2f m in 6 s, want ~12 m", distance)
+	}
+
+	const resistance = 0.1
+	want := 2 * 2 / (2 * 5.0 / 7.0 * resistance * sceneGravity)
+	distance, sleeping := roll(resistance)
+	t.Logf("rolled %.3f m, analytic %.3f m", distance, want)
+	if math.Abs(distance-want) > 0.05*want {
+		t.Errorf("rolling resistance %.1f: rolled %.3f m, want %.3f m", resistance, distance, want)
+	}
+	if !sleeping {
+		t.Error("the ball did not stop")
+	}
+}
+
+// Sleep islands: the bodies touching each other fall asleep together, and wake up together
+func TestSleepIslands(t *testing.T) {
+	stack := func() (*World, *actor.RigidBody, []*actor.RigidBody) {
+		w := newScene(1)
+		support := addBody(w, mgl64.Vec3{0, -0.5, 0}, mgl64.QuatIdent(), &actor.Box{HalfExtents: mgl64.Vec3{2, 0.5, 2}}, actor.BodyTypeStatic, 0.6, 0)
+		var boxes []*actor.RigidBody
+		for i := 0; i < 3; i++ {
+			boxes = append(boxes, addBody(w, mgl64.Vec3{0, cubeHalf + float64(i)*2*cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0))
+		}
+		return w, support, boxes
+	}
+	allSleeping := func(boxes []*actor.RigidBody) bool {
+		for _, b := range boxes {
+			if !b.IsSleeping {
+				return false
+			}
+		}
+		return true
+	}
+
+	t.Run("the stack falls asleep at once", func(t *testing.T) {
+		w, _, boxes := stack()
+		for step := 0; step < 150 && !allSleeping(boxes); step++ {
+			w.Step(sceneDt)
+			sleeping := 0
+			for _, b := range boxes {
+				if b.IsSleeping {
+					sleeping++
+				}
+			}
+			if sleeping != 0 && sleeping != len(boxes) {
+				t.Fatalf("step %d: %d of %d boxes asleep, want all or none", step, sleeping, len(boxes))
+			}
+		}
+		if !allSleeping(boxes) {
+			t.Fatal("the stack never fell asleep")
+		}
+	})
+
+	t.Run("a force on the top box wakes the whole stack", func(t *testing.T) {
+		w, _, boxes := stack()
+		simulate(w, 3, nil)
+		boxes[2].AddForce(mgl64.Vec3{1, 0, 0})
+		w.Step(sceneDt)
+		for i, b := range boxes {
+			if b.IsSleeping {
+				t.Errorf("box %d still asleep", i)
+			}
+		}
+	})
+
+	t.Run("a ball hitting the bottom box wakes the whole stack", func(t *testing.T) {
+		w, _, boxes := stack()
+		simulate(w, 3, nil)
+		ball := addBody(w, mgl64.Vec3{-1, cubeHalf, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: 0.2}, actor.BodyTypeDynamic, 0.6, 0)
+		ball.Velocity = mgl64.Vec3{4, 0, 0}
+		woken := false
+		simulate(w, 0.5, func() {
+			if !boxes[0].IsSleeping {
+				woken = true
+				for i, b := range boxes {
+					if b.IsSleeping {
+						t.Fatalf("box 0 woke up, box %d still asleep", i)
+					}
+				}
+			}
+		})
+		if !woken {
+			t.Error("the stack never woke up")
+		}
+	})
+
+	t.Run("removing the support wakes the stack, it falls", func(t *testing.T) {
+		w, support, boxes := stack()
+		simulate(w, 3, nil)
+		if !allSleeping(boxes) {
+			t.Fatal("the stack is not asleep")
+		}
+		w.RemoveBody(support)
+		simulate(w, 0.5, nil)
+		if y := boxes[0].Transform.Position.Y(); y > cubeHalf-0.5 {
+			t.Errorf("the bottom box is still at y=%.3f: it did not fall", y)
+		}
+	})
+}
+
+// An impulse changes the velocity immediately: Δv = J / m, and Δω = I⁻¹ (r × J) at a point
+func TestImpulses(t *testing.T) {
+	w := newScene(1)
+	w.Gravity = mgl64.Vec3{}
+	box := addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Box{HalfExtents: mgl64.Vec3{0.5, 0.25, 0.25}}, actor.BodyTypeDynamic, 0, 0)
+	m := box.Material.GetMass()
+
+	box.AddImpulse(mgl64.Vec3{0, 0, 10})
+	if want := 10 / m; math.Abs(box.Velocity.Z()-want) > 1e-12 {
+		t.Errorf("velocity %.6f, want %.6f", box.Velocity.Z(), want)
+	}
+
+	// hit at the end of the box, sideways: it moves and spins around Y
+	box.Velocity = mgl64.Vec3{}
+	box.AddImpulseAtPoint(mgl64.Vec3{0, 0, 10}, mgl64.Vec3{0.5, 0, 0})
+	wantSpin := box.GetInverseInertiaWorld().Mul3x1(mgl64.Vec3{0.5, 0, 0}.Cross(mgl64.Vec3{0, 0, 10}))
+	if box.AngularVelocity.Sub(wantSpin).Len() > 1e-12 || math.Abs(box.Velocity.Z()-10/m) > 1e-12 {
+		t.Errorf("velocity %v spin %v, want %v and %v", box.Velocity, box.AngularVelocity, 10/m, wantSpin)
+	}
+
+	// the simulation keeps it: linear and angular momentum are conserved in free flight
+	simulate(w, 1, nil)
+	if math.Abs(box.Velocity.Z()-10/m) > 1e-9 || math.Abs(box.GetInertiaWorld().Mul3x1(box.AngularVelocity).Y()-(-5)) > 1e-6 {
+		t.Errorf("after 1 s: velocity %v, angular momentum %v", box.Velocity, box.GetInertiaWorld().Mul3x1(box.AngularVelocity))
+	}
+
+	// a force at a point is a force plus a torque
+	point := box.Transform.Position.Add(mgl64.Vec3{0, 0, 2})
+	box.AddForceAtPoint(mgl64.Vec3{0, 3, 0}, point)
+	if box.Force() != (mgl64.Vec3{0, 3, 0}) || box.Torque().Sub(mgl64.Vec3{0, 0, 2}.Cross(mgl64.Vec3{0, 3, 0})).Len() > 1e-12 {
+		t.Errorf("force %v torque %v", box.Force(), box.Torque())
+	}
+
+	// a sleeping body wakes up with its island
+	ground := newScene(1)
+	addGround(ground, 0.6)
+	resting := addBody(ground, mgl64.Vec3{0, cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+	simulate(ground, 2, nil)
+	if !resting.IsSleeping {
+		t.Fatal("not asleep")
+	}
+	resting.AddImpulse(mgl64.Vec3{0, 200, 0})
+	simulate(ground, 0.2, nil)
+	if resting.Transform.Position.Y() < cubeHalf+0.1 {
+		t.Errorf("the impulse did not throw the box up: y=%.3f", resting.Transform.Position.Y())
+	}
+}

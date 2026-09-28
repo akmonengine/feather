@@ -7,6 +7,7 @@ feather/
 ├── solver.go           # TGS Soft solver
 ├── graph.go            # graph coloring of the contacts, for the parallel solver
 ├── pool.go             # workers of the step
+├── island.go           # sleep islands
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── spatialgrid.go      # broad phase: uniform grid
@@ -29,7 +30,7 @@ Step(dt)
 │   ├── events: pairs touching or overlapping (triggers are not solved)
 │   └── warm start: each point takes the impulses of the same point in the previous step
 ├── Phase 2: solver (substeps), then restitution
-└── Phase 3: sleep & events
+└── Phase 3: sleep islands & events
 ```
 
 ## Collision detection
@@ -63,5 +64,4 @@ the static and sleeping bodies share a state with no mass.
 ## Current limitations
 - No joints yet (distance, hinge...).
 - The broad phase is a uniform grid: very large and very small bodies in the same scene are slow.
-- Sleep is per body (no islands): a stack falls asleep body by body.
 - No continuous collision for very fast rotating bodies (the speculative margin covers the translation).

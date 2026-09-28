@@ -118,6 +118,13 @@ type contactConstraint struct {
 	softness    softness
 	points      [constraint.MaxContactPoints]contactPoint
 	pointsCount int
+
+	// rolling resistance, around both tangents
+	rollingResistance float64
+	rollingMass       [2]float64
+	rollingImpulse    [2]float64
+	rollingA          [2]mgl64.Vec3 // angular velocity of A given by a unit impulse
+	rollingB          [2]mgl64.Vec3
 }
 
 type solver struct {
@@ -266,6 +273,17 @@ func (s *solver) prepareConstraint(i int) {
 	dynamicFriction := constraint.ComputeDynamicFriction(manifold.BodyA.Material, manifold.BodyB.Material)
 
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
+	c.rollingResistance = constraint.ComputeRollingResistance(manifold.BodyA.Material, manifold.BodyB.Material, shapeRadius(manifold.BodyA.Shape), shapeRadius(manifold.BodyB.Shape))
+	if c.rollingResistance > 0 {
+		for k := range c.tangents {
+			c.rollingA[k] = stateA.inverseInertia.Mul3x1(c.tangents[k])
+			c.rollingB[k] = stateB.inverseInertia.Mul3x1(c.tangents[k])
+			if mass := c.rollingA[k].Dot(c.tangents[k]) + c.rollingB[k].Dot(c.tangents[k]); mass > 0 {
+				c.rollingMass[k] = 1 / mass
+			}
+			c.rollingImpulse[k] = manifold.RollingImpulse.Dot(c.tangents[k])
+		}
+	}
 	for j := 0; j < manifold.Count; j++ {
 		point := &manifold.Points[j]
 		cp := &c.points[j]
@@ -289,6 +307,27 @@ func (s *solver) prepareConstraint(i int) {
 		if tangentSpeed < StaticFrictionSpeed {
 			cp.friction = staticFriction
 		}
+	}
+}
+
+// shapeRadius is the radius of the rounded shapes, for the rolling resistance
+func shapeRadius(shape actor.ShapeInterface) float64 {
+	switch shape := shape.(type) {
+	case *actor.Sphere:
+		return shape.Radius
+	case *actor.Capsule:
+		return shape.Radius
+	}
+	return 0
+}
+
+// applyRolling applies the rolling impulses λ around both tangents: -λ on A, +λ on B
+func (c *contactConstraint) applyRolling(stateA, stateB *bodyState, lambda [2]float64) {
+	if stateA.body != nil {
+		stateA.angularVelocity = stateA.angularVelocity.Sub(c.rollingA[0].Mul(lambda[0])).Sub(c.rollingA[1].Mul(lambda[1]))
+	}
+	if stateB.body != nil {
+		stateB.angularVelocity = stateB.angularVelocity.Add(c.rollingB[0].Mul(lambda[0])).Add(c.rollingB[1].Mul(lambda[1]))
 	}
 }
 
@@ -449,6 +488,9 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 		cp.tangents[0].apply(stateA, stateB, c.tangents[0], cp.tangentImpulse[0])
 		cp.tangents[1].apply(stateA, stateB, c.tangents[1], cp.tangentImpulse[1])
 	}
+	if c.rollingResistance > 0 {
+		c.applyRolling(stateA, stateB, c.rollingImpulse)
+	}
 }
 
 // push solves the contacts with the soft constraint, to remove the overlap. No friction here.
@@ -509,6 +551,31 @@ func (s *solver) relaxConstraint(c *contactConstraint) {
 		cp.normalImpulse = newImpulse
 		cp.totalNormalImpulse += lambda
 		cp.normal.apply(stateA, stateB, c.normal, lambda)
+	}
+
+	// ========== ROLLING RESISTANCE ==========
+	if c.rollingResistance > 0 {
+		totalNormalImpulse := 0.0
+		for j := 0; j < c.pointsCount; j++ {
+			totalNormalImpulse += c.points[j].normalImpulse
+		}
+		relativeAngularVel := stateB.angularVelocity.Sub(stateA.angularVelocity)
+		previous := c.rollingImpulse
+		rollingImpulse := [2]float64{
+			previous[0] - c.rollingMass[0]*relativeAngularVel.Dot(c.tangents[0]),
+			previous[1] - c.rollingMass[1]*relativeAngularVel.Dot(c.tangents[1]),
+		}
+		maxRolling := c.rollingResistance * totalNormalImpulse
+		if length := math.Hypot(rollingImpulse[0], rollingImpulse[1]); length > maxRolling {
+			scale := 0.0
+			if length > 0 {
+				scale = maxRolling / length
+			}
+			rollingImpulse[0] *= scale
+			rollingImpulse[1] *= scale
+		}
+		c.rollingImpulse = rollingImpulse
+		c.applyRolling(stateA, stateB, [2]float64{rollingImpulse[0] - previous[0], rollingImpulse[1] - previous[1]})
 	}
 
 	// ========== FRICTION ==========
@@ -585,6 +652,7 @@ func (s *solver) storeImpulses() {
 
 func (s *solver) storeImpulsesConstraint(i int) {
 	c := &s.constraints[i]
+	c.manifold.RollingImpulse = c.tangents[0].Mul(c.rollingImpulse[0]).Add(c.tangents[1].Mul(c.rollingImpulse[1]))
 	for j := 0; j < c.pointsCount; j++ {
 		point := &c.manifold.Points[j]
 		cp := &c.points[j]

@@ -70,6 +70,7 @@ end
 - The simulation is deterministic: same result bit for bit, whatever the number of `Workers`.
 - The solver is parallel: the contacts are split into colors (graph coloring), the contacts of a color don't share any body.
 - A step doesn't allocate memory (after the first steps).
+- The bodies touching each other sleep and wake up together (islands).
 
 ### Why not XPBD anymore
 Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`, 50 Hz, 12 substeps):

@@ -50,6 +50,11 @@ There is no bounce under 1 m/s of impact (`RestitutionThreshold`), so resting bo
 | 0.7-0.8 | High bounce | Rubber, basketballs |
 | 0.9 | Very high bounce | Super balls |
 
+### Rolling resistance
+`RollingResistance` (usually 0 to 1, 0 by default) slows down the rolling spheres and capsules. Without it, a ball rolls forever
+on a flat ground, and a scene with balls never sleeps. The contact uses the largest value of both bodies, times the largest
+radius (0 for a box). A ball rolling at v stops after `v² / (2 * 5/7 * resistance * g)`.
+
 ### Damping
 `LinearDamping` and `AngularDamping` (1/s) slow the body down: `v = v / (1 + h * damping)` at each substep.
 
@@ -83,8 +88,10 @@ The contacts are created before the bodies touch (speculative contacts), from th
 A ball at 40 m/s does not go through a 4 cm wall at 50 Hz.
 
 ### Sleep
-A body resting for 0.5 s (under 0.05 m/s and 0.05 rad/s) falls asleep: it is not simulated anymore.
-It wakes up with `AddForce`, `AddTorque`, `WakeUp`, or when a moving body touches it.
+The bodies touching each other form an island. An island resting for 0.5 s (all its bodies under 0.05 m/s and 0.05 rad/s)
+falls asleep: it is not simulated anymore.
+The whole island wakes up with `AddForce`, `AddTorque` or `WakeUp` on one of its bodies, when a moving body touches it,
+or when a body under it is removed.
 
 ### Determinism & threads
 The same scene gives the same result, bit for bit, whatever the number of `Workers`.
