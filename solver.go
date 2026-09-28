@@ -190,9 +190,14 @@ type solver struct {
 	maxAngularSpeed float64
 	stage           func(c *contactConstraint)
 	color           []int
-	indices         map[*actor.RigidBody]int
-	h               float64
-	invH            float64
+	// stateIndex: the state of each body of the World (-1 if not awake); stateBody: the body of each state
+	stateIndex []int32
+	stateBody  []int32
+	bodies     []*actor.RigidBody
+	// indices: the states of the bodies of the joints only (a map, for the few bodies of the joints)
+	indices map[*actor.RigidBody]int
+	h       float64
+	invH    float64
 
 	// static bodies (and sleeping ones) share this state: no mass, they never move
 	static bodyState
@@ -211,6 +216,7 @@ type solverJobs struct {
 	prepareConstraint func(i int)
 	storeImpulses     func(i int)
 	finalize          func(i int)
+	state             func(i int)
 }
 
 func (s *solver) initJobs() {
@@ -227,6 +233,7 @@ func (s *solver) initJobs() {
 		prepareConstraint: s.prepareConstraint,
 		storeImpulses:     s.storeImpulsesConstraint,
 		finalize:          s.finalizeBody,
+		state:             s.stateOf,
 		color: func(i int) {
 			s.stage(&s.constraints[s.color[i]])
 		},
@@ -248,29 +255,40 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	s.static = bodyState{deltaRotation: mgl64.QuatIdent(), deltaMatrix: mgl64.Ident3()}
 
 	// ========== 1. Body states ==========
-	s.states = s.states[:0]
+	// the awake dynamic bodies get a state, numbered in the order of the World; the states are filled in parallel
 	if s.indices == nil {
 		s.indices = make(map[*actor.RigidBody]int)
 	}
 	clear(s.indices)
-	for _, body := range bodies {
+	for _, joint := range s.joints {
+		base := joint.base()
+		s.indices[base.BodyA], s.indices[base.BodyB] = -1, -1
+	}
+	if cap(s.stateIndex) < len(bodies) {
+		s.stateIndex = make([]int32, len(bodies))
+	}
+	s.stateIndex = s.stateIndex[:len(bodies)]
+	s.stateBody = s.stateBody[:0]
+	for i, body := range bodies {
+		s.stateIndex[i] = -1
 		if !isAwakeDynamic(body) {
 			continue
 		}
-		s.indices[body] = len(s.states)
-		s.states = append(s.states, bodyState{
-			body:            body,
-			velocity:        body.Velocity,
-			angularVelocity: body.AngularVelocity,
-			deltaRotation:   mgl64.QuatIdent(),
-			deltaMatrix:     mgl64.Ident3(),
-			invMass:         body.InverseMass(),
-			inverseInertia:  body.GetInverseInertiaWorld(),
-			startInertia:    body.GetInverseInertiaWorld(),
-			rotation:        body.Transform.Rotation,
-			anisotropic:     !isIsotropic(body.InertiaLocal),
-		})
+		s.stateIndex[i] = int32(len(s.stateBody))
+		if len(s.indices) > 0 {
+			if _, ok := s.indices[body]; ok {
+				s.indices[body] = len(s.stateBody)
+			}
+		}
+		s.stateBody = append(s.stateBody, int32(i))
 	}
+	if cap(s.states) < len(s.stateBody) {
+		s.states = make([]bodyState, len(s.stateBody))
+	}
+	s.states = s.states[:len(s.stateBody)]
+	s.bodies = bodies
+	s.pool.run(len(s.states), bodiesChunk, s.jobs.state)
+	s.bodies = nil
 
 	// ========== 2. Contact constraints ==========
 	hertz := math.Min(contactHertz, hertzPerSubstepRate*s.invH)
@@ -307,8 +325,8 @@ func (s *solver) prepareConstraint(i int) {
 	c := &s.constraints[i]
 	*c = contactConstraint{
 		manifold:    manifold,
-		indexA:      s.indexOf(manifold.BodyA),
-		indexB:      s.indexOf(manifold.BodyB),
+		indexA:      int(s.stateIndex[manifold.IndexA]),
+		indexB:      int(s.stateIndex[manifold.IndexB]),
 		normal:      manifold.Normal,
 		pointsCount: manifold.Count,
 	}
@@ -446,11 +464,29 @@ func (c *contactConstraint) applyRolling(stateA, stateB *bodyState, lambda [2]fl
 	}
 }
 
+// indexOf: the state of a body of a joint
 func (s *solver) indexOf(body *actor.RigidBody) int {
 	if index, ok := s.indices[body]; ok {
 		return index
 	}
 	return -1
+}
+
+// stateOf fills the state of the body i
+func (s *solver) stateOf(i int) {
+	body := s.bodies[s.stateBody[i]]
+	s.states[i] = bodyState{
+		body:            body,
+		velocity:        body.Velocity,
+		angularVelocity: body.AngularVelocity,
+		deltaRotation:   mgl64.QuatIdent(),
+		deltaMatrix:     mgl64.Ident3(),
+		invMass:         body.InverseMass(),
+		inverseInertia:  body.GetInverseInertiaWorld(),
+		startInertia:    body.GetInverseInertiaWorld(),
+		rotation:        body.Transform.Rotation,
+		anisotropic:     !isIsotropic(body.InertiaLocal),
+	}
 }
 
 // makeJacobian for an impulse along the direction, applied at rA and rB

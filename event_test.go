@@ -184,6 +184,8 @@ func TestMakePairKey_DifferentPairs(t *testing.T) {
 
 func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// Two normal bodies
 	bodyA := createTestBody("A", false, false)
@@ -207,6 +209,8 @@ func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 
 func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// One trigger body
 	bodyA := createTestBody("A", true, false)
@@ -230,6 +234,8 @@ func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 
 func TestEvents_RecordCollisions_Mixed(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// Setup: 1 normal collision + 1 trigger collision
 	bodyA := createTestBody("A", false, false)

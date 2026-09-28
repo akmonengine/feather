@@ -37,3 +37,12 @@ func narrow(a, b *actor.RigidBody) (bool, mgl64.Vec3, float64, int) {
 	}
 	return true, m.Normal, -m.MinSeparation(), m.Count
 }
+
+func world(workers int) *feather.World {
+	return &feather.World{
+		Gravity:  mgl64.Vec3{0, -g, 0},
+		Substeps: substeps,
+		Workers:  workers,
+		Events:   feather.NewEvents(),
+	}
+}

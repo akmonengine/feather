@@ -87,16 +87,6 @@ func Step(w *feather.World, seconds float64, each func()) {
 
 // ========== BUILDING ==========
 
-func newWorld() *feather.World {
-	return &feather.World{
-		Gravity:     mgl64.Vec3{0, -gravity, 0},
-		Substeps:    substeps,
-		SpatialGrid: feather.NewSpatialGrid(2, 4096),
-		Workers:     1,
-		Events:      feather.NewEvents(),
-	}
-}
-
 // material of a body
 type material struct {
 	friction, restitution, density float64

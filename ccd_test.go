@@ -55,7 +55,6 @@ func TestBulletStopsOnDynamicBodies(t *testing.T) {
 		motion := sweep{start: ball.Transform, end: actor.Transform{Position: mgl64.Vec3{10, 0, 0}, Rotation: mgl64.QuatIdent()}}
 		ball.Transform = motion.end
 		scratch := ccdPool.Get().(*ccdScratch)
-		scratch.seen = make([]bool, len(w.Bodies))
 		scratch.core.Radius = coreFraction * 0.02
 		w.stopAtImpact(ball, &motion, 0.02, scratch)
 		stopped := ball.Transform.Position.X() < 5

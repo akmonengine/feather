@@ -15,7 +15,7 @@ feather/
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── collision_heightfield.go # heightfields: triangles, inner edges, patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
-├── spatialgrid.go      # broad phase: uniform grid
+├── tree.go             # broad phase: dynamic AABB trees
 ├── event.go            # collision, trigger & sleep events
 ├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
@@ -30,7 +30,7 @@ Step(dt)
 ├── wake the sleeping bodies touched by a moving body
 ├── Phase 1: collision detection (once per step)
 │   ├── AABBs enlarged by the distance each body can travel during dt
-│   ├── broad phase: pairs of overlapping AABBs (spatial grid)
+│   ├── broad phase: pairs of overlapping AABBs (AABB trees)
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
 │   ├── events: pairs touching or overlapping (triggers are not solved)
@@ -102,8 +102,8 @@ restitution, continuous collision, islands), without allocation.
 `World.parallelFrom` (tests only) runs the parallel paths under 256 bodies, for the determinism.
 
 ## Current limitations
-- The broad phase is a uniform grid: very large and very small bodies in the same scene are slow
-  (the planes & the heightfields are not in the grid, they are tested with every body).
+- The broad phase is a pair of dynamic AABB trees (static and dynamic bodies), the dynamic AABBs enlarged by a margin:
+  a sleeping body costs nothing (the planes & the heightfields are not in the trees, they are tested with every awake body).
 - A heightfield is a surface: a body entirely under it is not pushed up.
 - The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
   triangle during the step, and sink by a few mm before the next step.

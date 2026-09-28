@@ -44,3 +44,13 @@ func regressions(update bool) bool {
 	fmt.Println("the regressions run on the working tree, not on v0.2.0")
 	return false
 }
+
+func world(workers int) *feather.World {
+	return &feather.World{
+		Gravity:     mgl64.Vec3{0, -g, 0},
+		Substeps:    substeps,
+		SpatialGrid: feather.NewSpatialGrid(2.0, 4096),
+		Workers:     workers,
+		Events:      feather.NewEvents(),
+	}
+}

@@ -22,11 +22,10 @@ const (
 
 func newScene(workers int) *World {
 	return &World{
-		Gravity:     mgl64.Vec3{0, -sceneGravity, 0},
-		Substeps:    sceneSubsteps,
-		SpatialGrid: NewSpatialGrid(2.0, 4096),
-		Workers:     workers,
-		Events:      NewEvents(),
+		Gravity:  mgl64.Vec3{0, -sceneGravity, 0},
+		Substeps: sceneSubsteps,
+		Workers:  workers,
+		Events:   NewEvents(),
 	}
 }
 

@@ -337,7 +337,8 @@ var doubleDomino = Scene{
 		first.AngularVelocity = first.GetInverseInertiaWorld().Mul3x1(arm.Cross(impulse))
 		tipping := math.Atan(0.125 / 0.5)
 		fallTime, elapsed := 0.0, 0.0
-		play(w, 8, func() {
+		// 16 s: the last domino falls after 7 s, then the leaning dominos settle flat on the ground
+		play(w, 16, func() {
 			elapsed += Dt
 			if tilt(dominos[count-1]) > tipping && fallTime == 0 {
 				fallTime = elapsed

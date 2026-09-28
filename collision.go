@@ -18,17 +18,20 @@ const (
 	pairCacheCosMaxDeltaRotationDiv2 = 0.99984769515639123915701155881391
 )
 
-// BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order
-func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody, workersCount int) []Pair {
+// BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order (whatever the workers)
+func BroadPhase(bodies []*actor.RigidBody, workersCount int) []Pair {
 	boxes := make([]actor.AABB, len(bodies))
 	for i, body := range bodies {
 		boxes[i] = body.AABB()
 	}
-	spatialGrid.Clear()
-	for i, body := range bodies {
-		spatialGrid.InsertAABB(i, body, boxes[i])
+	var tree Tree
+	tree.rebuild(bodies, boxes)
+	pool := &workerPool{}
+	if workersCount > 1 {
+		pool.begin(workersCount)
+		defer pool.end()
 	}
-	return spatialGrid.FindPairs(bodies, boxes, workersCount)
+	return tree.findPairs(bodies, boxes, pool)
 }
 
 // NarrowPhase returns the contacts of the overlapping pairs (without speculative contacts), in the order of the pairs

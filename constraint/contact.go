@@ -26,11 +26,13 @@ type ContactPoint struct {
 
 // Manifold is the contact between 2 bodies. Normal points from A to B
 type Manifold struct {
-	BodyA  *actor.RigidBody
-	BodyB  *actor.RigidBody
-	Normal mgl64.Vec3
-	Points [MaxContactPoints]ContactPoint
-	Count  int
+	BodyA *actor.RigidBody
+	BodyB *actor.RigidBody
+	// IndexA & IndexB: the indices of the bodies in the World, set by the World for its solver
+	IndexA, IndexB int32
+	Normal         mgl64.Vec3
+	Points         [MaxContactPoints]ContactPoint
+	Count          int
 
 	// Impulses of the friction applied by the solver during the last step, to warm start the next step: along the
 	// tangents at the friction center of the points (N·s), and around the normal (N·m·s)

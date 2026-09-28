@@ -38,3 +38,13 @@ func ball(w *feather.World, a, b *actor.RigidBody, anchor mgl64.Vec3) {
 
 // moved: v0.2.0 computes the AABB at each step
 func moved(b *actor.RigidBody) {}
+
+func newWorld() *feather.World {
+	return &feather.World{
+		Gravity:     mgl64.Vec3{0, -gravity, 0},
+		Substeps:    substeps,
+		SpatialGrid: feather.NewSpatialGrid(2, 4096),
+		Workers:     1,
+		Events:      feather.NewEvents(),
+	}
+}

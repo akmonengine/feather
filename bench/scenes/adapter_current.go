@@ -42,3 +42,12 @@ func ball(w *feather.World, a, b *actor.RigidBody, anchor mgl64.Vec3) {
 func moved(b *actor.RigidBody) {
 	b.UpdateAABB()
 }
+
+func newWorld() *feather.World {
+	return &feather.World{
+		Gravity:  mgl64.Vec3{0, -gravity, 0},
+		Substeps: substeps,
+		Workers:  1,
+		Events:   feather.NewEvents(),
+	}
+}

@@ -13,11 +13,7 @@ import (
 // DefaultWorkers: the collision detection and the solver run on one goroutine by default
 const DefaultWorkers = 1
 
-const (
-	// defaultCellSize & defaultCells: the spatial grid of a World without SpatialGrid (m)
-	defaultCellSize = 2.0
-	defaultCells    = 4096
-)
+const ()
 
 type World struct {
 	// List of all rigid bodies in the world
@@ -25,9 +21,8 @@ type World struct {
 	// Joints between the bodies
 	Joints []Joint
 	// Gravity acceleration (m/s², or N/kg)
-	Gravity     mgl64.Vec3
-	Substeps    int
-	SpatialGrid *SpatialGrid
+	Gravity  mgl64.Vec3
+	Substeps int
 	// Workers is the number of goroutines for the collision detection.
 	// The result is exactly the same whatever the value.
 	Workers int
@@ -45,6 +40,8 @@ type World struct {
 	contactsIndex map[pairKey]contactsRange
 	previous      []constraint.Manifold
 	aabbs         []actor.AABB
+	// the broad phase
+	tree Tree
 	// pairs of bodies linked by a joint that must not collide
 	jointPairs   map[pairKey]int
 	solverJoints []Joint
@@ -124,6 +121,7 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 
 	if k != -1 {
 		w.Bodies = append(w.Bodies[:k], w.Bodies[k+1:]...)
+		w.tree.removed(k)
 	}
 
 	// the joints of the body are removed too
@@ -219,10 +217,6 @@ func (w *World) Step(dt float64) {
 		contactHertz = DefaultContactHertz
 	}
 
-	if w.SpatialGrid == nil {
-		w.SpatialGrid = NewSpatialGrid(defaultCellSize, defaultCells)
-	}
-
 	start := time.Now()
 	w.profile = Profile{}
 	w.wakeTouchedBodies()
@@ -304,11 +298,8 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	mark := time.Now()
 	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
 
-	w.SpatialGrid.Clear()
-	for i, body := range w.Bodies {
-		w.SpatialGrid.InsertAABB(i, body, w.aabbs[i])
-	}
-	w.pairs = w.SpatialGrid.findPairsPool(w.Bodies, w.aabbs, pool)
+	w.tree.sync(w.Bodies, w.aabbs)
+	w.pairs = w.tree.findPairs(w.Bodies, w.aabbs, pool)
 	mark = w.lap(&w.profile.BroadPhase, mark)
 
 	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start).
@@ -405,11 +396,20 @@ func (w *World) collide(i int) {
 			}
 			if count > 0 {
 				w.counts[i] = count
+				indexManifolds(out[:count], pair)
 				return
 			}
 		}
 	}
 	w.counts[i] = collidePair(pair, margin, out)
+	indexManifolds(out[:w.counts[i]], pair)
+}
+
+// indexManifolds: the manifolds of the pair carry the indices of its bodies, for the solver
+func indexManifolds(manifolds []constraint.Manifold, pair Pair) {
+	for k := range manifolds {
+		manifolds[k].IndexA, manifolds[k].IndexB = pair.IndexA, pair.IndexB
+	}
 }
 
 // isChanged: a body of the pair is a heightfield changed during this step

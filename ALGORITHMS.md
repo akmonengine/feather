@@ -8,6 +8,20 @@
 6. [Heightfield](#heightfield)
 7. [Continuous collision](#continuous-collision)
 
+## Broad phase
+
+Two dynamic AABB trees (Catto, "Dynamic Bounding Volume Hierarchies", GDC 2019; the `b2DynamicTree` of Box2D, the
+`btDbvt` of Bullet): one for the static bodies, one for the dynamic bodies, awake or asleep. A dynamic body is stored
+with its AABB enlarged by `AABBMargin` (0.1 m): while it moves inside, the tree is not touched; a sleeping body never
+touches it. The leaves are inserted by the surface area heuristic and the tree is kept balanced by rotations
+(Box2D v2.4). The planes and the heightfields are not in the trees: they are tested against every awake body.
+
+The pairs come from a traversal of the dynamic tree against itself and against the static tree (the tree-versus-tree
+collision of `btDbvt`): each pair of overlapping nodes is visited once, a subtree without any awake body is pruned (a
+resting scene costs nothing). The pairs of nodes near the roots are split into batches for the workers. The pairs are
+then sorted by the index of their first body (a counting sort): the list is the same whatever the workers, and the
+same as the former uniform grid gave, so the solver keeps its order and its results bit for bit.
+
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
 The shapes only need a `Support(direction)` function, the farthest point in a direction.

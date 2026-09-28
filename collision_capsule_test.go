@@ -477,11 +477,10 @@ func TestCapsuleAnalyticDoesNotAllocate(t *testing.T) {
 func simulateCapsuleOnPlane(t *testing.T, rotation mgl64.Quat, restingHeight float64, seconds float64) (maxDrift float64, finalAxis mgl64.Vec3) {
 	t.Helper()
 	world := World{
-		Gravity:     mgl64.Vec3{0, -9.81, 0},
-		Substeps:    10,
-		SpatialGrid: NewSpatialGrid(2.0, 1024),
-		Workers:     1,
-		Events:      NewEvents(),
+		Gravity:  mgl64.Vec3{0, -9.81, 0},
+		Substeps: 10,
+		Workers:  1,
+		Events:   NewEvents(),
 	}
 	world.AddBody(createPlane(mgl64.Vec3{0, 1, 0}, 0))
 	start := mgl64.Vec3{0.25, restingHeight, -0.5}

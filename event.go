@@ -137,11 +137,12 @@ const touchingDistance = LinearSlop
 // recordCollisions records the pairs in contact, and returns the manifolds to solve (triggers are removed).
 // Speculative contacts are solved but do not send events
 func (e *Events) recordCollisions(manifolds []constraint.Manifold) []constraint.Manifold {
+	tracked := e.tracksCollisions()
 	n := 0
 	for i := range manifolds {
 		m := &manifolds[i]
 		isTrigger := m.BodyA.IsTrigger || m.BodyB.IsTrigger
-		if isTrigger || m.MinSeparation() <= touchingDistance {
+		if tracked && (isTrigger || m.MinSeparation() <= touchingDistance) {
 			e.record(makePairKey(m.BodyA, m.BodyB))
 		}
 		if !isTrigger {
@@ -265,6 +266,9 @@ func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
 	if e.sleepStates == nil {
 		*e = NewEvents()
 	}
+	if !e.hasListeners(EventSleep) && !e.hasListeners(EventWake) {
+		return
+	}
 	for _, body := range bodies {
 		trackedState, exists := e.sleepStates[body]
 		if !exists {
@@ -289,6 +293,16 @@ func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
 // hasListeners: an event is only created if somebody listens to it (creating an event allocates)
 func (e *Events) hasListeners(eventType EventType) bool {
 	return len(e.listeners[eventType]) > 0
+}
+
+// tracksCollisions: the pairs in contact are recorded only if somebody listens to the collisions or the triggers
+func (e *Events) tracksCollisions() bool {
+	for _, t := range [6]EventType{EventTriggerEnter, EventCollisionEnter, EventTriggerStay, EventCollisionStay, EventTriggerExit, EventCollisionExit} {
+		if e.hasListeners(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // flush sends all buffered events and clears the buffer

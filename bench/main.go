@@ -29,16 +29,6 @@ const (
 	g        = 9.81
 )
 
-func world(workers int) *feather.World {
-	return &feather.World{
-		Gravity:     mgl64.Vec3{0, -g, 0},
-		Substeps:    substeps,
-		SpatialGrid: feather.NewSpatialGrid(2.0, 4096),
-		Workers:     workers,
-		Events:      feather.NewEvents(),
-	}
-}
-
 func body(w *feather.World, t actor.Transform, s actor.ShapeInterface, typ actor.BodyType, mu, e float64) *actor.RigidBody {
 	b := actor.NewRigidBody(t, s, typ, 500)
 	b.Material.StaticFriction, b.Material.DynamicFriction, b.Material.Restitution = mu, mu, e

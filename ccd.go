@@ -54,8 +54,8 @@ func (s *sweep) at(t float64) actor.Transform {
 
 // ccdScratch: the buffers of the continuous collision, reused to avoid the allocations
 type ccdScratch struct {
-	seen       []bool
-	candidates []int
+	stack      []int32
+	candidates []int32
 	cells      []int32
 	shape      triangleShape
 	core       actor.Sphere
@@ -68,11 +68,6 @@ var ccdPool = sync.Pool{New: func() any { return &ccdScratch{} }}
 func (w *World) continuous(s *solver, dt float64) {
 	scratch := ccdPool.Get().(*ccdScratch)
 	defer ccdPool.Put(scratch)
-	if cap(scratch.seen) < len(w.Bodies) {
-		scratch.seen = make([]bool, len(w.Bodies))
-	}
-	scratch.seen = scratch.seen[:len(w.Bodies)]
-
 	for _, bullets := range [2]bool{false, true} {
 		for i := range s.states {
 			state := &s.states[i]
@@ -105,7 +100,7 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 		swept.Min[k] = math.Min(swept.Min[k], end.Min[k])
 		swept.Max[k] = math.Max(swept.Max[k], end.Max[k])
 	}
-	scratch.candidates = w.SpatialGrid.query(swept, w.Bodies, scratch.seen, scratch.candidates[:0])
+	scratch.stack, scratch.candidates = w.tree.queryCandidates(swept, scratch.stack, scratch.candidates[:0])
 
 	fraction := 1.0
 	for _, index := range scratch.candidates {
