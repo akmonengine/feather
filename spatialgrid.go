@@ -30,6 +30,25 @@ type SpatialGrid struct {
 	cellSize float64
 	cells    []Cell
 	planes   Cell
+
+	// buffers reused between the steps, one per chunk of bodies
+	chunks []pairsChunk
+	pairs  []Pair
+
+	// parameters of findPairsJob, for the workers of the World
+	bodies    []*actor.RigidBody
+	boxes     []actor.AABB
+	chunkSize int
+	job       func(i int)
+}
+
+// bodiesPerChunk: the bodies are split into chunks, each chunk writes its own pairs
+const bodiesPerChunk = 64
+
+type pairsChunk struct {
+	pairs []Pair
+	seen  []bool
+	found []int
 }
 
 // NewSpatialGrid - Creates a new spatial grid
@@ -91,44 +110,43 @@ func (sg *SpatialGrid) SortCells() {
 // FindPairs - Finds the pairs of bodies with overlapping AABBs, always in the same order:
 // sorted by index of the first body, then of the second body, planes first.
 // Pairs without any awake dynamic body are ignored.
+// The returned slice is reused by the next call.
 func (sg *SpatialGrid) FindPairs(bodies []*actor.RigidBody, boxes []actor.AABB, workersCount int) []Pair {
 	workersCount = max(1, min(workersCount, len(bodies)))
-	chunks := make([][]Pair, workersCount)
+	if len(sg.chunks) < workersCount {
+		sg.chunks = append(sg.chunks, make([]pairsChunk, workersCount-len(sg.chunks))...)
+	}
 	chunkSize := (len(bodies) + workersCount - 1) / workersCount
 
 	var wg sync.WaitGroup
 	for workerID := 0; workerID < workersCount; workerID++ {
 		start, end := workerID*chunkSize, min((workerID+1)*chunkSize, len(bodies))
-		work := func() {
-			chunks[workerID] = sg.findPairsRange(bodies, boxes, start, end)
-		}
+		chunk := &sg.chunks[workerID]
 		if workersCount == 1 {
-			work()
+			sg.findPairsRange(bodies, boxes, start, end, chunk)
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			work()
+			sg.findPairsRange(bodies, boxes, start, end, chunk)
 		}()
 	}
 	wg.Wait()
 
-	count := 0
-	for _, c := range chunks {
-		count += len(c)
+	sg.pairs = sg.pairs[:0]
+	for workerID := 0; workerID < workersCount; workerID++ {
+		sg.pairs = append(sg.pairs, sg.chunks[workerID].pairs...)
 	}
-	pairs := make([]Pair, 0, count)
-	for _, c := range chunks {
-		pairs = append(pairs, c...)
-	}
-	return pairs
+	return sg.pairs
 }
 
-func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.AABB, start, end int) []Pair {
-	var pairs []Pair
-	seen := make([]bool, len(bodies))
-	var found []int
+func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.AABB, start, end int, chunk *pairsChunk) {
+	chunk.pairs = chunk.pairs[:0]
+	if cap(chunk.seen) < len(bodies) {
+		chunk.seen = make([]bool, len(bodies))
+	}
+	seen := chunk.seen[:len(bodies)]
 
 	for bodyIdx := start; bodyIdx < end; bodyIdx++ {
 		bodyA := bodies[bodyIdx]
@@ -138,11 +156,11 @@ func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.A
 
 		for _, planeIdx := range sg.planes.bodyIndices {
 			if needsSolving(bodies[planeIdx], bodyA) {
-				pairs = append(pairs, Pair{BodyA: bodies[planeIdx], BodyB: bodyA})
+				chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[planeIdx], BodyB: bodyA})
 			}
 		}
 
-		found = found[:0]
+		found := chunk.found[:0]
 		minCell := sg.worldToCell(boxes[bodyIdx].Min)
 		maxCell := sg.worldToCell(boxes[bodyIdx].Max)
 		for x := minCell.X; x <= maxCell.X; x++ {
@@ -164,11 +182,34 @@ func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.A
 			seen[otherIdx] = false
 			bodyB := bodies[otherIdx]
 			if needsSolving(bodyA, bodyB) && boxes[bodyIdx].Overlaps(boxes[otherIdx]) {
-				pairs = append(pairs, Pair{BodyA: bodyA, BodyB: bodyB})
+				chunk.pairs = append(chunk.pairs, Pair{BodyA: bodyA, BodyB: bodyB})
 			}
 		}
+		chunk.found = found
 	}
-	return pairs
+}
+
+// findPairsPool is FindPairs on the workers of the World: no goroutine nor closure is created
+func (sg *SpatialGrid) findPairsPool(bodies []*actor.RigidBody, boxes []actor.AABB, pool *workerPool) []Pair {
+	chunksCount := (len(bodies) + bodiesPerChunk - 1) / bodiesPerChunk
+	if len(sg.chunks) < chunksCount {
+		sg.chunks = append(sg.chunks, make([]pairsChunk, chunksCount-len(sg.chunks))...)
+	}
+	if sg.job == nil {
+		sg.job = func(i int) {
+			start := i * sg.chunkSize
+			sg.findPairsRange(sg.bodies, sg.boxes, start, min(start+sg.chunkSize, len(sg.bodies)), &sg.chunks[i])
+		}
+	}
+	sg.bodies, sg.boxes, sg.chunkSize = bodies, boxes, bodiesPerChunk
+	pool.run(chunksCount, 1, sg.job)
+
+	sg.pairs = sg.pairs[:0]
+	for i := 0; i < chunksCount; i++ {
+		sg.pairs = append(sg.pairs, sg.chunks[i].pairs...)
+	}
+	sg.bodies, sg.boxes = nil, nil
+	return sg.pairs
 }
 
 // needsSolving - At least one body must be dynamic and awake

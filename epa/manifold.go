@@ -2,6 +2,7 @@ package epa
 
 import (
 	"math"
+	"sync"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -56,21 +57,23 @@ func Manifold(a, b *actor.RigidBody, result Result, margin float64, m *constrain
 	m.Normal = normal
 	separation := margin - result.Depth
 
-	var featureA, featureB polygon
-	feature(a, normal, &featureA)
-	feature(b, normal.Mul(-1), &featureB)
+	buffers := featuresPool.Get().(*features)
+	defer featuresPool.Put(buffers)
+	featureA, featureB := &buffers.a, &buffers.b
+	feature(a, normal, featureA)
+	feature(b, normal.Mul(-1), featureB)
 
-	if referenceIsA, ok := chooseReference(&featureA, &featureB, normal); ok {
-		reference, incident := &featureA, &featureB
+	if referenceIsA, ok := chooseReference(featureA, featureB, normal); ok {
+		reference, incident := featureA, featureB
 		direction := normal // from the reference body towards the incident one
 		if !referenceIsA {
-			reference, incident = &featureB, &featureA
+			reference, incident = featureB, featureA
 			direction = normal.Mul(-1)
 		}
 		clipFeatures(reference, incident, direction, separation, margin, m)
 	} else {
-		edgeA := deepest(&featureA, normal)
-		edgeB := deepest(&featureB, normal.Mul(-1))
+		edgeA := deepest(featureA, normal)
+		edgeB := deepest(featureB, normal.Mul(-1))
 		if edgeA.count == 2 && edgeB.count == 2 && parallel(&edgeA, &edgeB) {
 			clipped := edgeB
 			clipToSlab(&clipped, edgeA.points[0], edgeA.points[1])
@@ -127,14 +130,20 @@ func clipToSlab(segment *polygon, start, end mgl64.Vec3) {
 
 // feature returns the feature of the body facing the direction, in world space
 func feature(body *actor.RigidBody, direction mgl64.Vec3, out *polygon) {
-	var local [8]mgl64.Vec3
-	count := 0
-	body.Shape.GetContactFeature(body.Transform.Rotation.Conjugate().Rotate(direction), &local, &count)
-	out.count = 0
-	for i := 0; i < count; i++ {
-		out.add(body.Transform.ToWorld(local[i]))
+	body.Shape.GetContactFeature(body.Transform.Rotation.Conjugate().Rotate(direction), &out.points, &out.count)
+	for i := 0; i < out.count; i++ {
+		out.points[i] = body.Transform.ToWorld(out.points[i])
 	}
 }
+
+// features are the buffers of Manifold: they escape to the heap through the interface of the shapes,
+// so they are reused
+type features struct {
+	a polygon
+	b polygon
+}
+
+var featuresPool = sync.Pool{New: func() any { return &features{} }}
 
 // chooseReference returns the reference face: the face aligned with the normal (the face of A if both are)
 func chooseReference(featureA, featureB *polygon, normal mgl64.Vec3) (bool, bool) {

@@ -1,10 +1,21 @@
 package feather
 
 import (
+	"math"
+	"sync"
+
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
 	"github.com/akmonengine/feather/epa"
 	"github.com/akmonengine/feather/gjk"
+)
+
+const (
+	// pairCacheMaxDeltaPosition: the contact of a pair is computed again if B moved more than 1 mm relative to A (m)
+	pairCacheMaxDeltaPosition = 0.001
+
+	// pairCacheCosMaxDeltaRotationDiv2: or if B turned more than 2° relative to A, cos(2° / 2)
+	pairCacheCosMaxDeltaRotationDiv2 = 0.99984769515639123915701155881391
 )
 
 // BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order
@@ -30,19 +41,81 @@ func NarrowPhase(pairs []Pair, workersCount int) []constraint.Manifold {
 func narrowPhase(pairs []Pair, workersCount int, margin func(a, b *actor.RigidBody) float64) []constraint.Manifold {
 	manifolds := make([]constraint.Manifold, len(pairs))
 	found := make([]bool, len(pairs))
-
 	parallelFor(len(pairs), workersCount, func(i int) {
-		a, b := pairs[i].BodyA, pairs[i].BodyB
-		m := &manifolds[i]
-		found[i] = Collide(a, b, margin(a, b), m)
-		if found[i] && (a.IsTrigger || b.IsTrigger) {
-			found[i] = m.MinSeparation() < 0
-		}
-		for j := 0; j < m.Count; j++ {
-			m.Points[j].LocalAnchorA = m.BodyA.Transform.ToLocal(m.Points[j].Position)
-		}
+		found[i] = collidePair(pairs[i], margin(pairs[i].BodyA, pairs[i].BodyB), &manifolds[i])
 	})
+	return compactManifolds(manifolds, found)
+}
 
+// collidePair: triggers keep only the real overlaps
+func collidePair(pair Pair, margin float64, m *constraint.Manifold) bool {
+	a, b := pair.BodyA, pair.BodyB
+	found := Collide(a, b, margin, m)
+	if found && (a.IsTrigger || b.IsTrigger) {
+		found = m.MinSeparation() < 0
+	}
+	if found {
+		setLocalAnchors(m)
+	}
+	return found
+}
+
+// setLocalAnchors stores the contact in the local spaces of the bodies, for the next step
+func setLocalAnchors(m *constraint.Manifold) {
+	transformA, transformB := m.BodyA.Transform, m.BodyB.Transform
+	for j := 0; j < m.Count; j++ {
+		point := &m.Points[j]
+		// Position is halfway between both surfaces, the normal goes from A to B
+		halfSeparation := m.Normal.Mul(point.Separation / 2)
+		point.LocalAnchorA = transformA.ToLocal(point.Position.Sub(halfSeparation))
+		point.LocalAnchorB = transformB.ToLocal(point.Position.Add(halfSeparation))
+	}
+	m.LocalNormal = transformA.Rotation.Conjugate().Rotate(m.Normal)
+	m.RelativePosition = transformA.ToLocal(transformB.Position)
+	m.RelativeRotation = transformA.Rotation.Conjugate().Mul(transformB.Rotation)
+}
+
+// reuseManifold: if B moved less than 1 mm and 2° relative to A since the contact points were computed,
+// the previous contact points are moved with the bodies instead of running the collision detection again
+// (like the body pair cache of Jolt). The separation of each point is measured again.
+func reuseManifold(previous *constraint.Manifold, margin float64, m *constraint.Manifold) bool {
+	transformA, transformB := previous.BodyA.Transform, previous.BodyB.Transform
+
+	relativePosition := transformA.ToLocal(transformB.Position)
+	if relativePosition.Sub(previous.RelativePosition).LenSqr() > pairCacheMaxDeltaPosition*pairCacheMaxDeltaPosition {
+		return false
+	}
+	relativeRotation := transformA.Rotation.Conjugate().Mul(transformB.Rotation)
+	if math.Abs(relativeRotation.Dot(previous.RelativeRotation)) < pairCacheCosMaxDeltaRotationDiv2 {
+		return false
+	}
+
+	m.Reset(previous.BodyA, previous.BodyB)
+	m.Normal = transformA.Rotation.Rotate(previous.LocalNormal)
+	m.LocalNormal = previous.LocalNormal
+	m.RelativePosition = previous.RelativePosition
+	m.RelativeRotation = previous.RelativeRotation
+	for j := 0; j < previous.Count; j++ {
+		point := &previous.Points[j]
+		onA := transformA.ToWorld(point.LocalAnchorA)
+		onB := transformB.ToWorld(point.LocalAnchorB)
+		separation := onB.Sub(onA).Dot(m.Normal)
+		if separation > margin {
+			continue
+		}
+		m.Points[m.Count] = constraint.ContactPoint{
+			Position:     onA.Add(onB).Mul(0.5),
+			Separation:   separation,
+			LocalAnchorA: point.LocalAnchorA,
+			LocalAnchorB: point.LocalAnchorB,
+		}
+		m.Count++
+	}
+	return m.Count > 0
+}
+
+// compactManifolds keeps the manifolds found, in the same order
+func compactManifolds(manifolds []constraint.Manifold, found []bool) []constraint.Manifold {
 	n := 0
 	for i := range manifolds {
 		if found[i] {
@@ -76,10 +149,11 @@ func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 	defer gjk.SimplexPool.Put(simplex)
 	simplex.Reset()
 
-	if !gjk.GJKMargin(a, b, margin, simplex) {
+	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
+	if !gjk.GJKProxies(&proxyA, &proxyB, margin, simplex) {
 		return false
 	}
-	result, err := epa.EPA(a, b, simplex, margin)
+	result, err := epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
 	if err != nil {
 		return false
 	}
@@ -87,10 +161,19 @@ func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 	return m.Count > 0
 }
 
+// planeContactsPool: the buffers given to CollideWithPlane, reused to avoid the allocations
+var planeContactsPool = sync.Pool{New: func() any {
+	contacts := make(actor.PlaneContact, 0, 8)
+	return &contacts
+}}
+
 // collidePlane keeps the order of the pair: if the plane is body B, the normal is reversed
 func collidePlane(plane *actor.Plane, object *actor.RigidBody, margin float64, planeIsB bool, m *constraint.Manifold) bool {
-	collision, points := object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin)
-	if !collision {
+	buffer := planeContactsPool.Get().(*actor.PlaneContact)
+	defer planeContactsPool.Put(buffer)
+	points := object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin, (*buffer)[:0])
+	*buffer = points
+	if len(points) == 0 {
 		return false
 	}
 

@@ -18,8 +18,11 @@ type ContactPoint struct {
 	NormalImpulse  float64
 	TangentImpulse mgl64.Vec3
 
-	// LocalAnchorA is Position in the local space of A, to find the same point in the next step
+	// LocalAnchorA is the point on the surface of A, in the local space of A, LocalAnchorB the point on the
+	// surface of B, in the local space of B. They find the same point in the next step (warm starting),
+	// and move the contact with the bodies (pair cache)
 	LocalAnchorA mgl64.Vec3
+	LocalAnchorB mgl64.Vec3
 }
 
 // Manifold is the contact between 2 bodies. Normal points from A to B
@@ -29,6 +32,12 @@ type Manifold struct {
 	Normal mgl64.Vec3
 	Points [MaxContactPoints]ContactPoint
 	Count  int
+
+	// When the contact points were computed: the normal in the local space of A,
+	// and the position & rotation of B in the local space of A (pair cache)
+	LocalNormal      mgl64.Vec3
+	RelativePosition mgl64.Vec3
+	RelativeRotation mgl64.Quat
 }
 
 func (m *Manifold) Reset(a, b *actor.RigidBody) {

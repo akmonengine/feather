@@ -63,6 +63,12 @@ var polytopePool = sync.Pool{New: func() any { return &polytope{} }}
 
 // EPA computes the penetration of A (+ margin) into B, from the tetrahedron of GJK
 func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex, margin float64) (Result, error) {
+	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
+	return EPAProxies(&proxyA, &proxyB, simplex, margin)
+}
+
+// EPAProxies is EPA for prepared bodies
+func EPAProxies(a, b *gjk.Proxy, simplex *gjk.Simplex, margin float64) (Result, error) {
 	if simplex.Count != 4 {
 		return Result{}, ErrNoConvergence
 	}
@@ -94,7 +100,7 @@ func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex, margin float64) (Result, e
 		closest := p.closestFace()
 		f := p.faces[closest]
 
-		v := gjk.Support(a, b, f.normal, margin)
+		v := gjk.SupportProxies(a, b, f.normal, margin)
 		if v.W.Dot(f.normal)-f.distance < EPAConvergenceTolerance {
 			return p.result(f), nil
 		}

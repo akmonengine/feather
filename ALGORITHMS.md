@@ -110,6 +110,12 @@ Applied after the substeps, for the contacts hitting faster than 1 m/s:
 ([GDC 2015](https://box2d.org/files/ErinCatto_NumericalMethods_GDC2015.pdf)). Dropping it removes the tumbling
 of long bodies, integrating it explicitly makes them gain energy.
 
+### Parallel solver
+The solver is a Gauss-Seidel: each contact uses the velocities left by the previous one. To solve in parallel,
+the contacts are colored (Box2D v3, `constraint_graph.c`): each contact takes the first color where both of its dynamic
+bodies are free (the static bodies don't count). The contacts of a color don't share any body, the workers solve them
+at the same time. The contacts without a free color (16 colors) are solved first, on a single goroutine.
+
 ### Default values
 | Constant | Value |
 |----------|-------|

@@ -118,28 +118,20 @@ func (c *Capsule) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3,
 }
 
 // CollideWithPlane tests both caps: a lying capsule gets 2 contacts, so it does not roll
-func (c *Capsule) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
+func (c *Capsule) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	bottom, top := c.Segment(myTransform)
 
-	var contacts PlaneContact
 	for _, end := range [2]mgl64.Vec3{bottom, top} {
 		separation := end.Dot(planeNormal) + planeDistance - c.Radius
 		if separation > margin {
 			continue
 		}
 
-		if contacts == nil {
-			contacts = make(PlaneContact, 0, 2)
-		}
 		contacts = append(contacts, ContactPoint{
 			Position:   end.Sub(planeNormal.Mul(c.Radius + separation/2)),
 			Separation: separation,
 		})
 	}
 
-	if len(contacts) == 0 {
-		return false, PlaneContact{}
-	}
-
-	return true, contacts
+	return contacts
 }

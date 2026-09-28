@@ -266,7 +266,8 @@ func TestCapsuleCollideWithPlane(t *testing.T) {
 	// Contacts lie halfway between the capsule surface and the plane; the separation is
 	// negative when they overlap.
 	t.Run("upright on its cap", func(t *testing.T) {
-		ok, contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.4, 0}, mgl64.QuatIdent()), 0)
+		contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.4, 0}, mgl64.QuatIdent()), 0, nil)
+		ok := len(contacts) > 0
 		if !ok || len(contacts) != 1 {
 			t.Fatalf("collision = %v, contacts = %v, want 1 contact", ok, contacts)
 		}
@@ -276,7 +277,8 @@ func TestCapsuleCollideWithPlane(t *testing.T) {
 	})
 
 	t.Run("lying on its side", func(t *testing.T) {
-		ok, contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{2, 0.45, 0}, lyingAlongX), 0)
+		contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{2, 0.45, 0}, lyingAlongX), 0, nil)
+		ok := len(contacts) > 0
 		if !ok || len(contacts) != 2 {
 			t.Fatalf("collision = %v, contacts = %v, want 2 contacts", ok, contacts)
 		}
@@ -298,7 +300,8 @@ func TestCapsuleCollideWithPlane(t *testing.T) {
 		rotation := mgl64.QuatRotate(math.Pi/4, mgl64.Vec3{0, 0, 1})
 		// Lower segment end at (sqrt2/2, -sqrt2/2 + y) ; put it 0.4 above the plane.
 		y := math.Sqrt2/2 + 0.4
-		ok, contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, y, 0}, rotation), 0)
+		contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, y, 0}, rotation), 0, nil)
+		ok := len(contacts) > 0
 		if !ok || len(contacts) != 1 {
 			t.Fatalf("collision = %v, contacts = %v, want 1 contact", ok, contacts)
 		}
@@ -310,7 +313,8 @@ func TestCapsuleCollideWithPlane(t *testing.T) {
 	t.Run("offset oblique plane", func(t *testing.T) {
 		// Plane (x + y)/sqrt2 = -1, i.e. Normal·p + Distance = 0 with Distance = 1.
 		n := mgl64.Vec3{1, 1, 0}.Normalize()
-		ok, contacts := c.CollideWithPlane(n, 1, capsuleTransform(mgl64.Vec3{0, 0, 0}, mgl64.QuatIdent()), 0)
+		contacts := c.CollideWithPlane(n, 1, capsuleTransform(mgl64.Vec3{0, 0, 0}, mgl64.QuatIdent()), 0, nil)
+		ok := len(contacts) > 0
 		if !ok || len(contacts) != 1 {
 			t.Fatalf("collision = %v, contacts = %v, want 1 contact", ok, contacts)
 		}
@@ -324,17 +328,18 @@ func TestCapsuleCollideWithPlane(t *testing.T) {
 	})
 
 	t.Run("above the plane", func(t *testing.T) {
-		if ok, contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.6, 0}, mgl64.QuatIdent()), 0); ok || len(contacts) != 0 {
-			t.Errorf("capsule above the plane reported a contact %v %v", ok, contacts)
+		if contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.6, 0}, mgl64.QuatIdent()), 0, nil); len(contacts) != 0 {
+			t.Errorf("capsule above the plane reported a contact %v", contacts)
 		}
 	})
 
 	t.Run("speculative: within the margin", func(t *testing.T) {
-		ok, contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.51, 0}, mgl64.QuatIdent()), 0.02)
+		contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.51, 0}, mgl64.QuatIdent()), 0.02, nil)
+		ok := len(contacts) > 0
 		if !ok || len(contacts) != 1 || !floatEqual(contacts[0].Separation, 0.01, 1e-12) {
 			t.Fatalf("collision = %v, contacts = %v, want 1 speculative contact at separation 0.01", ok, contacts)
 		}
-		if ok, _ := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.53, 0}, mgl64.QuatIdent()), 0.02); ok {
+		if contacts := c.CollideWithPlane(up, 0, capsuleTransform(mgl64.Vec3{0, 1.53, 0}, mgl64.QuatIdent()), 0.02, nil); len(contacts) > 0 {
 			t.Error("capsule beyond the margin reported a contact")
 		}
 	})

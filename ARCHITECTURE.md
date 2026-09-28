@@ -5,6 +5,8 @@
 feather/
 ├── world.go            # World.Step: collision detection, then solver
 ├── solver.go           # TGS Soft solver
+├── graph.go            # graph coloring of the contacts, for the parallel solver
+├── pool.go             # workers of the step
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── spatialgrid.go      # broad phase: uniform grid
@@ -37,6 +39,9 @@ Step(dt)
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
 | other pairs | GJK + EPA, then clipping of the contact points |
 
+Pair cache (like Jolt): if a body moved less than 1 mm and 2° relative to the other since their contact points were computed,
+the previous contact points are moved with the bodies, the collision detection doesn't run again.
+
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm) + the relative speed of the bodies * dt.
 Each manifold has a normal (from A to B) and up to 4 points. Each point has its own separation (< 0 when the bodies overlap).
 
@@ -45,10 +50,15 @@ See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dyn
 the static and sleeping bodies share a state with no mass.
 
 ## Threading & determinism
-- The broad phase and the narrow phase are split between `Workers` goroutines. Each pair writes its result at its own index,
-  so the result never depends on the order of execution.
-- The pairs are sorted (index of the first body, then of the second body), the solver and the events follow this order.
-- The solver is sequential (Gauss-Seidel): it needs the result of the previous contact.
+- From 256 bodies, a step runs on `Workers` goroutines. The workers are created once and sleep between the steps.
+  `World.Close()` stops them (they are also stopped when the World is garbage collected).
+- The broad phase, the narrow phase, the preparation of the contacts and the integration of the bodies:
+  each body, pair or contact writes its result at its own index, the order of execution doesn't matter.
+- The pairs are sorted (index of the first body, then of the second body).
+- The solver is a Gauss-Seidel: a contact uses the result of the previous one. The contacts are colored
+  (like Box2D v3): the contacts of a color don't share any dynamic body, so a color is solved in parallel.
+  The colors are always solved in the same order: the result is the same bit for bit, whatever the number of workers.
+- A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Current limitations
 - No joints yet (distance, hinge...).

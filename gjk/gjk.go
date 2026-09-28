@@ -70,6 +70,31 @@ var SimplexPool = sync.Pool{
 	},
 }
 
+// Proxy is a body prepared for the support queries: its rotation as matrices, computed once per pair
+// instead of rotating each direction and each point with the quaternion
+type Proxy struct {
+	Position mgl64.Vec3
+	Rotation mgl64.Mat3 // local to world
+	Inverse  mgl64.Mat3 // world to local
+	Shape    actor.ShapeInterface
+}
+
+func NewProxy(body *actor.RigidBody) Proxy {
+	q := body.Transform.Rotation
+	w, x, y, z := q.W, q.V[0], q.V[1], q.V[2]
+	rotation := mgl64.Mat3{
+		1 - 2*(y*y+z*z), 2 * (x*y + w*z), 2 * (x*z - w*y),
+		2 * (x*y - w*z), 1 - 2*(x*x+z*z), 2 * (y*z + w*x),
+		2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2*(x*x+y*y),
+	}
+	return Proxy{Position: body.Transform.Position, Rotation: rotation, Inverse: rotation.Transpose(), Shape: body.Shape}
+}
+
+// SupportWorld returns the farthest point of the shape in the direction, in world space
+func (p *Proxy) SupportWorld(direction mgl64.Vec3) mgl64.Vec3 {
+	return p.Position.Add(p.Rotation.Mul3x1(p.Shape.Support(p.Inverse.Mul3x1(direction))))
+}
+
 // MinkowskiSupport computes a support point in the Minkowski difference (A - B):
 // furthestPoint(A, direction) - furthestPoint(B, -direction)
 func MinkowskiSupport(a, b *actor.RigidBody, direction mgl64.Vec3) mgl64.Vec3 {
@@ -79,6 +104,11 @@ func MinkowskiSupport(a, b *actor.RigidBody, direction mgl64.Vec3) mgl64.Vec3 {
 // Support computes the support point of (A + margin) - B.
 // With a margin, shapes closer than the margin overlap: EPA can compute their distance (margin - depth)
 func Support(a, b *actor.RigidBody, direction mgl64.Vec3, margin float64) Vertex {
+	proxyA, proxyB := NewProxy(a), NewProxy(b)
+	return SupportProxies(&proxyA, &proxyB, direction, margin)
+}
+
+func SupportProxies(a, b *Proxy, direction mgl64.Vec3, margin float64) Vertex {
 	supportA := a.SupportWorld(direction)
 	if margin > 0 {
 		if length := direction.Len(); length > 0 {
@@ -96,12 +126,18 @@ func GJK(a, b *actor.RigidBody, simplex *Simplex) bool {
 
 // GJKMargin returns true if A + margin overlaps B
 func GJKMargin(a, b *actor.RigidBody, margin float64, simplex *Simplex) bool {
-	direction := b.Transform.Position.Sub(a.Transform.Position)
+	proxyA, proxyB := NewProxy(a), NewProxy(b)
+	return GJKProxies(&proxyA, &proxyB, margin, simplex)
+}
+
+// GJKProxies is GJKMargin for prepared bodies
+func GJKProxies(a, b *Proxy, margin float64, simplex *Simplex) bool {
+	direction := b.Position.Sub(a.Position)
 	if direction.LenSqr() == 0 {
 		direction = mgl64.Vec3{1, 0, 0}
 	}
 
-	simplex.set(Support(a, b, direction, margin))
+	simplex.set(SupportProxies(a, b, direction, margin))
 	direction = simplex.Points[0].Mul(-1)
 
 	for i := 0; i < maxIterations; i++ {
@@ -111,7 +147,7 @@ func GJKMargin(a, b *actor.RigidBody, margin float64, simplex *Simplex) bool {
 			return true
 		}
 
-		v := Support(a, b, direction, margin)
+		v := SupportProxies(a, b, direction, margin)
 		if v.W.Dot(direction) <= 0 {
 			return false
 		}
@@ -242,13 +278,13 @@ func simplexSize(simplex *Simplex) float64 {
 
 // fillTetrahedron completes the simplex into a tetrahedron when the shapes are only touching,
 // so that EPA can start. Returns false if the Minkowski difference is flat
-func fillTetrahedron(a, b *actor.RigidBody, margin float64, simplex *Simplex) bool {
+func fillTetrahedron(a, b *Proxy, margin float64, simplex *Simplex) bool {
 	axes := [6]mgl64.Vec3{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
 
 	for simplex.Count < 4 {
 		added := false
 		for _, axis := range candidateDirections(simplex, axes) {
-			v := Support(a, b, axis, margin)
+			v := SupportProxies(a, b, axis, margin)
 			if isNewVertex(simplex, v.W) {
 				simplex.Points[simplex.Count], simplex.A[simplex.Count], simplex.B[simplex.Count] = v.W, v.A, v.B
 				simplex.Count++

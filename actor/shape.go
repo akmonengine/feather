@@ -36,9 +36,9 @@ type ShapeInterface interface {
 	ComputeInertia(mass float64) mgl64.Mat3
 	Support(direction mgl64.Vec3) mgl64.Vec3
 	GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int)
-	// CollideWithPlane returns the contacts of the shape with the plane
-	// (planeNormal·p + planeDistance = 0) whose separation is at most margin.
-	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact)
+	// CollideWithPlane appends to contacts the points of the shape closer to the plane than the margin
+	// (plane: planeNormal·p + planeDistance = 0). contacts is a buffer given by the caller, to avoid allocations
+	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact
 }
 
 // Box represents an oriented box collision shape
@@ -183,8 +183,8 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	}
 }
 
-// CollideWithPlane returns the corners of the box within margin of the plane.
-func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
+// CollideWithPlane returns the corners of the box closer to the plane than the margin, 4 at most
+func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	h := b.HalfExtents
 	localVertices := [8]mgl64.Vec3{
 		{-h.X(), -h.Y(), -h.Z()},
@@ -197,28 +197,24 @@ func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, my
 		{h.X(), h.Y(), h.Z()},
 	}
 
-	var contactPoints []ContactPoint
+	start := len(contacts)
 	for _, vertex := range localVertices {
 		worldVertex := myTransform.ToWorld(vertex)
 		separation := worldVertex.Dot(planeNormal) + planeDistance
 		if separation > margin {
 			continue
 		}
-		contactPoints = append(contactPoints, ContactPoint{
+		contacts = append(contacts, ContactPoint{
 			Position:   worldVertex.Sub(planeNormal.Mul(separation / 2)),
 			Separation: separation,
 		})
 	}
 
-	if len(contactPoints) == 0 {
-		return false, PlaneContact{}
+	if len(contacts)-start > 4 {
+		contacts = contacts[:start+reduceTo4ContactPoints(contacts[start:], planeNormal)]
 	}
 
-	if len(contactPoints) > 4 {
-		contactPoints = reduceTo4ContactPoints(contactPoints, planeNormal)
-	}
-
-	return true, contactPoints
+	return contacts
 }
 
 // Sphere represents a spherical collision shape
@@ -275,18 +271,18 @@ func (s *Sphere) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, 
 	*count = 1
 }
 
-// CollideWithPlane returns the lowest point of the sphere when it is within margin of the plane.
-func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
+// CollideWithPlane returns the lowest point of the sphere, if closer to the plane than the margin
+func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	center := myTransform.Position
 	separation := center.Dot(planeNormal) + planeDistance - s.Radius
 	if separation > margin {
-		return false, PlaneContact{}
+		return contacts
 	}
 
-	return true, PlaneContact{{
+	return append(contacts, ContactPoint{
 		Position:   center.Sub(planeNormal.Mul(s.Radius + separation/2)),
 		Separation: separation,
-	}}
+	})
 }
 
 // Plane represents an infinite plane collision shape
@@ -368,8 +364,8 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, c
 }
 
 // CollideWithPlane - Plane/Plane collision (not supported)
-func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64) (bool, PlaneContact) {
-	return false, PlaneContact{}
+func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
+	return contacts
 }
 
 // Helper to generate the tangent basis
@@ -387,7 +383,8 @@ func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
 	return tangent1, tangent2
 }
 
-func reduceTo4ContactPoints(points []ContactPoint, normal mgl64.Vec3) []ContactPoint {
+// reduceTo4ContactPoints keeps the extreme points along both tangents, in place. Returns the count of points kept
+func reduceTo4ContactPoints(points []ContactPoint, normal mgl64.Vec3) int {
 	tangent1, tangent2 := getTangentBasis(normal)
 
 	minX, maxX, minY, maxY := 0, 0, 0, 0
@@ -412,16 +409,22 @@ func reduceTo4ContactPoints(points []ContactPoint, normal mgl64.Vec3) []ContactP
 		}
 	}
 
+	var kept [4]ContactPoint
 	indices := [4]int{minX, maxX, minY, maxY}
-	seen := make(map[int]bool)
-	result := make([]ContactPoint, 0, 4)
-
-	for _, idx := range indices {
-		if !seen[idx] {
-			seen[idx] = true
-			result = append(result, points[idx])
+	count := 0
+	for k, idx := range indices {
+		duplicate := false
+		for _, previous := range indices[:k] {
+			if previous == idx {
+				duplicate = true
+			}
+		}
+		if !duplicate {
+			kept[count] = points[idx]
+			count++
 		}
 	}
+	copy(points, kept[:count])
 
-	return result
+	return count
 }

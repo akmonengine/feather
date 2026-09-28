@@ -68,6 +68,8 @@ end
 - Contacts exist before the bodies touch (speculative contacts), so fast bodies don't go through thin walls.
 - Friction follows Coulomb's law: static friction when the contact sticks, dynamic friction when it slides.
 - The simulation is deterministic: same result bit for bit, whatever the number of `Workers`.
+- The solver is parallel: the contacts are split into colors (graph coloring), the contacts of a color don't share any body.
+- A step doesn't allocate memory (after the first steps).
 
 ### Why not XPBD anymore
 Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`, 50 Hz, 12 substeps):
@@ -81,7 +83,7 @@ Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`, 
 | 10 N during 1 s on 32.7 kg | 15279 m/s | 0.306 m/s | 0.306 m/s |
 | Same scene, run twice | 39/40 bodies differ | identical | identical |
 | EPA sphere-box normal (p99) | 2.7° | 0.03° | 0° |
-| Step, 10 / 100 / 500 bodies | 0.41 / 1.94 / 8.8 ms | 0.06 / 0.52 / 2.6 ms | |
+| Step, 10 / 100 / 500 bodies, 1 worker | 0.41 / 1.94 / 8.8 ms | 0.03 / 0.25 / 1.17 ms | |
 
 ```
 cd bench

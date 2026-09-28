@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/constraint"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -59,26 +60,40 @@ func finite(v mgl64.Vec3) bool {
 	return true
 }
 
-// A stack of boxes, 1 mm apart, stands for 10 s: the top box only settles (the gaps and the
-// soft contacts under load) and does not move sideways. v0.2.0 (XPBD) sank 22 mm at 10 boxes.
+// A stack of boxes stands for 10 s. v0.2.0 (XPBD) sank 22 mm at 10 boxes.
+// Built touching: it only settles under its weight. Dropped from 1 mm gaps: the landing moves it a little,
+// then it doesn't drift anymore.
 func TestStackStands(t *testing.T) {
 	for _, n := range []int{3, 5, 10} {
-		w := newScene(1)
-		addGround(w, 0.6)
-		var boxes []*actor.RigidBody
-		for i := 0; i < n; i++ {
-			boxes = append(boxes, addBody(w, mgl64.Vec3{0, cubeHalf + float64(i)*0.501, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0))
-		}
-		simulate(w, 10, nil)
+		for _, gap := range []float64{0, 0.001} {
+			w := newScene(1)
+			addGround(w, 0.6)
+			var top *actor.RigidBody
+			for i := 0; i < n; i++ {
+				top = addBody(w, mgl64.Vec3{0, cubeHalf + float64(i)*(2*cubeHalf+gap), 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+			}
+			simulate(w, 1, nil)
+			landed := top.Transform.Position
+			simulate(w, 9, nil)
+			p := top.Transform.Position
 
-		top := boxes[n-1].Transform.Position
-		restingTop := cubeHalf + float64(n-1)*2*cubeHalf
-		// Soft contacts hold ~0.5 mm of overlap per contact under the weight above them.
-		if sink := restingTop - top.Y(); !(sink > -0.001 && sink < 0.001*float64(n)) {
-			t.Errorf("stack of %d: top box at y=%.4f, %.1f mm under its resting height", n, top.Y(), sink*1000)
-		}
-		if side := math.Hypot(top.X(), top.Z()); !(side < 0.004) {
-			t.Errorf("stack of %d: top box moved %.2f mm sideways", n, side*1000)
+			// Soft contacts hold ~0.5 mm of overlap per contact under the weight above them.
+			restingTop := cubeHalf + float64(n-1)*2*cubeHalf
+			if sink := restingTop - p.Y(); !(sink > -0.001 && sink < 0.001*float64(n)) {
+				t.Errorf("stack of %d, gap %g: top box at y=%.4f, %.1f mm under its resting height", n, gap, p.Y(), sink*1000)
+			}
+			if drift := p.Sub(landed).Len(); !(drift < 0.0001) {
+				t.Errorf("stack of %d, gap %g: top box drifted %.3f mm after landing", n, gap, drift*1000)
+			}
+			// Settling on the soft contacts moves the top box by less than 1 mm (the points of a contact are solved
+			// one after the other)
+			maxSide := 0.001
+			if gap > 0 {
+				maxSide = 0.01
+			}
+			if side := math.Hypot(p.X(), p.Z()); !(side < maxSide) {
+				t.Errorf("stack of %d, gap %g: top box moved %.2f mm sideways", n, gap, side*1000)
+			}
 		}
 	}
 }
@@ -408,5 +423,91 @@ func TestContactHertz(t *testing.T) {
 	soft, stiff := sink(20), sink(0)
 	if !(stiff < soft/2) {
 		t.Errorf("sink at 20 Hz %.2f mm, at the default %.2f mm: want the default at least twice as stiff", soft*1000, stiff*1000)
+	}
+}
+
+// A large pile uses the parallel solver (graph coloring): still the same result bit for bit for any workers
+func TestDeterminismParallelSolver(t *testing.T) {
+	run := func(workers int) []mgl64.Vec3 {
+		w := benchScene(400, workers)
+		simulate(w, 1, nil)
+		var out []mgl64.Vec3
+		for _, b := range w.Bodies {
+			out = append(out, b.Transform.Position, b.Transform.Rotation.V, b.AngularVelocity)
+		}
+		return out
+	}
+	reference := run(1)
+	for _, workers := range []int{2, 8, 16} {
+		got := run(workers)
+		for i := range reference {
+			if got[i] != reference[i] {
+				t.Fatalf("workers=%d: value %d is %v, want %v", workers, i, got[i], reference[i])
+			}
+		}
+	}
+}
+
+// rotationMatrix gives the same rotation as the quaternion
+func TestRotationMatrix(t *testing.T) {
+	r := rand.New(rand.NewSource(3))
+	for i := 0; i < 100; i++ {
+		q := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}.Normalize())
+		v := mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}
+		if d := rotationMatrix(q).Mul3x1(v).Sub(q.Rotate(v)).Len(); d > 1e-12 {
+			t.Fatalf("rotation %v of %v: %.2e from the quaternion", q, v, d)
+		}
+	}
+	if math.Abs(rotationMatrix(mgl64.QuatIdent()).Det()-1) > 1e-15 {
+		t.Error("identity")
+	}
+}
+
+// The pair cache moves the contact of the previous step with the bodies: it gives the same contact as
+// the collision detection when the bodies barely moved
+func TestPairCache(t *testing.T) {
+	ground := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{2, 0.5, 2}, actor.BodyTypeStatic)
+	box := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0.3, 0.74, -0.2}, Rotation: mgl64.QuatRotate(0.3, mgl64.Vec3{0, 1, 0})}, cube(), actor.BodyTypeDynamic, 1)
+	var previous constraint.Manifold
+	if !collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, &previous) {
+		t.Fatal("no contact")
+	}
+
+	// moved by 0.5 mm and 0.5°: the contact is reused, and matches the collision detection
+	box.Transform.Position = box.Transform.Position.Add(mgl64.Vec3{0.0003, -0.0004, 0})
+	box.Transform.Rotation = mgl64.QuatRotate(0.5*math.Pi/180, mgl64.Vec3{1, 0, 0}).Mul(box.Transform.Rotation)
+	var reused, fresh constraint.Manifold
+	if !reuseManifold(&previous, 0.02, &reused) {
+		t.Fatal("the contact was not reused")
+	}
+	collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, &fresh)
+	if reused.Count != fresh.Count {
+		t.Fatalf("reused %d points, detection %d", reused.Count, fresh.Count)
+	}
+	for i := 0; i < reused.Count; i++ {
+		closest, closestIndex := math.Inf(1), 0
+		for j := 0; j < fresh.Count; j++ {
+			if d := reused.Points[i].Position.Sub(fresh.Points[j].Position).Len(); d < closest {
+				closest, closestIndex = d, j
+			}
+		}
+		if closest > 0.005 {
+			t.Errorf("point %d is %.2f mm from the detected points", i, closest*1000)
+		}
+		if separation := fresh.Points[closestIndex].Separation; math.Abs(reused.Points[i].Separation-separation) > 1e-4 {
+			t.Errorf("point %d: separation %.6f, detection %.6f", i, reused.Points[i].Separation, separation)
+		}
+	}
+
+	// moved by 2 mm: computed again
+	box.Transform.Position = box.Transform.Position.Add(mgl64.Vec3{0.002, 0, 0})
+	if reuseManifold(&previous, 0.02, &reused) {
+		t.Error("the contact was reused after 2 mm")
+	}
+	// turned by 3°: computed again
+	box.Transform.Position = box.Transform.Position.Sub(mgl64.Vec3{0.002, 0, 0})
+	box.Transform.Rotation = mgl64.QuatRotate(3*math.Pi/180, mgl64.Vec3{0, 1, 0}).Mul(box.Transform.Rotation)
+	if reuseManifold(&previous, 0.02, &reused) {
+		t.Error("the contact was reused after 3°")
 	}
 }

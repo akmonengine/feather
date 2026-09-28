@@ -86,9 +86,10 @@ A ball at 40 m/s does not go through a 4 cm wall at 50 Hz.
 A body resting for 0.5 s (under 0.05 m/s and 0.05 rad/s) falls asleep: it is not simulated anymore.
 It wakes up with `AddForce`, `AddTorque`, `WakeUp`, or when a moving body touches it.
 
-### Determinism
+### Determinism & threads
 The same scene gives the same result, bit for bit, whatever the number of `Workers`.
-The `Workers` only split the collision detection, the solver is sequential.
+From 256 bodies, the collision detection and the solver run on `Workers` goroutines: set it to the number of cores.
+Call `World.Close()` when the world is not used anymore, to stop its workers.
 
 ## Troubleshooting
 

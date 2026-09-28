@@ -1,6 +1,7 @@
 package feather
 
 import (
+	"runtime"
 	"sync"
 
 	"github.com/akmonengine/feather/actor"
@@ -33,6 +34,18 @@ type World struct {
 	contactsIndex map[pairKey]int
 	previous      []constraint.Manifold
 	aabbs         []actor.AABB
+	// 2 buffers: one for the contacts of this step, one for the previous step
+	buffers [2][]constraint.Manifold
+	buffer  int
+	found   []bool
+
+	// workers of the step, and the parameters of the narrow phase job
+	workers    *workersHandle
+	pairs      []Pair
+	manifolds  []constraint.Manifold
+	dt         float64
+	collideJob func(i int)
+	aabbJob    func(i int)
 }
 
 // AddBody adds a rigid body to the world
@@ -66,6 +79,29 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	w.indexContacts()
 }
 
+// workersHandle owns the workers of a World. When the World is not used anymore, the handle is collected
+// and its finalizer stops the workers (they only reference the pool, not the World)
+type workersHandle struct {
+	pool *workerPool
+}
+
+func (w *World) workerPool() *workerPool {
+	if w.workers == nil {
+		w.workers = &workersHandle{pool: &workerPool{}}
+		runtime.SetFinalizer(w.workers, func(handle *workersHandle) {
+			handle.pool.close()
+		})
+	}
+	return w.workers.pool
+}
+
+// Close stops the workers of the world. The world can still be used, the workers are created again if needed.
+func (w *World) Close() {
+	if w.workers != nil {
+		w.workers.pool.close()
+	}
+}
+
 // Contacts returns the contacts of the last step, with the impulses applied by the solver
 func (w *World) Contacts() []constraint.Manifold {
 	return w.contacts
@@ -83,15 +119,19 @@ func (w *World) Step(dt float64) {
 	}
 
 	w.wakeTouchedBodies()
+	pool := w.workerPool()
+	if workers > 1 && len(w.Bodies) >= minParallelBodies {
+		pool.begin(workers)
+	}
 
 	// Phase 1: Collision detection, once per step - broad phase & narrow phase
-	manifolds := w.detectCollision(dt, workers)
+	manifolds := w.detectCollision(dt, pool)
 	manifolds = w.Events.recordCollisions(manifolds)
 	w.warmStart(manifolds)
 
 	// Phase 2: Solver, with substeps
 	s := &w.solver
-	s.prepare(w.Bodies, manifolds, dt, substeps, contactHertz)
+	s.prepare(w.Bodies, manifolds, dt, substeps, contactHertz, pool)
 	for range substeps {
 		s.integrateVelocities(w.Gravity)
 		s.warmStart()
@@ -104,6 +144,7 @@ func (w *World) Step(dt float64) {
 	}
 	s.storeImpulses()
 	s.finalize()
+	pool.end()
 
 	w.contacts = manifolds
 	w.indexContacts()
@@ -119,31 +160,70 @@ func (w *World) Step(dt float64) {
 
 // detectCollision: the AABBs are enlarged by the distance the bodies can travel during the step,
 // so that the contacts exist before the bodies touch (speculative contacts)
-func (w *World) detectCollision(dt float64, workers int) []constraint.Manifold {
-	w.aabbs = w.aabbs[:0]
-	for _, body := range w.Bodies {
-		aabb := body.Shape.GetAABB()
-		if _, isPlane := body.Shape.(*actor.Plane); !isPlane {
-			margin := reach(body, aabb, dt)
-			aabb = actor.AABB{Min: aabb.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: aabb.Max.Add(mgl64.Vec3{margin, margin, margin})}
-		}
-		w.aabbs = append(w.aabbs, aabb)
+func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manifold {
+	if cap(w.aabbs) < len(w.Bodies) {
+		w.aabbs = make([]actor.AABB, len(w.Bodies))
 	}
+	w.aabbs = w.aabbs[:len(w.Bodies)]
+	w.dt = dt
+	if w.aabbJob == nil {
+		w.aabbJob = w.computeAABB
+	}
+	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
 
 	w.SpatialGrid.Clear()
 	for i, body := range w.Bodies {
 		w.SpatialGrid.InsertAABB(i, body, w.aabbs[i])
 	}
-	pairs := w.SpatialGrid.FindPairs(w.Bodies, w.aabbs, workers)
+	w.pairs = w.SpatialGrid.findPairsPool(w.Bodies, w.aabbs, pool)
 
+	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start)
 	w.previous = w.contacts
-	return narrowPhase(pairs, workers, func(a, b *actor.RigidBody) float64 {
-		// triggers only need the real overlaps
-		if a.IsTrigger || b.IsTrigger {
-			return 0
+	w.buffer = 1 - w.buffer
+	if cap(w.buffers[w.buffer]) < len(w.pairs) {
+		w.buffers[w.buffer] = make([]constraint.Manifold, len(w.pairs))
+	}
+	if cap(w.found) < len(w.pairs) {
+		w.found = make([]bool, len(w.pairs))
+	}
+	w.manifolds = w.buffers[w.buffer][:len(w.pairs)]
+	w.found = w.found[:len(w.pairs)]
+	if w.collideJob == nil {
+		w.collideJob = w.collide
+	}
+	pool.run(len(w.pairs), pairsPerChunk, w.collideJob)
+
+	return compactManifolds(w.manifolds, w.found)
+}
+
+// computeAABB of the body i, enlarged by the distance it can travel during the step
+func (w *World) computeAABB(i int) {
+	body := w.Bodies[i]
+	aabb := body.Shape.GetAABB()
+	if _, isPlane := body.Shape.(*actor.Plane); !isPlane {
+		margin := reach(body, aabb, w.dt)
+		aabb = actor.AABB{Min: aabb.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: aabb.Max.Add(mgl64.Vec3{margin, margin, margin})}
+	}
+	w.aabbs[i] = aabb
+}
+
+// collide the pair i. The triggers only need the real overlaps, the other pairs get speculative contacts
+func (w *World) collide(i int) {
+	pair := w.pairs[i]
+	margin := 0.0
+	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
+		margin = SpeculativeDistance + relativeSpeed(pair.BodyA, pair.BodyB)*w.dt
+
+		// pair cache: the contact of the previous step, if the bodies barely moved relative to each other
+		if k, ok := w.contactsIndex[makePairKey(pair.BodyA, pair.BodyB)]; ok {
+			previous := &w.previous[k]
+			if previous.BodyA == pair.BodyA && reuseManifold(previous, margin, &w.manifolds[i]) {
+				w.found[i] = true
+				return
+			}
 		}
-		return SpeculativeDistance + relativeSpeed(a, b)*dt
-	})
+	}
+	w.found[i] = collidePair(pair, margin, &w.manifolds[i])
 }
 
 // reach is the distance a body can travel during dt, plus the speculative distance
@@ -184,7 +264,7 @@ func (w *World) warmStart(manifolds []constraint.Manifold) {
 
 		used := [constraint.MaxContactPoints]bool{}
 		for j := 0; j < manifold.Count; j++ {
-			local := manifold.BodyA.Transform.ToLocal(manifold.Points[j].Position)
+			local := manifold.Points[j].LocalAnchorA
 			closest, closestDistance := -1, contactMatchDistance*contactMatchDistance
 			for o := 0; o < previous.Count; o++ {
 				if used[o] {

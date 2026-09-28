@@ -196,28 +196,36 @@ func (e *Events) processCollisionEvents() {
 		if e.previousActivePairs[pair] {
 			// Pair was active before and still is, Stay
 			if isTrigger {
-				e.buffer = append(e.buffer, TriggerStayEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(TRIGGER_STAY) {
+					e.buffer = append(e.buffer, TriggerStayEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			} else {
-				e.buffer = append(e.buffer, CollisionStayEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(COLLISION_STAY) {
+					e.buffer = append(e.buffer, CollisionStayEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			}
 		} else {
 			// New pair, Enter
 			if isTrigger {
-				e.buffer = append(e.buffer, TriggerEnterEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(TRIGGER_ENTER) {
+					e.buffer = append(e.buffer, TriggerEnterEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			} else {
-				e.buffer = append(e.buffer, CollisionEnterEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(COLLISION_ENTER) {
+					e.buffer = append(e.buffer, CollisionEnterEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			}
 		}
 	}
@@ -234,15 +242,19 @@ func (e *Events) processCollisionEvents() {
 			isTrigger := pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
 
 			if isTrigger {
-				e.buffer = append(e.buffer, TriggerExitEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(TRIGGER_EXIT) {
+					e.buffer = append(e.buffer, TriggerExitEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			} else {
-				e.buffer = append(e.buffer, CollisionExitEvent{
-					BodyA: pair.bodyA,
-					BodyB: pair.bodyB,
-				})
+				if e.hasListeners(COLLISION_EXIT) {
+					e.buffer = append(e.buffer, CollisionExitEvent{
+						BodyA: pair.bodyA,
+						BodyB: pair.bodyB,
+					})
+				}
 			}
 		}
 	}
@@ -265,13 +277,22 @@ func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
 		}
 
 		if !trackedState && body.IsSleeping {
-			e.buffer = append(e.buffer, SleepEvent{Body: body})
+			if e.hasListeners(ON_SLEEP) {
+				e.buffer = append(e.buffer, SleepEvent{Body: body})
+			}
 			e.sleepStates[body] = true
 		} else if trackedState && !body.IsSleeping {
-			e.buffer = append(e.buffer, WakeEvent{Body: body})
+			if e.hasListeners(ON_WAKE) {
+				e.buffer = append(e.buffer, WakeEvent{Body: body})
+			}
 			e.sleepStates[body] = false
 		}
 	}
+}
+
+// hasListeners: an event is only created if somebody listens to it (creating an event allocates)
+func (e *Events) hasListeners(eventType EventType) bool {
+	return len(e.listeners[eventType]) > 0
 }
 
 // flush sends all buffered events and clears the buffer
