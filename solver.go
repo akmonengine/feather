@@ -35,7 +35,8 @@ const (
 	// MaxLinearSpeed of a body (m/s)
 	MaxLinearSpeed = 400.0
 
-	// MaxRotation of a body during one substep (rad), as in Box2D v3
+	// MaxRotation of a body during one substep (rad). Box2D limits it per step: Feather lets the bodies turn faster
+	// (a wheel, a ball), the contacts follow the rotation during the step (turnAnchors)
 	MaxRotation = 0.25 * math.Pi
 
 	// StaticFrictionSpeed: under this sliding speed (m/s), a contact point uses the static friction

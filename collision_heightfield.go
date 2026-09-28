@@ -80,9 +80,7 @@ type triangleContact struct {
 	first      int
 	count      int
 	separation float64
-	// predicted: the separation of the closest point at the end of the step, at its current speed
-	predicted float64
-	witness   bool
+	witness    bool
 }
 
 // heightfieldScratch: the buffers of a collision with a heightfield, reused to avoid the allocations
@@ -139,23 +137,9 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 	}
 
 	// ========== PATCHES ==========
-	// the contacts closest at the end of the step first, then the deepest: they give the normal of their patch.
-	// A body turning fast can hit the terrain with a point further than another point.
-	// The duration of the step comes from the margin: SpeculativeDistance + the relative speed * dt
-	duration := 0.0
-	if speed := relativeSpeed(terrain, object); speed > 0 {
-		duration = math.Max(margin-SpeculativeDistance, 0) / speed
-	}
-	for i := range s.contacts {
-		contact := &s.contacts[i]
-		contact.predicted = predictedSeparation(object, s.points[contact.first:contact.first+contact.count], contact.normal, duration)
-	}
+	// the deepest contacts first: they give the normal of their patch, the shallowest are dropped (as in Jolt)
 	slices.SortStableFunc(s.contacts, func(a, b triangleContact) int {
 		switch {
-		case a.predicted < b.predicted:
-			return -1
-		case a.predicted > b.predicted:
-			return 1
 		case a.separation < b.separation:
 			return -1
 		case a.separation > b.separation:
@@ -275,17 +259,6 @@ func (s *heightfieldScratch) addContact(normal mgl64.Vec3, first int, witness bo
 	}
 	s.contacts = append(s.contacts, triangleContact{normal: normal, first: first, count: count, separation: deepest, witness: witness})
 	return true
-}
-
-// predictedSeparation of the points at the end of the step: the separation, minus the distance the point travels
-// towards the terrain during the step (the terrain is static)
-func predictedSeparation(object *actor.RigidBody, points []constraint.ContactPoint, normal mgl64.Vec3, duration float64) float64 {
-	predicted := math.Inf(1)
-	for _, point := range points {
-		speed := object.Velocity.Add(object.AngularVelocity.Cross(point.Position.Sub(object.Transform.Position))).Dot(normal)
-		predicted = math.Min(predicted, point.Separation+math.Min(speed, 0)*duration)
-	}
-	return predicted
 }
 
 // touchesEdge: the point is on one of the edges of the triangle (bit e for the edge from the vertex e to the vertex e+1),

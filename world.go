@@ -210,8 +210,16 @@ func (w *World) Step(dt float64) {
 		pool.begin(workers)
 	}
 
-	// Phase 1: Collision detection, once per step - broad phase & narrow phase
+	// Phase 1: Collision detection, once per step - broad phase & narrow phase.
+	// The buffer of the previous step is kept for the warm start
+	w.previous = w.contacts
+	w.buffer = 1 - w.buffer
 	manifolds := w.detectCollision(dt, pool)
+	if w.wakeTouched(manifolds) {
+		// the woken bodies get their contacts in this step (as in Jolt)
+		manifolds = w.detectCollision(dt, pool)
+	}
+	w.changed = w.changed[:0]
 	manifolds = w.Events.recordCollisions(manifolds)
 	w.warmStart(manifolds)
 
@@ -232,6 +240,7 @@ func (w *World) Step(dt float64) {
 	s.storeImpulses()
 	s.finalize()
 	pool.end()
+	w.continuous(s, dt)
 
 	w.contacts = manifolds
 	w.indexContacts()
@@ -243,8 +252,9 @@ func (w *World) Step(dt float64) {
 	w.Events.flush()
 }
 
-// detectCollision: the AABBs are enlarged by the distance the bodies can travel during the step,
-// so that the contacts exist before the bodies touch (speculative contacts)
+// detectCollision: the AABBs are enlarged by the distance the bodies can travel during the step, so that the contacts
+// exist before the bodies touch (speculative contacts: the speculative CCD of PhysX, the "Continuous Speculative" mode
+// of Unity)
 func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manifold {
 	if cap(w.aabbs) < len(w.Bodies) {
 		w.aabbs = make([]actor.AABB, len(w.Bodies))
@@ -264,8 +274,6 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 
 	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start).
 	// Each pair has its own place: 1 manifold, MaxManifoldsPerPair against a heightfield
-	w.previous = w.contacts
-	w.buffer = 1 - w.buffer
 	if cap(w.offsets) < len(w.pairs)+1 {
 		w.offsets = make([]int, len(w.pairs)+1)
 		w.counts = make([]int, len(w.pairs))
@@ -283,9 +291,25 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 		w.collideJob = w.collide
 	}
 	pool.run(len(w.pairs), pairsPerChunk, w.collideJob)
-	w.changed = w.changed[:0]
 
 	return compactManifolds(w.manifolds, w.offsets, w.counts)
+}
+
+// wakeTouched: a sleeping body touched by an awake dynamic body wakes up with its island (as in Box2D & Jolt).
+// Returns true if a body woke up: its contacts must be found in this step
+func (w *World) wakeTouched(manifolds []constraint.Manifold) bool {
+	woke := false
+	for i := range manifolds {
+		a, b := manifolds[i].BodyA, manifolds[i].BodyB
+		if a.IsSleeping && isAwakeDynamic(b) {
+			w.islands.wake(a)
+			woke = true
+		} else if b.IsSleeping && isAwakeDynamic(a) {
+			w.islands.wake(b)
+			woke = true
+		}
+	}
+	return woke
 }
 
 // activeJoints: the joints with at least one awake dynamic body

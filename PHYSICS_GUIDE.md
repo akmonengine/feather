@@ -126,6 +126,8 @@ With 12 substeps at 50 Hz, a stack of 10 boxes of 50 cm sinks by ~5 mm.
 
 ### Fast bodies
 The contacts are created before the bodies touch (speculative contacts), from the distance the bodies can travel during the step.
+A fast body is also moved back to its first impact with a static body (continuous collision). Set `IsBullet` on a small
+fast body (a projectile) to stop it on the dynamic bodies too.
 A ball at 40 m/s does not go through a 4 cm wall at 50 Hz.
 
 ### Sleep

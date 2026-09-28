@@ -223,6 +223,30 @@ func isLarge(body *actor.RigidBody) bool {
 	return false
 }
 
+// query appends the index of the bodies in the cells of the AABB, and of the planes & heightfields, each body once.
+// seen is a buffer of len(bodies) false values
+func (sg *SpatialGrid) query(aabb actor.AABB, bodies []*actor.RigidBody, seen []bool, out []int) []int {
+	start := len(out)
+	out = append(out, sg.planes.bodyIndices...)
+	minCell, maxCell := sg.worldToCell(aabb.Min), sg.worldToCell(aabb.Max)
+	for x := minCell.X; x <= maxCell.X; x++ {
+		for y := minCell.Y; y <= maxCell.Y; y++ {
+			for z := minCell.Z; z <= maxCell.Z; z++ {
+				for _, index := range sg.cells[sg.hashCell(CellKey{x, y, z})].bodyIndices {
+					if !seen[index] {
+						seen[index] = true
+						out = append(out, index)
+					}
+				}
+			}
+		}
+	}
+	for _, index := range out[start:] {
+		seen[index] = false
+	}
+	return out
+}
+
 // needsSolving - At least one body must be dynamic and awake
 func needsSolving(a, b *actor.RigidBody) bool {
 	return isAwakeDynamic(a) || isAwakeDynamic(b)

@@ -80,14 +80,19 @@ type Proxy struct {
 }
 
 func NewProxy(body *actor.RigidBody) Proxy {
-	q := body.Transform.Rotation
+	return NewProxyAt(body.Transform, body.Shape)
+}
+
+// NewProxyAt: the shape at the transform (a body during its motion)
+func NewProxyAt(transform actor.Transform, shape actor.ShapeInterface) Proxy {
+	q := transform.Rotation
 	w, x, y, z := q.W, q.V[0], q.V[1], q.V[2]
 	rotation := mgl64.Mat3{
 		1 - 2*(y*y+z*z), 2 * (x*y + w*z), 2 * (x*z - w*y),
 		2 * (x*y - w*z), 1 - 2*(x*x+z*z), 2 * (y*z + w*x),
 		2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2*(x*x+y*y),
 	}
-	return Proxy{Position: body.Transform.Position, Rotation: rotation, Inverse: rotation.Transpose(), Shape: body.Shape}
+	return Proxy{Position: transform.Position, Rotation: rotation, Inverse: rotation.Transpose(), Shape: shape}
 }
 
 // SupportWorld returns the farthest point of the shape in the direction, in world space

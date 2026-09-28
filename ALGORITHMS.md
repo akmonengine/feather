@@ -6,6 +6,7 @@
 4. [Solver](#solver)
 5. [Joints](#joints)
 6. [Heightfield](#heightfield)
+7. [Continuous collision](#continuous-collision)
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -55,8 +56,7 @@ From the normal of EPA, each body gives the feature facing the other body (a fac
 
 The deepest point has the separation of EPA, the other points are higher along the normal.
 The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most area.
-The distances and the areas are weighted by `1 / (1 + separation / 5 mm)` (like Jolt): a point far above the surface
-would hardly touch during the step, a point about to touch is kept. The contacts with a plane are reduced the same way.
+The contacts with a plane are reduced the same way.
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
 Parallel capsules get 2 points.
@@ -89,10 +89,12 @@ The anchors are the points on the surface of each body, without the radius of th
 A rolling sphere turns its surface, not its center: with the point of its surface, its contacts would open while it
 rolls, and it would sink in the wall in front of it.
 
-The lever arms of the contacts turn with the bodies before each `Relax` (`turnAnchors`), when a body turned more than
-0.01 rad since the beginning of the step. A tumbling body (a capsule at 30 rad/s turns by 0.5 rad per step) would otherwise
-be pushed at the place of its contact at the beginning of the step: the solver would see the contact open while it sinks.
-The rotation of a body is limited to `MaxRotation` (π/4) per substep, as in Box2D v3.
+The rotation of a body is limited to `MaxRotation` (π/4) per substep. Box2D limits it per step (with an option for the
+wheels), and keeps the anchors fixed during the step. Feather lets the bodies turn faster, so the lever arms of the
+contacts turn with the bodies before each `Relax` (`turnAnchors`), when a body turned more than 0.01 rad since the
+beginning of the step: a tumbling capsule at 30 rad/s turns by 0.5 rad per step, it would otherwise be pushed at the place
+of its contact at the beginning of the step, and the solver would see the contact open while it sinks.
+The cores and `turnAnchors` are Feather's own: without them, a pile of bodies tumbling on a slope sinks by 14 cm.
 
 ### Soft constraint
 The contact is a spring + damper, with a frequency `ω = 2π * hertz` and a damping ratio `ζ`:
@@ -172,7 +174,7 @@ Each triangle is tested with GJK/EPA:
 - **Face**: always, the contact of the body with the plane of the triangle (`CollideWithPlane`), limited to the
   points above the triangle. On a flat terrain, a body behaves exactly as on a plane.
 - **Inner edges**: a body sliding on the terrain must not hit the edges between the triangles. Each edge is active if it
-  is on a border or a hole, or if it bends down (convex) by more than 5° (like Jolt & PhysX). A contact on an inactive
+  is on a border or a hole, or if it bends down (convex) by more than 5° (like Jolt, `ActiveEdges.h`). A contact on an inactive
   edge (or vertex) takes the normal of its triangle. If the body is beside the triangle, above the edge, it keeps the
   witness point of EPA, only if no other triangle has a contact with this normal.
 - **Active edges** (a ridge, a border): also the contact of EPA, with its normal. A capsule lying across a ridge touches
@@ -180,6 +182,23 @@ Each triangle is tested with GJK/EPA:
 
 The contacts are then grouped by normal: the contacts of triangles with less than 5° between their normals form a patch,
 a manifold of 4 points. A body touches the terrain with 8 patches at most (`MaxManifoldsPerPair`): a box in a valley
-gets one patch per slope. The contacts closest to the terrain at the end of the step come first (their separation minus
-the distance they travel towards the terrain), the others are dropped: a corner of a tumbling box, further but falling
-fast, comes before a corner moving away.
+gets one patch per slope. The patches of the deepest contacts are kept, the others are dropped (like Jolt).
+
+## Continuous collision
+**Speculative contacts**: the contacts are created up to `SpeculativeDistance` + the relative speed of the bodies * dt
+(the speculative CCD of PhysX, the "Continuous Speculative" mode of Unity): the solver stops the bodies before they
+touch. Their known limits: a contact can be found by a body which will not touch it (a ghost contact), and a body
+accelerated by the solver during the step can go further than its margin.
+
+**Time of impact** (as in Box2D v3): after the solver, a body which moved more than half of its smallest extent is moved
+back to its first impact with a static body (a plane, a terrain...) along its motion, its velocity is kept. A bullet
+(`IsBullet`) is also stopped by the dynamic bodies. The time of impact is found by conservative advancement
+(Mirtich, as in Bullet): the body moves forward by its distance to the other body (GJK) divided by the fastest approach
+of its points, until it is `LinearSlop` away. If it already touches at the start, only its core (a sphere of 1/4 of its
+smallest extent, as in Box2D) is stopped.
+
+**GJK distance**: the distance and the closest points of 2 convex shapes. The simplex is reduced to its feature closest
+to the origin (Voronoi regions, Ericson 5.1 & 9.5).
+
+A sleeping body touched by an awake body wakes up with its island during the collision detection, and gets its contacts
+in the same step (like Jolt).

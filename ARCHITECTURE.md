@@ -13,11 +13,12 @@ feather/
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── collision_heightfield.go # heightfields: triangles, inner edges, patches
+├── ccd.go              # continuous collision: time of impact of the fast bodies
 ├── spatialgrid.go      # broad phase: uniform grid
 ├── event.go            # collision, trigger & sleep events
 ├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
-├── gjk/                # GJK (overlap test, with margin)
+├── gjk/                # GJK (overlap test with margin, distance)
 ├── epa/                # EPA (penetration depth) & contact points (manifold)
 └── bench/              # comparison with v0.2.0 (separate module)
 ```
@@ -30,9 +31,11 @@ Step(dt)
 │   ├── AABBs enlarged by the distance each body can travel during dt
 │   ├── broad phase: pairs of overlapping AABBs (spatial grid)
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
+│   ├── a sleeping body touched by an awake body wakes up: the detection runs again
 │   ├── events: pairs touching or overlapping (triggers are not solved)
 │   └── warm start: each point takes the impulses of the same point in the previous step
 ├── Phase 2: solver (substeps: joints, then contacts), then restitution
+├── continuous collision: the fast bodies are moved back to their first impact
 └── Phase 3: sleep islands & events
 ```
 
@@ -73,4 +76,5 @@ the static and sleeping bodies share a state with no mass.
 - The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
   triangle during the step, and sink by a few mm before the next step.
 - No friction around the normal: a ball spinning on itself on the ground never stops (no sleep).
-- No continuous collision for very fast rotating bodies (the speculative margin covers the translation).
+- The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
+  not the other pairs: 2 fast dynamic bodies rely on their speculative contacts.

@@ -129,6 +129,16 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
 - https://cse442-17f.github.io/Gilbert-Johnson-Keerthi-Distance-Algorithm/
 - https://winter.dev/articles/epa-algorithm
 - Christer Ericson, Real-Time Collision Detection (2004)
+- https://github.com/jrouwe/JoltPhysics (active edges, contact reduction, body pair cache)
+- Brian Mirtich, Impulse-based Dynamic Simulation of Rigid Body Systems (1996): conservative advancement
+- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
+
+## Acknowledgements
+Feather implements algorithms described by these projects, without their code:
+- [Box2D](https://github.com/erincatto/box2d), by Erin Catto (MIT License): the TGS Soft solver, the graph coloring,
+  the continuous collision
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe (MIT License): the active edges of the
+  terrains, the contact patches, the body pair cache
 
 ## Contributing Guidelines
 

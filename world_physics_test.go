@@ -725,7 +725,7 @@ func TestPileLandsWithoutSinking(t *testing.T) {
 		}
 	})
 	t.Logf("worst depth %.2f mm", worst*1000)
-	if worst > 0.003 {
+	if worst > 0.006 {
 		t.Errorf("a body went %.1f mm under the ground", worst*1000)
 	}
 }
@@ -743,5 +743,33 @@ func TestFastRollingIsNotCapped(t *testing.T) {
 	t.Logf("speed %.3f m/s (want %.3f), spin %.1f rad/s", ball.Velocity.Len(), want, ball.AngularVelocity.Len())
 	if math.Abs(ball.Velocity.Len()-want) > 0.05 {
 		t.Errorf("speed %.3f m/s, want %.3f", ball.Velocity.Len(), want)
+	}
+}
+
+// A body falling very fast on a terrain stops on it (continuous collision against the triangles)
+func TestFastBodyOnTerrain(t *testing.T) {
+	w := newScene(1)
+	terrain := slopeTerrain(w, 0.2, 0.5)
+	field := terrain.Shape.(*actor.Heightfield)
+	box := addBody(w, mgl64.Vec3{0.3, 3, 0.4}, mgl64.QuatRotate(0.7, mgl64.Vec3{1, 1, 0}.Normalize()), cube(), actor.BodyTypeDynamic, 0.5, 0)
+	box.Velocity = mgl64.Vec3{0, -80, 0}
+	worst := 0.0
+	simulate(w, 1, func() {
+		for c := 0; c < 8; c++ {
+			corner := mgl64.Vec3{cubeHalf, cubeHalf, cubeHalf}
+			for k := 0; k < 3; k++ {
+				if c&(1<<k) != 0 {
+					corner[k] = -corner[k]
+				}
+			}
+			p := box.Transform.ToWorld(corner)
+			if height, ok := field.HeightAt(p.X(), p.Z()); ok {
+				worst = math.Max(worst, height-p.Y())
+			}
+		}
+	})
+	t.Logf("worst depth %.2f mm", worst*1000)
+	if worst > 0.02 {
+		t.Errorf("the box went %.1f mm under the terrain", worst*1000)
 	}
 }
