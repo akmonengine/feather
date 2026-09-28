@@ -3,6 +3,8 @@
 //
 //	go run . [-only sim|epa|speed]                            # the working tree
 //	go run -tags v020 -modfile=go.v020.mod . [-only ...]      # v0.2.0 (XPBD), for comparison
+//	go run . -check                                           # the regressions against baseline.json (regression.go)
+//	go run . -update                                          # write baseline.json, after a wanted change
 //
 // Every scene runs at AkmonEngine's rate: 50 Hz, 12 sub-steps, one worker.
 package main
@@ -12,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/akmonengine/feather"
@@ -231,7 +234,15 @@ func determinism() {
 
 func main() {
 	part := flag.String("only", "", "sim, epa or speed (default: all)")
+	check := flag.Bool("check", false, "compare to the reference baseline.json, exit 1 on a regression")
+	update := flag.Bool("update", false, "write the reference baseline.json")
 	flag.Parse()
+	if *check || *update {
+		if !regressions(*update) {
+			os.Exit(1)
+		}
+		return
+	}
 	if *part == "" || *part == "sim" {
 		rest("box on ground", func(w *feather.World) *actor.RigidBody {
 			ground(w, 0.6)

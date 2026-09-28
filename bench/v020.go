@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/akmonengine/feather"
@@ -36,4 +37,10 @@ func narrow(a, b *actor.RigidBody) (bool, mgl64.Vec3, float64, int) {
 		depth = math.Max(depth, p.Penetration)
 	}
 	return true, n, depth, len(c.Points)
+}
+
+// regressions: the reference is measured on the working tree only
+func regressions(update bool) bool {
+	fmt.Println("the regressions run on the working tree, not on v0.2.0")
+	return false
 }

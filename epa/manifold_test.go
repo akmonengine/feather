@@ -2,6 +2,7 @@ package epa
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"testing"
 
@@ -168,6 +169,25 @@ func TestManifoldReducedToFour(t *testing.T) {
 	octagon := 2 * (math.Sqrt2 - 1)
 	if area < 0.6*octagon {
 		t.Errorf("kept area %.3f of the %.3f octagon", area, octagon)
+	}
+}
+
+// Random points reduced to 4 at most (3 if the others are inside their triangle): the deepest is always kept
+func TestReduceKeepsDeepest(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	normal := mgl64.Vec3{0, 1, 0}
+	for i := 0; i < 500; i++ {
+		points := make([]constraint.ContactPoint, 5+r.Intn(12))
+		deepest := math.Inf(1)
+		for k := range points {
+			points[k] = constraint.ContactPoint{Position: mgl64.Vec3{r.Float64() - 0.5, 0, r.Float64() - 0.5}, Separation: r.Float64()*0.1 - 0.05}
+			deepest = math.Min(deepest, points[k].Separation)
+		}
+		var m constraint.Manifold
+		Reduce(points, normal, &m)
+		if m.Count < 3 || m.MinSeparation() != deepest {
+			t.Fatalf("%d points kept, the deepest at %.4f, want %.4f", m.Count, m.MinSeparation(), deepest)
+		}
 	}
 }
 

@@ -69,6 +69,25 @@ the static and sleeping bodies share a state with no mass.
   The colors are always solved in the same order: the result is the same bit for bit, whatever the number of workers.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
+## Tests & benchmarks
+Three levels, from the most precise to the widest:
+1. **Minimal scenes** (`scenes_test.go`): one or two bodies isolating a mechanism. The bound of each scene is derived
+   from a quantity of the engine (`LinearSlop` for a depth), never fixed after a measure.
+2. **Invariants** (`invariants_test.go`): `checkInvariants` runs at every step of 60 random scenes (piles on a plane,
+   on a terrain, bodies & joints in free flight), in parallel, in about 1 s. Each tolerance comes from the method:
+   the rounding for the momentum, the first order gyroscopic torque for the angular momentum, `LinearSlop` for the
+   depth & the energy pushed out of the ground. Reintroducing the bugs fixed on 27/09 (rotation capped per step,
+   contact points frozen during the step, a box touching a plane with its 8 corners) makes it fail.
+3. **Regressions** (`bench/regression.go`): 6 chaotic scenes, compared to `bench/baseline.json`:
+   - the fingerprint of the final state (identical on the same GOARCH);
+   - quality metrics, 0.5 mm of tolerance on a depth, 0.1 % on an energy gain;
+   - the time of a step (+20 %) and of its phases (+30 %, over 5 % of the step), best of 3 runs, only on the machine
+     of the reference.
+
+`World.Profile()` gives the time of each phase of the last step (broad phase, narrow phase, prepare, substeps,
+restitution, continuous collision, islands), without allocation.
+`World.parallelFrom` (tests only) runs the parallel paths under 256 bodies, for the determinism.
+
 ## Current limitations
 - The broad phase is a uniform grid: very large and very small bodies in the same scene are slow
   (the planes & the heightfields are not in the grid, they are tested with every body).
@@ -78,6 +97,9 @@ the static and sleeping bodies share a state with no mass.
 - No friction around the normal: a ball spinning on itself on the ground never stops (no sleep).
 - A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
   the feature of the body above the triangle, the middle of the capsule is missed.
+- The restitution is applied once per step, with the velocity before the step: a body not round (box, capsule),
+  bouncy (`e` over 0.5) and spinning fast (20-50 rad/s) can bounce higher than it fell. Measured: up to +60 % of
+  energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
 - No kinematic bodies (moving platforms): a body is static or dynamic.
 - The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
   not the other pairs: 2 fast dynamic bodies rely on their speculative contacts.

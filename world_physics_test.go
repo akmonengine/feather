@@ -677,59 +677,6 @@ func TestImpulses(t *testing.T) {
 	}
 }
 
-// A sphere rolling fast hits a wall: its surface turns, not its center, so the contact holds
-func TestRollingSphereHitsWall(t *testing.T) {
-	for _, speed := range []float64{3, 6, 10} {
-		w := newScene(1)
-		addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Plane{Normal: mgl64.Vec3{0, 1, 0}}, actor.BodyTypeStatic, 0.6, 0)
-		addBody(w, mgl64.Vec3{3.5, 1, 0}, mgl64.QuatIdent(), &actor.Box{HalfExtents: mgl64.Vec3{0.5, 1, 2}}, actor.BodyTypeStatic, 0.6, 0)
-		sphere := addBody(w, mgl64.Vec3{0, 0.2, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: 0.2}, actor.BodyTypeDynamic, 0.6, 0)
-		sphere.Velocity = mgl64.Vec3{speed, 0, 0}
-		sphere.AngularVelocity = mgl64.Vec3{0, 0, -speed / 0.2}
-		worst := 0.0
-		simulate(w, 1, func() { worst = math.Max(worst, sphere.Transform.Position.X()+0.2-3) })
-		t.Logf("%.0f m/s: %.2f mm in the wall", speed, worst*1000)
-		if worst > 0.002 {
-			t.Errorf("%.0f m/s: the sphere went %.1f mm in the wall", speed, worst*1000)
-		}
-	}
-}
-
-// Boxes, spheres & capsules dropped on a slope, hitting each other and tumbling: no point goes under the ground.
-// The contacts keep the points about to touch, and follow the rotation of the bodies during the step
-func TestPileLandsWithoutSinking(t *testing.T) {
-	angle := 30 * math.Pi / 180
-	normal := mgl64.Vec3{-math.Sin(angle), math.Cos(angle), 0}
-	w := newScene(1)
-	addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Plane{Normal: normal}, actor.BodyTypeStatic, 0.6, 0)
-	r := rand.New(rand.NewSource(2))
-	var bodies []*actor.RigidBody
-	for i := 0; i < 60; i++ {
-		var shape actor.ShapeInterface = &actor.Box{HalfExtents: mgl64.Vec3{0.2 + 0.2*r.Float64(), 0.15, 0.25}}
-		switch i % 3 {
-		case 1:
-			shape = &actor.Sphere{Radius: 0.2}
-		case 2:
-			shape = &actor.Capsule{HalfHeight: 0.25, Radius: 0.12}
-		}
-		x, z := r.Float64()*8-4, r.Float64()*16-8
-		position := mgl64.Vec3{x, x*math.Tan(angle) + 1 + r.Float64()*3, z}
-		rotation := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.Float64(), r.Float64(), r.Float64()}.Normalize())
-		bodies = append(bodies, addBody(w, position, rotation, shape, actor.BodyTypeDynamic, 0.6, 0))
-	}
-	worst := 0.0
-	simulate(w, 4, func() {
-		for _, body := range bodies {
-			lowest := body.Transform.ToWorld(body.Shape.Support(body.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))))
-			worst = math.Max(worst, -lowest.Dot(normal))
-		}
-	})
-	t.Logf("worst depth %.2f mm", worst*1000)
-	if worst > 0.006 {
-		t.Errorf("a body went %.1f mm under the ground", worst*1000)
-	}
-}
-
 // The rotation is limited per substep (as in Box2D v3), not per step: a ball rolls as fast as the slope allows
 func TestFastRollingIsNotCapped(t *testing.T) {
 	angle := 30 * math.Pi / 180

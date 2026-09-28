@@ -1,0 +1,140 @@
+{
+  "arch": "linux/amd64",
+  "machine": "AMD Ryzen 7 5800X 8-Core Processor, 16 CPUs",
+  "scenes": {
+    "joint chain": {
+      "fingerprint": "928d90c753298eeb",
+      "quality": {
+        "energy gain": {
+          "value": 0,
+          "unit": "%"
+        },
+        "worst stretch": {
+          "value": 10.488036008385807,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 0.33028934800000004,
+      "phasesMs": {
+        "broad phase": 0.0063057600000000005,
+        "continuous": 0.0073888999999999995,
+        "islands": 0.000574932,
+        "narrow phase": 0.002615116,
+        "prepare": 0.009167896,
+        "restitution": 0.002454884,
+        "substeps": 0.30158346
+      }
+    },
+    "pile of 500": {
+      "fingerprint": "f37a660540a05ffa",
+      "quality": {
+        "landing depth": {
+          "value": 0.09750655839613209,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 2.0820879133333334,
+      "phasesMs": {
+        "broad phase": 0.44463526000000003,
+        "continuous": 0.010791946666666666,
+        "islands": 0.03286587333333333,
+        "narrow phase": 0.23427705333333335,
+        "prepare": 0.12606327333333334,
+        "restitution": 0.04353164666666667,
+        "substeps": 1.1888367133333333
+      }
+    },
+    "pyramid": {
+      "fingerprint": "40d707038782f68f",
+      "quality": {
+        "worst drift": {
+          "value": 10.619100098994151,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 0.155065664,
+      "phasesMs": {
+        "broad phase": 0.013178572000000001,
+        "continuous": 0.0005345079999999999,
+        "islands": 0.0051416199999999995,
+        "narrow phase": 0.010502724000000001,
+        "prepare": 0.008996249999999999,
+        "restitution": 0.0019034,
+        "substeps": 0.11462501
+      }
+    },
+    "rain on terrain": {
+      "fingerprint": "91187b2bf607c107",
+      "quality": {
+        "fell through": {
+          "value": 0,
+          "unit": ""
+        },
+        "landing depth": {
+          "value": 8.69580847124421,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 18.171293423999998,
+      "phasesMs": {
+        "broad phase": 0.085386168,
+        "continuous": 4.751156656,
+        "islands": 0.034886716,
+        "narrow phase": 9.001441516000002,
+        "prepare": 0.503619064,
+        "restitution": 0.061850932,
+        "substeps": 3.7286547679999997
+      }
+    },
+    "slope pile": {
+      "fingerprint": "82b99d41276c810c",
+      "quality": {
+        "landing depth": {
+          "value": 1.1804273416071709,
+          "unit": "mm"
+        },
+        "resting depth": {
+          "value": 0.41508681174817763,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 1.075413155,
+      "phasesMs": {
+        "broad phase": 0.01580255,
+        "continuous": 0.037591165,
+        "islands": 0.0044602999999999995,
+        "narrow phase": 0.17748851999999998,
+        "prepare": 0.063453965,
+        "restitution": 0.015417185,
+        "substeps": 0.7607955099999999
+      }
+    },
+    "terrain piles": {
+      "fingerprint": "ccbed2da56b5ce09",
+      "quality": {
+        "median landing depth": {
+          "value": 7.096632458983988,
+          "unit": "mm"
+        },
+        "worst landing depth": {
+          "value": 11.337528214025197,
+          "unit": "mm"
+        },
+        "worst resting depth": {
+          "value": 5.608504070453546,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 6.23702136,
+      "phasesMs": {
+        "broad phase": 0.019703315,
+        "continuous": 2.098112168,
+        "islands": 0.007394941,
+        "narrow phase": 2.7774942150000004,
+        "prepare": 0.1347786395,
+        "restitution": 0.0170523975,
+        "substeps": 1.1807315834999998
+      }
+    }
+  }
+}

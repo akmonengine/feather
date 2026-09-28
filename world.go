@@ -3,6 +3,7 @@ package feather
 import (
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
@@ -55,6 +56,13 @@ type World struct {
 	counts  []int
 	// heightfields changed during this step: their contacts are computed again
 	changed []*actor.RigidBody
+
+	// profile of the last step
+	profile Profile
+
+	// parallelFrom: the step runs on several goroutines from this count of bodies (minParallelBodies if 0). The tests
+	// lower it, to run the parallel paths on small scenes
+	parallelFrom int
 
 	// workers of the step, and the parameters of the narrow phase job
 	workers    *workersHandle
@@ -215,9 +223,15 @@ func (w *World) Step(dt float64) {
 		w.SpatialGrid = NewSpatialGrid(defaultCellSize, defaultCells)
 	}
 
+	start := time.Now()
+	w.profile = Profile{}
 	w.wakeTouchedBodies()
 	pool := w.workerPool()
-	if workers > 1 && len(w.Bodies) >= minParallelBodies {
+	parallelFrom := w.parallelFrom
+	if parallelFrom <= 0 {
+		parallelFrom = minParallelBodies
+	}
+	if workers > 1 && len(w.Bodies) >= parallelFrom {
 		pool.begin(workers)
 	}
 
@@ -230,6 +244,7 @@ func (w *World) Step(dt float64) {
 		// the woken bodies get their contacts in this step (as in Jolt)
 		manifolds = w.detectCollision(dt, pool)
 	}
+	mark := time.Now()
 	w.changed = w.changed[:0]
 	manifolds = w.Events.recordCollisions(manifolds)
 	w.warmStart(manifolds)
@@ -238,6 +253,7 @@ func (w *World) Step(dt float64) {
 	s := &w.solver
 	s.joints = w.activeJoints()
 	s.prepare(w.Bodies, manifolds, dt, substeps, contactHertz, pool)
+	mark = w.lap(&w.profile.Prepare, mark)
 	for range substeps {
 		s.integrateVelocities(w.Gravity)
 		s.warmStart()
@@ -245,20 +261,32 @@ func (w *World) Step(dt float64) {
 		s.integratePositions(dt)
 		s.relax()
 	}
+	mark = w.lap(&w.profile.Substeps, mark)
 	s.restitution()
 	s.storeImpulses()
 	s.finalize()
 	pool.end()
+	mark = w.lap(&w.profile.Restitution, mark)
 	w.continuous(s, dt)
 
 	w.contacts = manifolds
 	w.indexContacts()
+	mark = w.lap(&w.profile.Continuous, mark)
 
 	// Phase 3: Sleep & events
 	w.islands.update(s, dt)
 
 	w.Events.processSleepEvents(w.Bodies)
 	w.Events.flush()
+	w.lap(&w.profile.Islands, mark)
+	w.profile.Step = time.Since(start)
+}
+
+// lap adds the time since mark to the phase, and returns now
+func (w *World) lap(phase *time.Duration, mark time.Time) time.Time {
+	now := time.Now()
+	*phase += now.Sub(mark)
+	return now
 }
 
 // detectCollision: the AABBs are enlarged by the distance the bodies can travel during the step, so that the contacts
@@ -273,6 +301,7 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	if w.aabbJob == nil {
 		w.aabbJob = w.computeAABB
 	}
+	mark := time.Now()
 	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
 
 	w.SpatialGrid.Clear()
@@ -280,6 +309,7 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 		w.SpatialGrid.InsertAABB(i, body, w.aabbs[i])
 	}
 	w.pairs = w.SpatialGrid.findPairsPool(w.Bodies, w.aabbs, pool)
+	mark = w.lap(&w.profile.BroadPhase, mark)
 
 	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start).
 	// Each pair has its own place: 1 manifold, MaxManifoldsPerPair against a heightfield
@@ -301,7 +331,9 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	}
 	pool.run(len(w.pairs), pairsPerChunk, w.collideJob)
 
-	return compactManifolds(w.manifolds, w.offsets, w.counts)
+	manifolds := compactManifolds(w.manifolds, w.offsets, w.counts)
+	w.lap(&w.profile.NarrowPhase, mark)
+	return manifolds
 }
 
 // wakeTouched: a sleeping body touched by an awake dynamic body wakes up with its island (as in Box2D & Jolt).

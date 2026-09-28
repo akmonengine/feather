@@ -123,6 +123,20 @@ of both shapes (Sutherland-Hodgman), each point with its own separation.
 
 See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [physics guide](PHYSICS_GUIDE.md).
 
+## Tests & benchmarks
+- **Minimal scenes** (`scenes_test.go`): one mechanism each (a box landing on a corner, a capsule spinning like a top,
+  a sphere in a V...), with a bound derived from the engine (`LinearSlop`), never from a measure.
+- **Invariants** (`invariants_test.go`): 60 random scenes checked at every step: finite values, unit quaternions,
+  1 and 8 workers giving the same bits, no body in a plane, no energy gained, momentum & angular momentum kept in
+  free flight.
+- **Regressions** (`bench/`): 6 scenes (piles, pyramid, joint chain, rain on a terrain) against a committed reference:
+  fingerprint, quality and speed per phase (`World.Profile`).
+````
+go test ./...
+cd bench && go run . -check     # exit 1 on a regression
+cd bench && go run . -update    # after a wanted change
+````
+
 ## Sources
 - https://box2d.org/posts/2024/02/solver2d/
 - https://github.com/erincatto/box2d (v3)

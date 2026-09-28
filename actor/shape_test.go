@@ -456,3 +456,19 @@ func TestSphereComputeAABB(t *testing.T) {
 		})
 	}
 }
+
+// A thin box tilted over a plane, with a margin larger than its thickness: only the corners of its bottom face touch
+func TestBoxCollideWithPlaneKeepsSupportingFace(t *testing.T) {
+	box := &Box{HalfExtents: mgl64.Vec3{0.3, 0.02, 0.3}}
+	transform := Transform{Position: mgl64.Vec3{0, 0.1, 0}, Rotation: mgl64.QuatRotate(0.05, mgl64.Vec3{1, 0, 0})}
+	contacts := box.CollideWithPlane(mgl64.Vec3{0, 1, 0}, 0, transform, 1, nil)
+	if len(contacts) != 4 {
+		t.Fatalf("%d contacts, want 4", len(contacts))
+	}
+	for _, contact := range contacts {
+		local := transform.Rotation.Conjugate().Rotate(contact.Position.Add(mgl64.Vec3{0, contact.Separation / 2, 0}).Sub(transform.Position))
+		if math.Abs(local.Y()+0.02) > 1e-9 {
+			t.Errorf("the corner %v is not on the bottom face", local)
+		}
+	}
+}

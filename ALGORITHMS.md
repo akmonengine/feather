@@ -57,7 +57,8 @@ From the normal of EPA, each body gives the feature facing the other body (a fac
 The deepest point has the separation of EPA, the other points are higher along the normal.
 The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most
 area.
-The contacts with a plane are reduced the same way.
+A box touches a plane (or the face of a triangle) with its supporting face, the face the most opposed to the normal
+(as the incident face of Jolt): the corners behind it are never candidates. The contacts are reduced the same way.
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
 Parallel capsules get 2 points.
@@ -128,7 +129,9 @@ the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics):
 λ = max(0, min(-m (vn + e * vn_before), e * λ_step))
 ````
 Both are needed: a pile of balls bouncing with `e = 1` gains energy with Newton alone (411 J) or Poisson alone
-(3523 J), never with both (`TestRestitutionNeverAddsEnergy`).
+(3523 J), not with both (`TestRestitutionNeverAddsEnergy`). The bounce uses the velocity before the step: a body not
+round and spinning fast can turn its point away before the end of the step, and bounce higher than it fell over
+`e = 0.5` (see ARCHITECTURE.md, as documented by Jolt). Newton's law is the one of the game engines (Box2D, Jolt).
 
 ### Gyroscopic torque
 `ω × Iω` is integrated implicitly (1 Newton-Raphson iteration in body space), as described by Erin Catto

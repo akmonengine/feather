@@ -166,21 +166,15 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	}
 }
 
-// CollideWithPlane returns the corners of the box closer to the plane than the margin
+// CollideWithPlane returns the corners of the supporting face of the box (the face the most opposed to the normal of the
+// plane, as the incident face of Jolt) closer to the plane than the margin. The other corners are behind this face:
+// with a large margin, a thin box would give the corners of its top face instead of the deepest ones
 func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
-	h := b.HalfExtents
-	localVertices := [8]mgl64.Vec3{
-		{-h.X(), -h.Y(), -h.Z()},
-		{-h.X(), -h.Y(), h.Z()},
-		{-h.X(), h.Y(), -h.Z()},
-		{-h.X(), h.Y(), h.Z()},
-		{h.X(), -h.Y(), -h.Z()},
-		{h.X(), -h.Y(), h.Z()},
-		{h.X(), h.Y(), -h.Z()},
-		{h.X(), h.Y(), h.Z()},
-	}
+	var face [8]mgl64.Vec3
+	var count int
+	b.GetContactFeature(myTransform.Rotation.Conjugate().Rotate(planeNormal.Mul(-1)), &face, &count)
 
-	for _, vertex := range localVertices {
+	for _, vertex := range face[:count] {
 		worldVertex := myTransform.ToWorld(vertex)
 		separation := worldVertex.Dot(planeNormal) + planeDistance
 		if separation > margin {

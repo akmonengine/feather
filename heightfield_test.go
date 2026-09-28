@@ -3,8 +3,6 @@ package feather
 import (
 	"math"
 	"math/rand"
-	"slices"
-	"sync"
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
@@ -98,73 +96,6 @@ func bumpyTerrain(w *World, seed int64) *actor.RigidBody {
 	}
 	field := actor.NewHeightfield(samples, samples, heights, mgl64.Vec3{0.5, 1, 0.5})
 	return addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), field, actor.BodyTypeStatic, 0.6, 0)
-}
-
-// Bodies dropped on hills land without going through the terrain.
-// A pile is chaotic: a tiny change moves every body, so 10 piles are measured, not one.
-// Known limit: a capsule resting across a bump can stay a few mm in the terrain (logged, not checked): the contact of
-// the face of a triangle comes from the feature of the body above the triangle, the middle of a capsule is missed
-func TestHeightfieldPile(t *testing.T) {
-	// the 10 piles run in parallel, each writes its own result
-	const piles = 10
-	landings, restings, fell := make([]float64, piles), make([]float64, piles), make([]bool, piles)
-	var wg sync.WaitGroup
-	for pile := 0; pile < piles; pile++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			seed := int64(pile + 1)
-			w := newScene(1)
-			terrain := bumpyTerrain(w, seed)
-			field := terrain.Shape.(*actor.Heightfield)
-			r := rand.New(rand.NewSource(seed + 100))
-			var bodies []*actor.RigidBody
-			for i := 0; i < 60; i++ {
-				var shape actor.ShapeInterface = &actor.Box{HalfExtents: mgl64.Vec3{0.2 + 0.2*r.Float64(), 0.15, 0.25}}
-				switch i % 3 {
-				case 1:
-					shape = &actor.Sphere{Radius: 0.2}
-				case 2:
-					shape = &actor.Capsule{HalfHeight: 0.25, Radius: 0.12}
-				}
-				x, z := r.Float64()*16-8, r.Float64()*16-8
-				ground, _ := field.HeightAt(x, z)
-				position := mgl64.Vec3{x, ground + 1 + r.Float64()*3, z}
-				rotation := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.Float64(), r.Float64(), r.Float64()}.Normalize())
-				body := addBody(w, position, rotation, shape, actor.BodyTypeDynamic, 0.6, 0)
-				body.Material.RollingResistance = 0.1
-				bodies = append(bodies, body)
-			}
-
-			// the deepest point of the bodies under the terrain
-			depth := func() float64 {
-				worst := 0.0
-				for _, body := range bodies {
-					worst = math.Max(worst, depthUnder(field, body))
-				}
-				return worst
-			}
-			simulate(w, 4, func() { landings[pile] = math.Max(landings[pile], depth()) })
-			restings[pile] = depth()
-			for _, body := range bodies {
-				if !finite(body.Transform.Position) || body.Transform.Position.Y() < -3 {
-					fell[pile] = true
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	if slices.Contains(fell, true) {
-		t.Fatal("a body fell through the terrain")
-	}
-	slices.Sort(landings)
-	slices.Sort(restings)
-	median, worst := (landings[4]+landings[5])/2, landings[9]
-	t.Logf("landing depth under the terrain: median %.1f mm, worst %.1f mm; after 4 s: worst %.1f mm", median*1000, worst*1000, restings[9]*1000)
-	// a body landing on a slope, or tumbling fast, sinks a few mm during a step (the contacts are found once per step)
-	if median > 0.01 || worst > 0.02 {
-		t.Errorf("landing depth: median %.1f mm, worst %.1f mm", median*1000, worst*1000)
-	}
 }
 
 // A body falls through a hole of the terrain, and rests beside it
@@ -300,9 +231,10 @@ func TestHeightfieldPairOrder(t *testing.T) {
 	}
 }
 
-// terrainScene: bodies on hills, for the determinism & the allocations
+// terrainScene: bodies on hills, for the determinism & the allocations. The parallel paths run under 256 bodies
 func terrainScene(workers int) *World {
 	w := newScene(workers)
+	w.parallelFrom = 1
 	bumpyTerrain(w, 4)
 	r := rand.New(rand.NewSource(5))
 	for i := 0; i < 200; i++ {
@@ -349,80 +281,4 @@ func TestHeightfieldDoesNotAllocate(t *testing.T) {
 	if allocations > 0 {
 		t.Errorf("%.1f allocations per step", allocations)
 	}
-}
-
-// depthUnder: how deep the body is under the terrain (0 above it)
-func depthUnder(field *actor.Heightfield, body *actor.RigidBody) float64 {
-	depth := 0.0
-	switch shape := body.Shape.(type) {
-	case *actor.Box:
-		for c := 0; c < 8; c++ {
-			corner := shape.HalfExtents
-			for k := 0; k < 3; k++ {
-				if c&(1<<k) != 0 {
-					corner[k] = -corner[k]
-				}
-			}
-			depth = math.Max(depth, -terrainDistance(field, body.Transform.ToWorld(corner)))
-		}
-	case *actor.Sphere:
-		depth = shape.Radius - terrainDistance(field, body.Transform.Position)
-	case *actor.Capsule:
-		bottom, top := shape.Segment(body.Transform)
-		for k := 0; k <= 10; k++ {
-			depth = math.Max(depth, shape.Radius-terrainDistance(field, bottom.Add(top.Sub(bottom).Mul(float64(k)/10))))
-		}
-	}
-	return depth
-}
-
-// terrainDistance: the distance from the point to the triangles, negative under the terrain
-func terrainDistance(field *actor.Heightfield, p mgl64.Vec3) float64 {
-	best := math.Inf(1)
-	around := mgl64.Vec3{1, 100, 1}
-	for _, cell := range field.OverlapCells(actor.AABB{Min: p.Sub(around), Max: p.Add(around)}, nil) {
-		x, z := int(cell)/(field.ZSamples-1), int(cell)%(field.ZSamples-1)
-		for t := 0; t < 2; t++ {
-			triangle, _ := field.Triangle(x, z, t)
-			best = math.Min(best, p.Sub(closestOnTriangle(p, triangle)).Len())
-		}
-	}
-	if height, ok := field.HeightAt(p.X(), p.Z()); ok && p.Y() < height {
-		return -best
-	}
-	return best
-}
-
-// closestOnTriangle: the closest point of the triangle (Ericson 5.1.5)
-func closestOnTriangle(p mgl64.Vec3, triangle [3]mgl64.Vec3) mgl64.Vec3 {
-	a, b, c := triangle[0], triangle[1], triangle[2]
-	ab, ac, ap := b.Sub(a), c.Sub(a), p.Sub(a)
-	d1, d2 := ab.Dot(ap), ac.Dot(ap)
-	if d1 <= 0 && d2 <= 0 {
-		return a
-	}
-	bp := p.Sub(b)
-	d3, d4 := ab.Dot(bp), ac.Dot(bp)
-	if d3 >= 0 && d4 <= d3 {
-		return b
-	}
-	vc := d1*d4 - d3*d2
-	if vc <= 0 && d1 >= 0 && d3 <= 0 {
-		return a.Add(ab.Mul(d1 / (d1 - d3)))
-	}
-	cp := p.Sub(c)
-	d5, d6 := ab.Dot(cp), ac.Dot(cp)
-	if d6 >= 0 && d5 <= d6 {
-		return c
-	}
-	vb := d5*d2 - d1*d6
-	if vb <= 0 && d2 >= 0 && d6 <= 0 {
-		return a.Add(ac.Mul(d2 / (d2 - d6)))
-	}
-	va := d3*d6 - d5*d4
-	if va <= 0 && d4-d3 >= 0 && d5-d6 >= 0 {
-		return b.Add(c.Sub(b).Mul((d4 - d3) / ((d4 - d3) + (d5 - d6))))
-	}
-	denominator := 1 / (va + vb + vc)
-	return a.Add(ab.Mul(vb * denominator)).Add(ac.Mul(vc * denominator))
 }
