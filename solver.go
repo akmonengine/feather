@@ -207,7 +207,9 @@ type solver struct {
 	gravity         mgl64.Vec3
 	maxAngularSpeed float64
 	stage           func(c *contactConstraint)
+	jointStage      func(j Joint)
 	color           []int
+	items           []graphItem // the contacts then the joints, for the coloring
 	// stateIndex: the state of each body of the World (-1 if not awake); stateBody: the body of each state
 	stateIndex []int32
 	stateBody  []int32
@@ -230,6 +232,9 @@ type solverJobs struct {
 	push              func(c *contactConstraint)
 	relax             func(c *contactConstraint)
 	restitution       func(c *contactConstraint)
+	warmStartJoint    func(j Joint)
+	pushJoint         func(j Joint)
+	relaxJoint        func(j Joint)
 	color             func(i int)
 	prepareConstraint func(i int)
 	storeImpulses     func(i int)
@@ -248,12 +253,15 @@ func (s *solver) initJobs() {
 		push:              s.pushConstraint,
 		relax:             s.relaxConstraint,
 		restitution:       s.restitutionConstraint,
+		warmStartJoint:    func(j Joint) { j.warmStart(s) },
+		pushJoint:         func(j Joint) { j.solve(s, true) },
+		relaxJoint:        func(j Joint) { j.solve(s, false) },
 		prepareConstraint: s.prepareConstraint,
 		storeImpulses:     s.storeImpulsesConstraint,
 		finalize:          s.finalizeBody,
 		state:             s.stateOf,
 		color: func(i int) {
-			s.stage(&s.constraints[s.color[i]])
+			s.solveItem(s.color[i])
 		},
 	}
 }
@@ -328,8 +336,16 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	}
 	s.buildArticulations()
 
-	// ========== 4. Graph coloring ==========
-	s.graph.color(s.constraints, len(s.states))
+	// ========== 4. Graph coloring: the contacts, then the joints ==========
+	s.items = s.items[:0]
+	for i := range s.constraints {
+		s.items = append(s.items, graphItem{s.constraints[i].indexA, s.constraints[i].indexB})
+	}
+	for _, joint := range s.joints {
+		base := joint.base()
+		s.items = append(s.items, graphItem{base.indexA, base.indexB})
+	}
+	s.graph.color(s.items, len(s.states))
 }
 
 // isIsotropic: the same inertia on all axes (sphere, cube), the gyroscopic torque ω × Iω is null
@@ -753,12 +769,9 @@ func integrateRotation(q *mgl64.Quat, theta mgl64.Vec3) mgl64.Quat {
 	return mgl64.Quat{W: r.W * 1 / length, V: mgl64.Vec3{r.V[0] * inverse, r.V[1] * inverse, r.V[2] * inverse}}
 }
 
-// The joints are solved before the contacts, on a single goroutine
+// The joints are colored with the contacts (as in Box2D v3): solved with them, in parallel; the articulations before
 func (s *solver) warmStart() {
-	for _, joint := range s.joints {
-		joint.warmStart(s)
-	}
-	s.solveConstraints(s.jobs.warmStart)
+	s.solveConstraints(s.jobs.warmStart, s.jobs.warmStartJoint)
 }
 
 func (s *solver) warmStartConstraint(c *contactConstraint) {
@@ -780,11 +793,8 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 // the normals, it pushed the light bodies out from under a heavy one (at 4 substeps, 2 cubes 1 m out from under a slab
 // 400 times heavier)
 func (s *solver) push() {
-	for _, joint := range s.joints {
-		joint.solve(s, true)
-	}
 	s.solveArticulations(true)
-	s.solveConstraints(s.jobs.push)
+	s.solveConstraints(s.jobs.push, s.jobs.pushJoint)
 }
 
 func (s *solver) pushConstraint(c *contactConstraint) {
@@ -794,11 +804,8 @@ func (s *solver) pushConstraint(c *contactConstraint) {
 
 // relax solves the contacts again as rigid constraints (pushing the overlap out adds energy), then the friction
 func (s *solver) relax() {
-	for _, joint := range s.joints {
-		joint.solve(s, false)
-	}
 	s.solveArticulations(false)
-	s.solveConstraints(s.jobs.relax)
+	s.solveConstraints(s.jobs.relax, s.jobs.relaxJoint)
 }
 
 func (s *solver) relaxConstraint(c *contactConstraint) {
@@ -1099,7 +1106,7 @@ func clampDisk(impulse *[2]float64, radius float64) {
 // stopped it, its normal impulse of the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics): a pile of bodies
 // doesn't give back more than it absorbed
 func (s *solver) restitution() {
-	s.solveConstraints(s.jobs.restitution)
+	s.solveConstraints(s.jobs.restitution, nil)
 }
 
 func (s *solver) restitutionConstraint(c *contactConstraint) {

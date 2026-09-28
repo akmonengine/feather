@@ -2,8 +2,9 @@ package feather
 
 // Graph coloring, as in Box2D v3 (constraint_graph.c): the constraints of a color don't share any dynamic body,
 // so a color can be solved in parallel. The static bodies don't count, they never move.
-// The constraints are colored in the order of the pairs, then solved color by color: the result is the same
-// whatever the number of workers.
+// The contacts (in the order of the pairs) then the joints are colored, and solved color by color: the result is the
+// same whatever the number of workers. The joints of the articulations (solved together, before the colors) keep their
+// other rows in the colors.
 const (
 	// graphColorsCount: the constraints without a free color go to the overflow, solved sequentially
 	graphColorsCount = 16
@@ -23,8 +24,13 @@ const (
 )
 
 type graphColor struct {
-	constraints []int
-	bodies      []uint64 // bitset of the dynamic bodies used by the color
+	items  []int    // the items of the color: a contact constraint, or a joint after the constraints
+	bodies []uint64 // bitset of the dynamic bodies used by the color
+}
+
+// graphItem: the dynamic bodies of a constraint to color (-1 for a static body)
+type graphItem struct {
+	indexA, indexB int
 }
 
 type constraintGraph struct {
@@ -32,14 +38,14 @@ type constraintGraph struct {
 	overflow []int
 }
 
-// color assigns each constraint to the first color where both of its dynamic bodies are free. A contact with a static
-// body never takes the color 0 (as in Box2D v3): it is solved after the contacts between dynamic bodies, the ground has
-// the last word. Solved first, a body pressed by a heavier one would leave the step moving into the ground
-func (g *constraintGraph) color(constraints []contactConstraint, bodiesCount int) {
+// color assigns each item to the first color where both of its dynamic bodies are free. An item with a static body
+// never takes the color 0 (as in Box2D v3): it is solved after the contacts between dynamic bodies, the ground has the
+// last word. Solved first, a body pressed by a heavier one would leave the step moving into the ground
+func (g *constraintGraph) color(items []graphItem, bodiesCount int) {
 	words := (bodiesCount + 63) / 64
 	for i := range g.colors {
 		color := &g.colors[i]
-		color.constraints = color.constraints[:0]
+		color.items = color.items[:0]
 		if cap(color.bodies) < words {
 			color.bodies = make([]uint64, words)
 		}
@@ -48,8 +54,8 @@ func (g *constraintGraph) color(constraints []contactConstraint, bodiesCount int
 	}
 	g.overflow = g.overflow[:0]
 
-	for i := range constraints {
-		indexA, indexB := constraints[i].indexA, constraints[i].indexB
+	for i := range items {
+		indexA, indexB := items[i].indexA, items[i].indexB
 		colored := false
 		first := 0
 		if indexA < 0 || indexB < 0 {
@@ -62,7 +68,7 @@ func (g *constraintGraph) color(constraints []contactConstraint, bodiesCount int
 			}
 			use(color.bodies, indexA)
 			use(color.bodies, indexB)
-			color.constraints = append(color.constraints, i)
+			color.items = append(color.items, i)
 			colored = true
 			break
 		}
@@ -82,15 +88,27 @@ func use(bits []uint64, index int) {
 	}
 }
 
-// solveConstraints: the overflow first (sequential), then each color (parallel)
-func (s *solver) solveConstraints(solve func(c *contactConstraint)) {
+// solveConstraints: the overflow first (sequential), then each color (parallel). The joints go through the joint
+// stage (none for the restitution)
+func (s *solver) solveConstraints(solve func(c *contactConstraint), solveJoint func(j Joint)) {
+	s.stage, s.jointStage = solve, solveJoint
 	for _, i := range s.graph.overflow {
-		solve(&s.constraints[i])
+		s.solveItem(i)
 	}
-	s.stage = solve
 	for k := range s.graph.colors {
-		s.color = s.graph.colors[k].constraints
+		s.color = s.graph.colors[k].items
 		s.pool.run(len(s.color), constraintsChunk, s.jobs.color)
+	}
+}
+
+// solveItem: a contact constraint, or a joint after the constraints
+func (s *solver) solveItem(item int) {
+	if item < len(s.constraints) {
+		s.stage(&s.constraints[item])
+		return
+	}
+	if s.jointStage != nil {
+		s.jointStage(s.joints[item-len(s.constraints)])
 	}
 }
 

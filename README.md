@@ -15,10 +15,10 @@ All shapes live in the `actor` package and implement `actor.ShapeInterface`.
 
 | Shape | Definition | Narrow phase |
 |---|---|---|
-| `Sphere` | `Radius` | analytic against planes, spheres and capsules; GJK/EPA otherwise |
+| `Sphere` | `Radius` | analytic against planes, spheres and capsules; its center against the other shapes (GJK distance + radius) |
 | `Box` | `HalfExtents` | analytic against planes; GJK/EPA otherwise |
 | `Plane` | `Normal`, `Distance` (static only) | analytic |
-| `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; GJK/EPA otherwise |
+| `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; its segment against the other shapes (GJK distance + radius) |
 | `Heightfield` | a grid of heights (static only), 2 triangles per cell | GJK/EPA against each triangle under the body |
 
 ```go
@@ -51,7 +51,7 @@ while simulating do
             ω ← ω + h*I⁻¹(τ_ext - ω × Iω);
         end
         WarmStart(contacts);        // apply the impulses of the previous substep
-        Push(contacts);             // friction, then soft constraint: remove the overlap
+        Push(contacts);             // soft constraint: remove the overlap
         for n bodies do
             x ← x + h*v;
             q ← q + h/2 * ω*q;

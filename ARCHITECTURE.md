@@ -5,7 +5,7 @@
 feather/
 ├── world.go            # World.Step: collision detection, then solver
 ├── solver.go           # TGS Soft solver
-├── graph.go            # graph coloring of the contacts, for the parallel solver
+├── graph.go            # graph coloring of the contacts and the joints, for the parallel solver
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
 ├── joint.go            # joints: distance, ball, hinge, fixed
@@ -15,7 +15,7 @@ feather/
 ├── collision_capsule.go# spheres & capsules: closest points of segments
 ├── collision_heightfield.go # heightfields: triangles, inner edges, patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
-├── tree.go             # broad phase: dynamic AABB trees
+├── tree.go             # broad phase: dynamic AABB trees, the pairs kept from a step to the next
 ├── event.go            # collision, trigger & sleep events
 ├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
@@ -34,8 +34,8 @@ Step(dt)
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
 │   ├── events: pairs touching or overlapping (triggers are not solved)
-│   └── warm start: each point takes the impulses of the same point in the previous step
-├── Phase 2: solver (substeps: joints, then contacts), then restitution
+│   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
+├── Phase 2: solver (substeps: articulations, then contacts and joints by color), then restitution
 ├── continuous collision: the fast bodies are moved back to their first impact
 └── Phase 3: sleep islands & events
 ```
@@ -46,10 +46,12 @@ Step(dt)
 | any shape - plane | `CollideWithPlane` of the shape |
 | any shape - heightfield | each triangle under the body: GJK + EPA, inner edges, patches (up to 8 manifolds) |
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
+| sphere / capsule - other shape | GJK distance between the core (a point, a segment) and the shape, plus the radius; EPA only if the core is inside |
 | other pairs | GJK + EPA, then clipping of the contact points |
 
-Pair cache (like Jolt): if a body moved less than 1 mm and 2° relative to the other since their contact points were computed,
-the previous contact points are moved with the bodies, the collision detection doesn't run again.
+Pair cache (the body pair cache of Jolt): if a body moved less than 1 mm and 2° relative to the other since their contact
+points were computed, the previous contact points are moved with the bodies, the collision detection doesn't run again.
+The contacts of a pair are kept by its pair in the broad phase: no lookup.
 
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative speed of the bodies * dt against a
 static body.
@@ -66,16 +68,16 @@ the static and sleeping bodies share a state with no mass.
 - The broad phase, the narrow phase, the preparation of the contacts and the integration of the bodies:
   each body, pair or contact writes its result at its own index, the order of execution doesn't matter.
 - The pairs are sorted (index of the first body, then of the second body).
-- The solver is a Gauss-Seidel: a contact uses the result of the previous one. The contacts are colored
-  (like Box2D v3): the contacts of a color don't share any dynamic body, so a color is solved in parallel.
+- The solver is a Gauss-Seidel: a constraint uses the result of the previous one. The contacts and the joints are
+  colored (like Box2D v3): the constraints of a color don't share any dynamic body, so a color is solved in parallel.
   The colors are always solved in the same order: the result is the same bit for bit, whatever the number of workers.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Tests & benchmarks
 **The reference is Box3D** (Erin Catto, 2026): Feather must do at least as well on the same scenes at 60 Hz, Feather
 with 8 substeps (its setting for the games), Box3D with its default 4. The scenes come from Solver2D, extruded by 1 m in
-3D (the same supports, the same mass ratios). Box3D (`bench/box3d`) and Jolt (`bench/jolt`) are compiled outside the
-repository to measure the references; the values of Box3D are written in the tests with their date. The known gaps are
+3D (the same supports, the same mass ratios). The drivers of Box3D and Jolt on the same scenes are kept outside the
+repository; the values of Box3D are written in the tests with their date. The known gaps are
 logged, and followed by #821.
 
 Four levels, from the most precise to the widest:

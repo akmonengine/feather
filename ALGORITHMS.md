@@ -200,10 +200,10 @@ round and spinning fast can turn its point away before the end of the step, and 
 of long bodies, integrating it explicitly makes them gain energy.
 
 ### Parallel solver
-The solver is a Gauss-Seidel: each contact uses the velocities left by the previous one. To solve in parallel,
-the contacts are colored (Box2D v3, `constraint_graph.c`): each contact takes the first color where both of its dynamic
-bodies are free (the static bodies don't count). The contacts of a color don't share any body, the workers solve them
-at the same time. The contacts without a free color (16 colors) are solved first, on a single goroutine.
+The solver is a Gauss-Seidel: each constraint uses the velocities left by the previous one. To solve in parallel,
+the contacts and the joints are colored (Box2D v3, `constraint_graph.c`): each takes the first color where both of its
+dynamic bodies are free (the static bodies don't count). The constraints of a color don't share any body, the workers
+solve them at the same time. The constraints without a free color (16 colors) are solved first, on a single goroutine.
 A contact with a static body never takes the color 0 (as Box2D v3): it is solved after the contacts between dynamic
 bodies, the ground has the last word. Solved first, a light body pressed by a heavy one leaves the step moving into
 the ground.
@@ -221,7 +221,8 @@ the ground.
 
 ## Joints
 The joints are solved like the contacts (as in Box2D v3): warm starting, soft constraints in `Push` (60 Hz, damping ratio 2
-by default), rigid constraints in `Relax`. They are solved before the contacts, on a single goroutine.
+by default), rigid constraints in `Relax`. They are colored with the contacts and solved with them, in parallel; the
+articulations below are solved before the colors, on a single goroutine.
 
 ### Articulations
 The point constraints (the anchors kept together) of the joints linking dynamic bodies are solved together, exactly, by
