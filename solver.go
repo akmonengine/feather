@@ -35,11 +35,15 @@ const (
 	// MaxLinearSpeed of a body (m/s)
 	MaxLinearSpeed = 400.0
 
-	// MaxRotation of a body during one step (rad)
+	// MaxRotation of a body during one substep (rad), as in Box2D v3
 	MaxRotation = 0.25 * math.Pi
 
 	// StaticFrictionSpeed: under this sliding speed (m/s), a contact point uses the static friction
 	StaticFrictionSpeed = 0.01
+
+	// turnAnchorsCos: the anchors of a body turn if it turned more than 0.01 rad since the beginning of the step,
+	// cos(0.01 / 2). Under it, the error of a lever arm of 50 cm is 0.5 mm
+	turnAnchorsCos = 0.99998750002604166
 
 	// the contact hertz can't exceed 1/8 of the sub-steps rate, otherwise it becomes unstable
 	hertzPerSubstepRate = 0.125
@@ -95,8 +99,12 @@ type jacobian struct {
 }
 
 type contactPoint struct {
-	rA                 mgl64.Vec3 // from the center of mass of A
-	rB                 mgl64.Vec3 // from the center of mass of B
+	rA mgl64.Vec3 // from the center of mass of A
+	rB mgl64.Vec3 // from the center of mass of B
+	// coreA & coreB: the contact point without the radius of the rounded shapes (the center of a sphere, the axis of
+	// a capsule). A rolling sphere turns its surface, not its center: the separation follows the cores
+	coreA              mgl64.Vec3
+	coreB              mgl64.Vec3
 	baseSeparation     float64
 	normal             jacobian
 	tangents           [2]jacobian
@@ -118,6 +126,10 @@ type contactConstraint struct {
 	softness    softness
 	points      [constraint.MaxContactPoints]contactPoint
 	pointsCount int
+
+	// radius of the rounded shapes: the anchors turn with their cores
+	radiusA float64
+	radiusB float64
 
 	// rolling resistance, around both tangents
 	rollingResistance float64
@@ -279,7 +291,9 @@ func (s *solver) prepareConstraint(i int) {
 	dynamicFriction := constraint.ComputeDynamicFriction(manifold.BodyA.Material, manifold.BodyB.Material)
 
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
-	c.rollingResistance = constraint.ComputeRollingResistance(manifold.BodyA.Material, manifold.BodyB.Material, shapeRadius(manifold.BodyA.Shape), shapeRadius(manifold.BodyB.Shape))
+	radiusA, radiusB := shapeRadius(manifold.BodyA.Shape), shapeRadius(manifold.BodyB.Shape)
+	c.radiusA, c.radiusB = radiusA, radiusB
+	c.rollingResistance = constraint.ComputeRollingResistance(manifold.BodyA.Material, manifold.BodyB.Material, radiusA, radiusB)
 	if c.rollingResistance > 0 {
 		for k := range c.tangents {
 			c.rollingA[k] = stateA.inverseInertia.Mul3x1(c.tangents[k])
@@ -296,7 +310,11 @@ func (s *solver) prepareConstraint(i int) {
 
 		cp.rA = point.Position.Sub(manifold.BodyA.Transform.Position)
 		cp.rB = point.Position.Sub(manifold.BodyB.Transform.Position)
-		cp.baseSeparation = point.Separation - cp.rB.Sub(cp.rA).Dot(c.normal)
+		// the point on the surface of each body (Position is halfway), then its core
+		half := c.normal.Mul(point.Separation / 2)
+		cp.coreA = cp.rA.Sub(half).Sub(c.normal.Mul(radiusA))
+		cp.coreB = cp.rB.Add(half).Add(c.normal.Mul(radiusB))
+		cp.baseSeparation = point.Separation - cp.coreB.Sub(cp.coreA).Dot(c.normal)
 		cp.normal = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.normal)
 		cp.tangents[0] = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.tangents[0])
 		cp.tangents[1] = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.tangents[1])
@@ -316,7 +334,7 @@ func (s *solver) prepareConstraint(i int) {
 	}
 }
 
-// shapeRadius is the radius of the rounded shapes, for the rolling resistance
+// shapeRadius is the radius of the rounded shapes, for the rolling resistance and the separation
 func shapeRadius(shape actor.ShapeInterface) float64 {
 	switch shape := shape.(type) {
 	case *actor.Sphere:
@@ -385,8 +403,57 @@ func relativeVelocity(stateA, stateB *bodyState, rA, rB mgl64.Vec3) mgl64.Vec3 {
 // currentSeparation: the contact points are not computed again during the sub-steps,
 // the separation is updated from the motion of both bodies
 func currentSeparation(stateA, stateB *bodyState, cp *contactPoint, normal mgl64.Vec3) float64 {
-	delta := stateB.deltaPosition.Sub(stateA.deltaPosition).Add(stateB.deltaMatrix.Mul3x1(cp.rB)).Sub(stateA.deltaMatrix.Mul3x1(cp.rA))
+	delta := stateB.deltaPosition.Sub(stateA.deltaPosition).Add(stateB.deltaMatrix.Mul3x1(cp.coreB)).Sub(stateA.deltaMatrix.Mul3x1(cp.coreA))
 	return cp.baseSeparation + delta.Dot(normal)
+}
+
+// turnAnchors: the lever arms of the contacts turn with the bodies, once per substep (before Relax).
+// A body turning fast (a tumbling capsule) would otherwise be pushed at the place its contact had at the beginning
+// of the step: the solver would see the contact open while the body sinks.
+// The core of a rounded shape turns, its radius stays along the normal. A static body doesn't turn
+func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
+	turnA := stateA.body != nil && math.Abs(stateA.deltaRotation.W) < turnAnchorsCos
+	turnB := stateB.body != nil && math.Abs(stateB.deltaRotation.W) < turnAnchorsCos
+	if !turnA && !turnB {
+		return
+	}
+	for j := 0; j < c.pointsCount; j++ {
+		cp := &c.points[j]
+		if turnA {
+			rA := stateA.deltaMatrix.Mul3x1(cp.coreA).Add(c.normal.Mul(c.radiusA))
+			cp.normal.turnA(stateA, rA, c.normal)
+			cp.tangents[0].turnA(stateA, rA, c.tangents[0])
+			cp.tangents[1].turnA(stateA, rA, c.tangents[1])
+		}
+		if turnB {
+			rB := stateB.deltaMatrix.Mul3x1(cp.coreB).Sub(c.normal.Mul(c.radiusB))
+			cp.normal.turnB(stateB, rB, c.normal)
+			cp.tangents[0].turnB(stateB, rB, c.tangents[0])
+			cp.tangents[1].turnB(stateB, rB, c.tangents[1])
+		}
+		cp.normal.updateMass(stateA, stateB)
+		cp.tangents[0].updateMass(stateA, stateB)
+		cp.tangents[1].updateMass(stateA, stateB)
+	}
+}
+
+// turnA: the lever arm of A is rA
+func (j *jacobian) turnA(stateA *bodyState, rA, direction mgl64.Vec3) {
+	j.angularA = rA.Cross(direction)
+	j.impulseA = stateA.inverseInertia.Mul3x1(j.angularA)
+}
+
+// turnB: the lever arm of B is rB
+func (j *jacobian) turnB(stateB *bodyState, rB, direction mgl64.Vec3) {
+	j.angularB = rB.Cross(direction)
+	j.impulseB = stateB.inverseInertia.Mul3x1(j.angularB)
+}
+
+func (j *jacobian) updateMass(stateA, stateB *bodyState) {
+	j.mass = 0
+	if k := stateA.invMass + stateB.invMass + j.impulseA.Dot(j.angularA) + j.impulseB.Dot(j.angularB); k > 0 {
+		j.mass = 1 / k
+	}
 }
 
 func tangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
@@ -446,7 +513,7 @@ func skew(v mgl64.Vec3) mgl64.Mat3 {
 }
 
 func (s *solver) integratePositions(dt float64) {
-	s.maxAngularSpeed = MaxRotation / dt
+	s.maxAngularSpeed = MaxRotation * s.invH
 	s.forEachBody(s.jobs.integratePosition)
 }
 
@@ -550,6 +617,7 @@ func (s *solver) relax() {
 
 func (s *solver) relaxConstraint(c *contactConstraint) {
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
+	c.turnAnchors(stateA, stateB)
 
 	// ========== NORMAL ==========
 	for j := 0; j < c.pointsCount; j++ {

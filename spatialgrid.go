@@ -29,7 +29,8 @@ type Pair struct {
 type SpatialGrid struct {
 	cellSize float64
 	cells    []Cell
-	planes   Cell
+	// planes & heightfields: too large for the cells, tested with every body
+	planes Cell
 
 	// buffers reused between the steps, one per chunk of bodies
 	chunks []pairsChunk
@@ -71,7 +72,7 @@ func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
 
 // InsertAABB - Inserts a body into all cells of the given AABB (e.g. an enlarged AABB)
 func (sg *SpatialGrid) InsertAABB(bodyIndex int, body *actor.RigidBody, aabb actor.AABB) {
-	if _, ok := body.Shape.(*actor.Plane); ok {
+	if isLarge(body) {
 		sg.planes.bodyIndices = append(sg.planes.bodyIndices, bodyIndex)
 		return
 	}
@@ -150,12 +151,13 @@ func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.A
 
 	for bodyIdx := start; bodyIdx < end; bodyIdx++ {
 		bodyA := bodies[bodyIdx]
-		if _, isPlane := bodyA.Shape.(*actor.Plane); isPlane {
+		if isLarge(bodyA) {
 			continue
 		}
 
 		for _, planeIdx := range sg.planes.bodyIndices {
-			if needsSolving(bodies[planeIdx], bodyA) {
+			_, isPlane := bodies[planeIdx].Shape.(*actor.Plane)
+			if needsSolving(bodies[planeIdx], bodyA) && (isPlane || boxes[planeIdx].Overlaps(boxes[bodyIdx])) {
 				chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[planeIdx], BodyB: bodyA})
 			}
 		}
@@ -210,6 +212,15 @@ func (sg *SpatialGrid) findPairsPool(bodies []*actor.RigidBody, boxes []actor.AA
 	}
 	sg.bodies, sg.boxes = nil, nil
 	return sg.pairs
+}
+
+// isLarge: planes & heightfields are not in the cells of the grid
+func isLarge(body *actor.RigidBody) bool {
+	switch body.Shape.(type) {
+	case *actor.Plane, *actor.Heightfield:
+		return true
+	}
+	return false
 }
 
 // needsSolving - At least one body must be dynamic and awake

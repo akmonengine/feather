@@ -183,7 +183,7 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 	}
 }
 
-// CollideWithPlane returns the corners of the box closer to the plane than the margin, 4 at most
+// CollideWithPlane returns the corners of the box closer to the plane than the margin
 func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	h := b.HalfExtents
 	localVertices := [8]mgl64.Vec3{
@@ -197,7 +197,6 @@ func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, my
 		{h.X(), h.Y(), h.Z()},
 	}
 
-	start := len(contacts)
 	for _, vertex := range localVertices {
 		worldVertex := myTransform.ToWorld(vertex)
 		separation := worldVertex.Dot(planeNormal) + planeDistance
@@ -208,10 +207,6 @@ func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, my
 			Position:   worldVertex.Sub(planeNormal.Mul(separation / 2)),
 			Separation: separation,
 		})
-	}
-
-	if len(contacts)-start > 4 {
-		contacts = contacts[:start+reduceTo4ContactPoints(contacts[start:], planeNormal)]
 	}
 
 	return contacts
@@ -366,65 +361,4 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, c
 // CollideWithPlane - Plane/Plane collision (not supported)
 func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	return contacts
-}
-
-// Helper to generate the tangent basis
-func getTangentBasis(normal mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
-	var tangent1 mgl64.Vec3
-	if math.Abs(normal.X()) > 0.9 {
-		tangent1 = mgl64.Vec3{0, 1, 0}
-	} else {
-		tangent1 = mgl64.Vec3{1, 0, 0}
-	}
-
-	tangent1 = tangent1.Sub(normal.Mul(tangent1.Dot(normal))).Normalize()
-	tangent2 := normal.Cross(tangent1).Normalize()
-
-	return tangent1, tangent2
-}
-
-// reduceTo4ContactPoints keeps the extreme points along both tangents, in place. Returns the count of points kept
-func reduceTo4ContactPoints(points []ContactPoint, normal mgl64.Vec3) int {
-	tangent1, tangent2 := getTangentBasis(normal)
-
-	minX, maxX, minY, maxY := 0, 0, 0, 0
-	minXval, maxXval := math.Inf(1), math.Inf(-1)
-	minYval, maxYval := math.Inf(1), math.Inf(-1)
-
-	for i, p := range points {
-		x := p.Position.Dot(tangent1)
-		y := p.Position.Dot(tangent2)
-
-		if x < minXval {
-			minXval, minX = x, i
-		}
-		if x > maxXval {
-			maxXval, maxX = x, i
-		}
-		if y < minYval {
-			minYval, minY = y, i
-		}
-		if y > maxYval {
-			maxYval, maxY = y, i
-		}
-	}
-
-	var kept [4]ContactPoint
-	indices := [4]int{minX, maxX, minY, maxY}
-	count := 0
-	for k, idx := range indices {
-		duplicate := false
-		for _, previous := range indices[:k] {
-			if previous == idx {
-				duplicate = true
-			}
-		}
-		if !duplicate {
-			kept[count] = points[idx]
-			count++
-		}
-	}
-	copy(points, kept[:count])
-
-	return count
 }

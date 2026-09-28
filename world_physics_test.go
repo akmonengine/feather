@@ -468,19 +468,21 @@ func TestRotationMatrix(t *testing.T) {
 func TestPairCache(t *testing.T) {
 	ground := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{2, 0.5, 2}, actor.BodyTypeStatic)
 	box := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0.3, 0.74, -0.2}, Rotation: mgl64.QuatRotate(0.3, mgl64.Vec3{0, 1, 0})}, cube(), actor.BodyTypeDynamic, 1)
-	var previous constraint.Manifold
-	if !collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, &previous) {
+	var previous [1]constraint.Manifold
+	if collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, previous[:]) == 0 {
 		t.Fatal("no contact")
 	}
 
 	// moved by 0.5 mm and 0.5°: the contact is reused, and matches the collision detection
 	box.Transform.Position = box.Transform.Position.Add(mgl64.Vec3{0.0003, -0.0004, 0})
 	box.Transform.Rotation = mgl64.QuatRotate(0.5*math.Pi/180, mgl64.Vec3{1, 0, 0}).Mul(box.Transform.Rotation)
-	var reused, fresh constraint.Manifold
-	if !reuseManifold(&previous, 0.02, &reused) {
+	var reused constraint.Manifold
+	var detected [1]constraint.Manifold
+	if !reuseManifold(&previous[0], 0.02, &reused) {
 		t.Fatal("the contact was not reused")
 	}
-	collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, &fresh)
+	collidePair(Pair{BodyA: ground, BodyB: box}, 0.02, detected[:])
+	fresh := detected[0]
 	if reused.Count != fresh.Count {
 		t.Fatalf("reused %d points, detection %d", reused.Count, fresh.Count)
 	}
@@ -501,13 +503,13 @@ func TestPairCache(t *testing.T) {
 
 	// moved by 2 mm: computed again
 	box.Transform.Position = box.Transform.Position.Add(mgl64.Vec3{0.002, 0, 0})
-	if reuseManifold(&previous, 0.02, &reused) {
+	if reuseManifold(&previous[0], 0.02, &reused) {
 		t.Error("the contact was reused after 2 mm")
 	}
 	// turned by 3°: computed again
 	box.Transform.Position = box.Transform.Position.Sub(mgl64.Vec3{0.002, 0, 0})
 	box.Transform.Rotation = mgl64.QuatRotate(3*math.Pi/180, mgl64.Vec3{0, 1, 0}).Mul(box.Transform.Rotation)
-	if reuseManifold(&previous, 0.02, &reused) {
+	if reuseManifold(&previous[0], 0.02, &reused) {
 		t.Error("the contact was reused after 3°")
 	}
 }
@@ -672,5 +674,74 @@ func TestImpulses(t *testing.T) {
 	simulate(ground, 0.2, nil)
 	if resting.Transform.Position.Y() < cubeHalf+0.1 {
 		t.Errorf("the impulse did not throw the box up: y=%.3f", resting.Transform.Position.Y())
+	}
+}
+
+// A sphere rolling fast hits a wall: its surface turns, not its center, so the contact holds
+func TestRollingSphereHitsWall(t *testing.T) {
+	for _, speed := range []float64{3, 6, 10} {
+		w := newScene(1)
+		addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Plane{Normal: mgl64.Vec3{0, 1, 0}}, actor.BodyTypeStatic, 0.6, 0)
+		addBody(w, mgl64.Vec3{3.5, 1, 0}, mgl64.QuatIdent(), &actor.Box{HalfExtents: mgl64.Vec3{0.5, 1, 2}}, actor.BodyTypeStatic, 0.6, 0)
+		sphere := addBody(w, mgl64.Vec3{0, 0.2, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: 0.2}, actor.BodyTypeDynamic, 0.6, 0)
+		sphere.Velocity = mgl64.Vec3{speed, 0, 0}
+		sphere.AngularVelocity = mgl64.Vec3{0, 0, -speed / 0.2}
+		worst := 0.0
+		simulate(w, 1, func() { worst = math.Max(worst, sphere.Transform.Position.X()+0.2-3) })
+		t.Logf("%.0f m/s: %.2f mm in the wall", speed, worst*1000)
+		if worst > 0.002 {
+			t.Errorf("%.0f m/s: the sphere went %.1f mm in the wall", speed, worst*1000)
+		}
+	}
+}
+
+// Boxes, spheres & capsules dropped on a slope, hitting each other and tumbling: no point goes under the ground.
+// The contacts keep the points about to touch, and follow the rotation of the bodies during the step
+func TestPileLandsWithoutSinking(t *testing.T) {
+	angle := 30 * math.Pi / 180
+	normal := mgl64.Vec3{-math.Sin(angle), math.Cos(angle), 0}
+	w := newScene(1)
+	addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Plane{Normal: normal}, actor.BodyTypeStatic, 0.6, 0)
+	r := rand.New(rand.NewSource(2))
+	var bodies []*actor.RigidBody
+	for i := 0; i < 60; i++ {
+		var shape actor.ShapeInterface = &actor.Box{HalfExtents: mgl64.Vec3{0.2 + 0.2*r.Float64(), 0.15, 0.25}}
+		switch i % 3 {
+		case 1:
+			shape = &actor.Sphere{Radius: 0.2}
+		case 2:
+			shape = &actor.Capsule{HalfHeight: 0.25, Radius: 0.12}
+		}
+		x, z := r.Float64()*8-4, r.Float64()*16-8
+		position := mgl64.Vec3{x, x*math.Tan(angle) + 1 + r.Float64()*3, z}
+		rotation := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.Float64(), r.Float64(), r.Float64()}.Normalize())
+		bodies = append(bodies, addBody(w, position, rotation, shape, actor.BodyTypeDynamic, 0.6, 0))
+	}
+	worst := 0.0
+	simulate(w, 4, func() {
+		for _, body := range bodies {
+			lowest := body.Transform.ToWorld(body.Shape.Support(body.Transform.Rotation.Conjugate().Rotate(normal.Mul(-1))))
+			worst = math.Max(worst, -lowest.Dot(normal))
+		}
+	})
+	t.Logf("worst depth %.2f mm", worst*1000)
+	if worst > 0.003 {
+		t.Errorf("a body went %.1f mm under the ground", worst*1000)
+	}
+}
+
+// The rotation is limited per substep (as in Box2D v3), not per step: a ball rolls as fast as the slope allows
+func TestFastRollingIsNotCapped(t *testing.T) {
+	angle := 30 * math.Pi / 180
+	normal := mgl64.Vec3{-math.Sin(angle), math.Cos(angle), 0}
+	w := newScene(1)
+	addBody(w, mgl64.Vec3{}, mgl64.QuatIdent(), &actor.Plane{Normal: normal}, actor.BodyTypeStatic, 0.6, 0)
+	ball := addBody(w, normal.Mul(0.12), mgl64.QuatIdent(), &actor.Sphere{Radius: 0.12}, actor.BodyTypeDynamic, 0.6, 0)
+	simulate(w, 2, nil)
+	// rolling without sliding: a = 5/7 g sin(angle)
+	want := 5.0 / 7 * sceneGravity * math.Sin(angle) * 2
+	t.Logf("speed %.3f m/s (want %.3f), spin %.1f rad/s", ball.Velocity.Len(), want, ball.AngularVelocity.Len())
+	if math.Abs(ball.Velocity.Len()-want) > 0.05 {
+		t.Errorf("speed %.3f m/s, want %.3f", ball.Velocity.Len(), want)
 	}
 }

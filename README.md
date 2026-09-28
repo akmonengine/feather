@@ -19,6 +19,7 @@ All shapes live in the `actor` package and implement `actor.ShapeInterface`.
 | `Box` | `HalfExtents` | analytic against planes; GJK/EPA otherwise |
 | `Plane` | `Normal`, `Distance` (static only) | analytic |
 | `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; GJK/EPA otherwise |
+| `Heightfield` | a grid of heights (static only), 2 triangles per cell | GJK/EPA against each triangle under the body |
 
 ```go
 body := actor.NewRigidBody(

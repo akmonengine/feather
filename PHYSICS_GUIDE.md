@@ -85,6 +85,22 @@ world.AddJoint(slider)
 - Its drives bring B to `DriveTargetPosition` and `DriveTargetRotation` (in the frame A).
 - The limits are soft: a huge force bends them a little (under 0.5° for 5 g at the end of an arm).
 
+### Terrain
+```go
+// the grid of the terrain: heights[x*zSamples+z], shared without copy
+field := actor.NewHeightfield(xSamples, zSamples, heights, mgl64.Vec3{0.5, 20, 0.5}) // 0.5 m between samples, heights * 20
+terrain := actor.NewRigidBody(actor.Transform{Rotation: mgl64.QuatIdent()}, field, actor.BodyTypeStatic, 0)
+world.AddBody(terrain)
+
+// after a change of the heights (or of field.Holes) in [minX, maxX] x [minZ, maxZ]
+world.UpdateHeightfield(terrain, minX, minZ, maxX, maxZ)
+```
+- A heightfield is static. The body is at the center of the grid, the heights along its Y axis.
+- The terrain is made of triangles: a finer grid gives finer contacts (a 2048x2048 grid follows the ground better than
+  512x512), the bodies slide on the flat parts without hitting the edges between the triangles.
+- `Holes[x*(zSamples-1)+z]`: a cell without triangles (a cave, a tunnel entrance).
+- `World.UpdateHeightfield` wakes up the bodies above the changed region, and computes their contacts again.
+
 ### Timestep & substeps
 ```go
 world := feather.World{

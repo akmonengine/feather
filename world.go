@@ -34,7 +34,7 @@ type World struct {
 	islands sleepIslands
 	// contacts of the previous step, to warm start the solver
 	contacts      []constraint.Manifold
-	contactsIndex map[pairKey]int
+	contactsIndex map[pairKey]contactsRange
 	previous      []constraint.Manifold
 	aabbs         []actor.AABB
 	// pairs of bodies linked by a joint that must not collide
@@ -43,7 +43,11 @@ type World struct {
 	// 2 buffers: one for the contacts of this step, one for the previous step
 	buffers [2][]constraint.Manifold
 	buffer  int
-	found   []bool
+	// the manifolds of the pair i are at offsets[i], counts[i] of them
+	offsets []int
+	counts  []int
+	// heightfields changed during this step: their contacts are computed again
+	changed []*actor.RigidBody
 
 	// workers of the step, and the parameters of the narrow phase job
 	workers    *workersHandle
@@ -160,6 +164,30 @@ func (w *World) Close() {
 	}
 }
 
+// UpdateHeightfield after a change of the heights or of the holes of the samples [minX, maxX] x [minZ, maxZ]
+// of a heightfield body: the terrain is updated, the sleeping bodies above the region wake up,
+// and the contacts with the terrain are computed again
+func (w *World) UpdateHeightfield(body *actor.RigidBody, minX, minZ, maxX, maxZ int) {
+	field := body.Shape.(*actor.Heightfield)
+	field.Update(minX, minZ, maxX, maxZ)
+	body.Shape.ComputeAABB(body.Transform)
+	w.changed = append(w.changed, body)
+
+	// the region in the local space of the terrain, around the changed samples
+	halfX, halfZ := float64(field.XSamples-1)/2, float64(field.ZSamples-1)/2
+	regionMinX, regionMaxX := (float64(minX-1)-halfX)*field.Scale.X(), (float64(maxX+1)-halfX)*field.Scale.X()
+	regionMinZ, regionMaxZ := (float64(minZ-1)-halfZ)*field.Scale.Z(), (float64(maxZ+1)-halfZ)*field.Scale.Z()
+	for _, other := range w.Bodies {
+		if !other.IsSleeping {
+			continue
+		}
+		bounds := localBounds(body.Transform, other.Shape.GetAABB())
+		if bounds.Max.X() >= regionMinX && bounds.Min.X() <= regionMaxX && bounds.Max.Z() >= regionMinZ && bounds.Min.Z() <= regionMaxZ {
+			w.islands.wake(other)
+		}
+	}
+}
+
 // Contacts returns the contacts of the last step, with the impulses applied by the solver
 func (w *World) Contacts() []constraint.Manifold {
 	return w.contacts
@@ -234,23 +262,30 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	}
 	w.pairs = w.SpatialGrid.findPairsPool(w.Bodies, w.aabbs, pool)
 
-	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start)
+	// Narrow phase, in a buffer reused every 2 steps (the previous step is needed for the warm start).
+	// Each pair has its own place: 1 manifold, MaxManifoldsPerPair against a heightfield
 	w.previous = w.contacts
 	w.buffer = 1 - w.buffer
-	if cap(w.buffers[w.buffer]) < len(w.pairs) {
-		w.buffers[w.buffer] = make([]constraint.Manifold, len(w.pairs))
+	if cap(w.offsets) < len(w.pairs)+1 {
+		w.offsets = make([]int, len(w.pairs)+1)
+		w.counts = make([]int, len(w.pairs))
 	}
-	if cap(w.found) < len(w.pairs) {
-		w.found = make([]bool, len(w.pairs))
+	w.offsets, w.counts = w.offsets[:len(w.pairs)+1], w.counts[:len(w.pairs)]
+	for i, pair := range w.pairs {
+		w.offsets[i+1] = w.offsets[i] + manifoldsOf(pair)
 	}
-	w.manifolds = w.buffers[w.buffer][:len(w.pairs)]
-	w.found = w.found[:len(w.pairs)]
+	total := w.offsets[len(w.pairs)]
+	if cap(w.buffers[w.buffer]) < total {
+		w.buffers[w.buffer] = make([]constraint.Manifold, total)
+	}
+	w.manifolds = w.buffers[w.buffer][:total]
 	if w.collideJob == nil {
 		w.collideJob = w.collide
 	}
 	pool.run(len(w.pairs), pairsPerChunk, w.collideJob)
+	w.changed = w.changed[:0]
 
-	return compactManifolds(w.manifolds, w.found)
+	return compactManifolds(w.manifolds, w.offsets, w.counts)
 }
 
 // activeJoints: the joints with at least one awake dynamic body
@@ -279,24 +314,40 @@ func (w *World) computeAABB(i int) {
 // collide the pair i. The triggers only need the real overlaps, the other pairs get speculative contacts
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
+	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
 	if w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
-		w.found[i] = false
+		w.counts[i] = 0
 		return
 	}
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
 		margin = SpeculativeDistance + relativeSpeed(pair.BodyA, pair.BodyB)*w.dt
 
-		// pair cache: the contact of the previous step, if the bodies barely moved relative to each other
-		if k, ok := w.contactsIndex[makePairKey(pair.BodyA, pair.BodyB)]; ok {
-			previous := &w.previous[k]
-			if previous.BodyA == pair.BodyA && reuseManifold(previous, margin, &w.manifolds[i]) {
-				w.found[i] = true
+		// pair cache: the contacts of the previous step, if the bodies barely moved relative to each other
+		if r, ok := w.contactsIndex[makePairKey(pair.BodyA, pair.BodyB)]; ok && w.previous[r.first].BodyA == pair.BodyA && !w.isChanged(pair) {
+			count := 0
+			for k := r.first; k < r.first+r.count && count < len(out); k++ {
+				if reuseManifold(&w.previous[k], margin, &out[count]) {
+					count++
+				}
+			}
+			if count > 0 {
+				w.counts[i] = count
 				return
 			}
 		}
 	}
-	w.found[i] = collidePair(pair, margin, &w.manifolds[i])
+	w.counts[i] = collidePair(pair, margin, out)
+}
+
+// isChanged: a body of the pair is a heightfield changed during this step
+func (w *World) isChanged(pair Pair) bool {
+	for _, body := range w.changed {
+		if body == pair.BodyA || body == pair.BodyB {
+			return true
+		}
+	}
+	return false
 }
 
 // reach is the distance a body can travel during dt, plus the speculative distance
@@ -322,49 +373,61 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 }
 
 // warmStart: a contact point takes the impulses of the closest point of the previous step
-// (in the local space of body A)
+// (in the local space of body A), among the manifolds of the same pair
 func (w *World) warmStart(manifolds []constraint.Manifold) {
 	for i := range manifolds {
 		manifold := &manifolds[i]
-		k, ok := w.contactsIndex[makePairKey(manifold.BodyA, manifold.BodyB)]
-		if !ok {
-			continue
-		}
-		previous := &w.previous[k]
-		if previous.BodyA != manifold.BodyA {
+		r, ok := w.contactsIndex[makePairKey(manifold.BodyA, manifold.BodyB)]
+		if !ok || w.previous[r.first].BodyA != manifold.BodyA {
 			continue
 		}
 
-		used := [constraint.MaxContactPoints]bool{}
+		used := [MaxManifoldsPerPair][constraint.MaxContactPoints]bool{}
 		for j := 0; j < manifold.Count; j++ {
 			local := manifold.Points[j].LocalAnchorA
-			closest, closestDistance := -1, contactMatchDistance*contactMatchDistance
-			for o := 0; o < previous.Count; o++ {
-				if used[o] {
-					continue
-				}
-				distance := previous.Points[o].LocalAnchorA.Sub(local).LenSqr()
-				if distance <= closestDistance {
-					closest, closestDistance = o, distance
+			closestManifold, closest, closestDistance := -1, -1, contactMatchDistance*contactMatchDistance
+			for k := 0; k < r.count; k++ {
+				previous := &w.previous[r.first+k]
+				for o := 0; o < previous.Count; o++ {
+					if used[k][o] {
+						continue
+					}
+					distance := previous.Points[o].LocalAnchorA.Sub(local).LenSqr()
+					if distance <= closestDistance {
+						closestManifold, closest, closestDistance = k, o, distance
+					}
 				}
 			}
 
 			if closest >= 0 {
-				used[closest] = true
-				manifold.Points[j].NormalImpulse = previous.Points[closest].NormalImpulse
-				manifold.Points[j].TangentImpulse = previous.Points[closest].TangentImpulse
+				used[closestManifold][closest] = true
+				point := &w.previous[r.first+closestManifold].Points[closest]
+				manifold.Points[j].NormalImpulse = point.NormalImpulse
+				manifold.Points[j].TangentImpulse = point.TangentImpulse
 			}
 		}
 	}
 }
 
+// contactsRange: the manifolds of a pair follow each other in the contacts
+type contactsRange struct {
+	first int
+	count int
+}
+
 func (w *World) indexContacts() {
 	if w.contactsIndex == nil {
-		w.contactsIndex = make(map[pairKey]int)
+		w.contactsIndex = make(map[pairKey]contactsRange)
 	}
 	clear(w.contactsIndex)
 	for i := range w.contacts {
-		w.contactsIndex[makePairKey(w.contacts[i].BodyA, w.contacts[i].BodyB)] = i
+		key := makePairKey(w.contacts[i].BodyA, w.contacts[i].BodyB)
+		r, ok := w.contactsIndex[key]
+		if !ok {
+			r.first = i
+		}
+		r.count++
+		w.contactsIndex[key] = r
 	}
 }
 

@@ -37,27 +37,51 @@ func NarrowPhase(pairs []Pair, workersCount int) []constraint.Manifold {
 }
 
 // narrowPhase runs Collide on each pair in parallel.
-// Each result is written at the index of its pair, so the order never depends on the workers
+// Each pair writes its manifolds at its own offset, so the order never depends on the workers
 func narrowPhase(pairs []Pair, workersCount int, margin func(a, b *actor.RigidBody) float64) []constraint.Manifold {
-	manifolds := make([]constraint.Manifold, len(pairs))
-	found := make([]bool, len(pairs))
+	offsets := make([]int, len(pairs)+1)
+	for i, pair := range pairs {
+		offsets[i+1] = offsets[i] + manifoldsOf(pair)
+	}
+	manifolds := make([]constraint.Manifold, offsets[len(pairs)])
+	counts := make([]int, len(pairs))
 	parallelFor(len(pairs), workersCount, func(i int) {
-		found[i] = collidePair(pairs[i], margin(pairs[i].BodyA, pairs[i].BodyB), &manifolds[i])
+		counts[i] = collidePair(pairs[i], margin(pairs[i].BodyA, pairs[i].BodyB), manifolds[offsets[i]:offsets[i+1]])
 	})
-	return compactManifolds(manifolds, found)
+	return compactManifolds(manifolds, offsets, counts)
+}
+
+// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a heightfield
+func manifoldsOf(pair Pair) int {
+	if isHeightfield(pair.BodyA) || isHeightfield(pair.BodyB) {
+		return MaxManifoldsPerPair
+	}
+	return 1
+}
+
+func isHeightfield(body *actor.RigidBody) bool {
+	_, ok := body.Shape.(*actor.Heightfield)
+	return ok
 }
 
 // collidePair: triggers keep only the real overlaps
-func collidePair(pair Pair, margin float64, m *constraint.Manifold) bool {
+func collidePair(pair Pair, margin float64, out []constraint.Manifold) int {
 	a, b := pair.BodyA, pair.BodyB
-	found := Collide(a, b, margin, m)
-	if found && (a.IsTrigger || b.IsTrigger) {
-		found = m.MinSeparation() < 0
+	count := CollideAll(a, b, margin, out)
+	if a.IsTrigger || b.IsTrigger {
+		n := 0
+		for k := 0; k < count; k++ {
+			if out[k].MinSeparation() < 0 {
+				out[n] = out[k]
+				n++
+			}
+		}
+		count = n
 	}
-	if found {
-		setLocalAnchors(m)
+	for k := 0; k < count; k++ {
+		setLocalAnchors(&out[k])
 	}
-	return found
+	return count
 }
 
 // setLocalAnchors stores the contact in the local spaces of the bodies, for the next step
@@ -114,12 +138,12 @@ func reuseManifold(previous *constraint.Manifold, margin float64, m *constraint.
 	return m.Count > 0
 }
 
-// compactManifolds keeps the manifolds found, in the same order
-func compactManifolds(manifolds []constraint.Manifold, found []bool) []constraint.Manifold {
+// compactManifolds keeps the manifolds found, in the same order: counts[i] manifolds at offsets[i] for the pair i
+func compactManifolds(manifolds []constraint.Manifold, offsets, counts []int) []constraint.Manifold {
 	n := 0
-	for i := range manifolds {
-		if found[i] {
-			manifolds[n] = manifolds[i]
+	for i, count := range counts {
+		for k := 0; k < count; k++ {
+			manifolds[n] = manifolds[offsets[i]+k]
 			n++
 		}
 	}
@@ -131,9 +155,38 @@ func compactManifolds(manifolds []constraint.Manifold, found []bool) []constrain
 // - planes: CollideWithPlane of the shape
 // - spheres & capsules: closest points of their segments (collision_capsule.go)
 // - other shapes: GJK/EPA, then the contact points are clipped (epa/manifold.go)
+//
+// Against a heightfield, a body can touch the terrain with several normals: Collide keeps the deepest patch,
+// CollideAll returns all of them
 func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
+	var manifolds [1]constraint.Manifold
+	found := CollideAll(a, b, margin, manifolds[:]) > 0
+	*m = manifolds[0]
+	return found
+}
+
+// CollideAll writes in manifolds the contacts between a and b (MaxManifoldsPerPair at most), and returns their count
+func CollideAll(a, b *actor.RigidBody, margin float64, manifolds []constraint.Manifold) int {
+	if len(manifolds) == 0 {
+		return 0
+	}
+	m := &manifolds[0]
 	m.Reset(a, b)
 
+	if field, ok := a.Shape.(*actor.Heightfield); ok {
+		return collideHeightfield(a, field, b, margin, false, manifolds)
+	}
+	if field, ok := b.Shape.(*actor.Heightfield); ok {
+		return collideHeightfield(b, field, a, margin, true, manifolds)
+	}
+	if collide(a, b, margin, m) {
+		return 1
+	}
+	return 0
+}
+
+// collide the convex shapes a & b
+func collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
 	if plane, ok := a.Shape.(*actor.Plane); ok {
 		return collidePlane(plane, b, margin, false, m)
 	}
@@ -161,19 +214,23 @@ func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 	return m.Count > 0
 }
 
-// planeContactsPool: the buffers given to CollideWithPlane, reused to avoid the allocations
+// planeBuffers: the buffers of collidePlane, reused to avoid the allocations
+type planeBuffers struct {
+	plane  actor.PlaneContact
+	points []constraint.ContactPoint
+}
+
 var planeContactsPool = sync.Pool{New: func() any {
-	contacts := make(actor.PlaneContact, 0, 8)
-	return &contacts
+	return &planeBuffers{plane: make(actor.PlaneContact, 0, 8), points: make([]constraint.ContactPoint, 0, 8)}
 }}
 
-// collidePlane keeps the order of the pair: if the plane is body B, the normal is reversed
+// collidePlane keeps the order of the pair: if the plane is body B, the normal is reversed.
+// The points of the shape are reduced to 4 like the other contacts: the deepest first
 func collidePlane(plane *actor.Plane, object *actor.RigidBody, margin float64, planeIsB bool, m *constraint.Manifold) bool {
-	buffer := planeContactsPool.Get().(*actor.PlaneContact)
-	defer planeContactsPool.Put(buffer)
-	points := object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin, (*buffer)[:0])
-	*buffer = points
-	if len(points) == 0 {
+	buffers := planeContactsPool.Get().(*planeBuffers)
+	defer planeContactsPool.Put(buffers)
+	buffers.plane = object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin, buffers.plane[:0])
+	if len(buffers.plane) == 0 {
 		return false
 	}
 
@@ -181,8 +238,10 @@ func collidePlane(plane *actor.Plane, object *actor.RigidBody, margin float64, p
 	if planeIsB {
 		m.Normal = plane.Normal.Mul(-1)
 	}
-	for _, p := range points {
-		m.Add(p.Position, p.Separation)
+	buffers.points = buffers.points[:0]
+	for _, p := range buffers.plane {
+		buffers.points = append(buffers.points, constraint.ContactPoint{Position: p.Position, Separation: p.Separation})
 	}
+	epa.Reduce(buffers.points, m.Normal, m)
 	return m.Count > 0
 }

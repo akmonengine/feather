@@ -12,9 +12,10 @@ feather/
 ├── joint_configurable.go # configurable joint: each axis locked, limited or free
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
+├── collision_heightfield.go # heightfields: triangles, inner edges, patches
 ├── spatialgrid.go      # broad phase: uniform grid
 ├── event.go            # collision, trigger & sleep events
-├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule)
+├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
 ├── gjk/                # GJK (overlap test, with margin)
 ├── epa/                # EPA (penetration depth) & contact points (manifold)
@@ -39,6 +40,7 @@ Step(dt)
 | Pair | Method |
 |------|--------|
 | any shape - plane | `CollideWithPlane` of the shape |
+| any shape - heightfield | each triangle under the body: GJK + EPA, inner edges, patches (up to 8 manifolds) |
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
 | other pairs | GJK + EPA, then clipping of the contact points |
 
@@ -46,7 +48,8 @@ Pair cache (like Jolt): if a body moved less than 1 mm and 2° relative to the o
 the previous contact points are moved with the bodies, the collision detection doesn't run again.
 
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm) + the relative speed of the bodies * dt.
-Each manifold has a normal (from A to B) and up to 4 points. Each point has its own separation (< 0 when the bodies overlap).
+Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
+(the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
 
 ## Solver
 See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dynamic bodies (`bodyState`):
@@ -64,5 +67,10 @@ the static and sleeping bodies share a state with no mass.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Current limitations
-- The broad phase is a uniform grid: very large and very small bodies in the same scene are slow.
+- The broad phase is a uniform grid: very large and very small bodies in the same scene are slow
+  (the planes & the heightfields are not in the grid, they are tested with every body).
+- A heightfield is a surface: a body entirely under it is not pushed up.
+- The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
+  triangle during the step, and sink by a few mm before the next step.
+- No friction around the normal: a ball spinning on itself on the ground never stops (no sleep).
 - No continuous collision for very fast rotating bodies (the speculative margin covers the translation).

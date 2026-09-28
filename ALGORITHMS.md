@@ -5,6 +5,7 @@
 3. [Contact points](#contact-points)
 4. [Solver](#solver)
 5. [Joints](#joints)
+6. [Heightfield](#heightfield)
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -54,6 +55,8 @@ From the normal of EPA, each body gives the feature facing the other body (a fac
 
 The deepest point has the separation of EPA, the other points are higher along the normal.
 The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most area.
+The distances and the areas are weighted by `1 / (1 + separation / 5 mm)` (like Jolt): a point far above the surface
+would hardly touch during the step, a point about to touch is kept. The contacts with a plane are reduced the same way.
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
 Parallel capsules get 2 points.
@@ -79,8 +82,17 @@ Restitution();
 
 The contact points are not computed again during the substeps: the separation is updated from the motion of both anchors.
 ````
-separation = baseSeparation + (ΔpB + ΔqB*rB - ΔpA - ΔqA*rA) · normal
+separation = baseSeparation + (ΔpB + ΔqB*coreB - ΔpA - ΔqA*coreA) · normal
 ````
+The anchors are the points on the surface of each body, without the radius of the rounded shapes
+(`core = surface ± radius * normal`): the center of a sphere, the axis of a capsule, the corner of a box.
+A rolling sphere turns its surface, not its center: with the point of its surface, its contacts would open while it
+rolls, and it would sink in the wall in front of it.
+
+The lever arms of the contacts turn with the bodies before each `Relax` (`turnAnchors`), when a body turned more than
+0.01 rad since the beginning of the step. A tumbling body (a capsule at 30 rad/s turns by 0.5 rad per step) would otherwise
+be pushed at the place of its contact at the beginning of the step: the solver would see the contact open while it sinks.
+The rotation of a body is limited to `MaxRotation` (π/4) per substep, as in Box2D v3.
 
 ### Soft constraint
 The contact is a spring + damper, with a frequency `ω = 2π * hertz` and a damping ratio `ζ`:
@@ -126,6 +138,7 @@ at the same time. The contacts without a free color (16 colors) are solved first
 | `RestitutionThreshold` | 1 m/s |
 | `SpeculativeDistance` | 2 cm |
 | `LinearSlop` | 5 mm |
+| `MaxRotation` | π/4 per substep |
 
 ## Joints
 The joints are solved like the contacts (as in Box2D v3): warm starting, soft constraints in `Push` (60 Hz, damping ratio 2
@@ -149,3 +162,24 @@ joint (as in PhysX).
 - **Configurable**: each axis chooses its row. Linear: 1 row along the axis of A (locked, or 2 limits), all locked = the
   point. Angular: the twist row, the cone if both swings are limited, else 1 row per swing
   (`atan2(-p.z, p.x)` around Y, `atan2(p.y, p.x)` around Z), all locked = the 3 angular rows.
+
+## Heightfield
+The terrain is a grid of heights, split in 2 triangles per cell (along the diagonal from (x, z) to (x+1, z+1)).
+The body is tested against the triangles under its AABB, one by one: the grid is cut in blocks of 16x16 cells with
+their lowest and highest heights, to skip the blocks far from the body.
+
+Each triangle is tested with GJK/EPA:
+- **Face**: always, the contact of the body with the plane of the triangle (`CollideWithPlane`), limited to the
+  points above the triangle. On a flat terrain, a body behaves exactly as on a plane.
+- **Inner edges**: a body sliding on the terrain must not hit the edges between the triangles. Each edge is active if it
+  is on a border or a hole, or if it bends down (convex) by more than 5° (like Jolt & PhysX). A contact on an inactive
+  edge (or vertex) takes the normal of its triangle. If the body is beside the triangle, above the edge, it keeps the
+  witness point of EPA, only if no other triangle has a contact with this normal.
+- **Active edges** (a ridge, a border): also the contact of EPA, with its normal. A capsule lying across a ridge touches
+  the ridge, and its ends can fall on both faces.
+
+The contacts are then grouped by normal: the contacts of triangles with less than 5° between their normals form a patch,
+a manifold of 4 points. A body touches the terrain with 8 patches at most (`MaxManifoldsPerPair`): a box in a valley
+gets one patch per slope. The contacts closest to the terrain at the end of the step come first (their separation minus
+the distance they travel towards the terrain), the others are dropped: a corner of a tumbling box, further but falling
+fast, comes before a corner moving away.

@@ -30,6 +30,10 @@ const (
 	epsilonDistance = 1e-9
 
 	epsilonLength = 1e-12
+
+	// reduceSlop: a point further than the surface by this distance counts half in the reduction (m).
+	// A speculative point far from the surface would hardly touch during the step (like Jolt)
+	reduceSlop = 0.005
 )
 
 type polygon struct {
@@ -235,7 +239,7 @@ func keepPoints(clipped *polygon, direction mgl64.Vec3, separation, margin float
 		count++
 	}
 
-	reduce(candidates[:count], direction, m)
+	Reduce(candidates[:count], direction, m)
 }
 
 // clipAgainstPlane keeps the part of the polygon (or segment) in front of the plane
@@ -272,8 +276,9 @@ func clipAgainstPlane(in *polygon, point, normal mgl64.Vec3, out *polygon) {
 	}
 }
 
-// reduce keeps 4 points: the deepest, the furthest from it, then the points adding the most area to the contact polygon
-func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.Manifold) {
+// Reduce adds 4 points to m: the deepest, the furthest from it, then the points adding the most area to the contact polygon.
+// The distances and the areas are weighted by the separation of the points: the points close to the surface first
+func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.Manifold) {
 	if len(points) <= constraint.MaxContactPoints {
 		for _, p := range points {
 			m.Add(p.Position, p.Separation)
@@ -292,7 +297,7 @@ func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 
 	farthest, best := -1, -1.0
 	for i, p := range points {
-		d := planar(p.Position.Sub(points[deepest].Position), normal).LenSqr()
+		d := planar(p.Position.Sub(points[deepest].Position), normal).LenSqr() * weight(p) * weight(p)
 		if d > best {
 			farthest, best = i, d
 		}
@@ -301,7 +306,7 @@ func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 
 	third, best := -1, -1.0
 	for i, p := range points {
-		area := math.Abs(signedArea(points[deepest].Position, points[farthest].Position, p.Position, normal))
+		area := math.Abs(signedArea(points[deepest].Position, points[farthest].Position, p.Position, normal)) * weight(p)
 		if area > best {
 			third, best = i, area
 		}
@@ -314,7 +319,7 @@ func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 	for i, p := range points {
 		for e := 0; e < 3; e++ {
 			// area added outside the edge e
-			added := -orientation * signedArea(points[triangle[e]].Position, points[triangle[(e+1)%3]].Position, p.Position, normal)
+			added := -orientation * signedArea(points[triangle[e]].Position, points[triangle[(e+1)%3]].Position, p.Position, normal) * weight(p)
 			if added > best {
 				fourth, best = i, added
 			}
@@ -327,6 +332,11 @@ func reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 	if fourth >= 0 {
 		m.Add(points[fourth].Position, points[fourth].Separation)
 	}
+}
+
+// weight of a point in the reduction: 1 if it touches, then lower with its separation
+func weight(p constraint.ContactPoint) float64 {
+	return 1 / (1 + math.Max(p.Separation, 0)/reduceSlop)
 }
 
 func planar(v, normal mgl64.Vec3) mgl64.Vec3 {

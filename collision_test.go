@@ -1,10 +1,12 @@
 package feather
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/constraint"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -568,5 +570,23 @@ func BenchmarkLargeWorldStep(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		world.Step(1.0 / 60.0)
+	}
+}
+
+// Against a plane, the contact keeps the deepest point of the shape, whatever its rotation
+func TestPlaneContactKeepsDeepestPoint(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	plane := createPlane(mgl64.Vec3{0, 1, 0}, 0)
+	for i := 0; i < 500; i++ {
+		rotation := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.Float64() - 0.5, r.Float64() - 0.5, r.Float64() - 0.5}.Normalize())
+		box := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0, 0.25, 0}, Rotation: rotation}, &actor.Box{HalfExtents: mgl64.Vec3{0.2, 0.15, 0.25}}, actor.BodyTypeDynamic, 1)
+		var m constraint.Manifold
+		if !Collide(plane, box, 0.4, &m) {
+			t.Fatal("no contact")
+		}
+		lowest := box.Transform.ToWorld(box.Shape.Support(rotation.Conjugate().Rotate(mgl64.Vec3{0, -1, 0}))).Y()
+		if math.Abs(m.MinSeparation()-lowest) > 1e-9 {
+			t.Fatalf("rotation %v: deepest point %.4f, the contact has %.4f", rotation, lowest, m.MinSeparation())
+		}
 	}
 }

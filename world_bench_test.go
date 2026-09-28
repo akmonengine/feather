@@ -48,6 +48,28 @@ func BenchmarkWorldStep(b *testing.B) {
 	}
 }
 
+// BenchmarkHeightfield: the pile of BenchmarkWorldStep on a flat terrain of 512x512 samples instead of a plane
+func BenchmarkHeightfield(b *testing.B) {
+	for _, ground := range []string{"plane", "terrain"} {
+		for _, workers := range []int{1, 8} {
+			b.Run(fmt.Sprintf("500_bodies_%s_%d_workers", ground, workers), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					w := benchScene(500, workers)
+					if ground == "terrain" {
+						field := actor.NewHeightfield(512, 512, make([]float32, 512*512), mgl64.Vec3{0.5, 1, 0.5})
+						w.Bodies[0] = actor.NewRigidBody(actor.Transform{Rotation: mgl64.QuatIdent()}, field, actor.BodyTypeStatic, 0)
+						w.Bodies[0].Material = w.Bodies[1].Material
+					}
+					b.StartTimer()
+					simulate(w, 1, nil)
+				}
+			})
+		}
+	}
+}
+
 // After the first steps (buffers growing), a step doesn't allocate
 func TestStepDoesNotAllocate(t *testing.T) {
 	if raceEnabled {
