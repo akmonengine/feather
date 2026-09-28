@@ -38,6 +38,12 @@ func narrow(a, b *actor.RigidBody) (bool, mgl64.Vec3, float64, int) {
 	return true, m.Normal, -m.MinSeparation(), m.Count
 }
 
+// the setting of Feather for the games: 60 Hz, 8 sub-steps
+const (
+	dt       = 1.0 / 60
+	substeps = 8
+)
+
 func world(workers int) *feather.World {
 	return &feather.World{
 		Gravity:  mgl64.Vec3{0, -g, 0},

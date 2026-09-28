@@ -45,6 +45,12 @@ func regressions(update bool) bool {
 	return false
 }
 
+// the setting AkmonEngine ran v0.2.0 with: 50 Hz, 12 sub-steps (v0.2.0 has no default)
+const (
+	dt       = 1.0 / 50
+	substeps = 12
+)
+
 func world(workers int) *feather.World {
 	return &feather.World{
 		Gravity:     mgl64.Vec3{0, -g, 0},

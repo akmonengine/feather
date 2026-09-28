@@ -16,14 +16,10 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const (
-	// Dt of a step (s): the default rate of Box3D, the reference. 8 substeps: the setting of Feather for the games
-	// (Box3D runs its default, 4). The contacts are springs of 30 Hz whatever the substeps: a light body under a load
-	// sinks by (mass ratio) g / ω² at rest, and more substeps make the stacks, the impacts and the far scenes better
-	Dt       = 1.0 / 60
-	substeps = 8
-	gravity  = 9.81
-)
+// Each version runs at its own setting (adapter_current.go, adapter_v020.go): Dt of a step and the substeps.
+// The contacts are springs of 30 Hz whatever the substeps: a light body under a load sinks by (mass ratio) g / ω² at
+// rest, and more substeps make the stacks, the impacts and the far scenes better
+const gravity = 9.81
 
 // Size of a scene
 type Size int
