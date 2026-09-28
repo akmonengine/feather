@@ -128,7 +128,7 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 
 	// ========== ANGULAR DRIVE ==========
 	if j.EnableAngularDrive && j.AngularDriveHertz > 0 {
-		c := rotationError(frameB, frameA.Mul(j.DriveTargetRotation))
+		c := rotationError(frameB, actor.MulQuat(&frameA, &j.DriveTargetRotation))
 		j.angularDriveImpulse = solveAngular3(stateA, stateB, c, j.angularDriveRow, true, j.angularDriveImpulse)
 	}
 
@@ -147,7 +147,7 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 			if j.LinearMotion[k] == MotionLocked {
 				continue
 			}
-			axis := frameA.Rotate(unitAxes[k])
+			axis := actor.Rotate(&frameA, unitAxes[k])
 			c := offset.Dot(axis) - j.DriveTargetPosition[k]
 			drive := j.linearDriveRow
 			j.linearDriveImpulses[k] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, drive.biasRate*c, drive, j.linearDriveImpulses[k], math.Inf(-1), math.Inf(1))
@@ -160,7 +160,7 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 		return
 	}
 	for k := 0; k < 3; k++ {
-		axis := frameA.Rotate(unitAxes[k])
+		axis := actor.Rotate(&frameA, unitAxes[k])
 		j.linearAxes[k] = axis
 		position := offset.Dot(axis)
 		switch j.LinearMotion[k] {
@@ -208,12 +208,12 @@ var swingAngles = [2]func(p mgl64.Vec3) float64{
 }
 
 func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, frameA, frameB mgl64.Quat, useBias bool) {
-	p := frameA.Conjugate().Rotate(frameB.Rotate(mgl64.Vec3{1, 0, 0}))
+	p := actor.RotateInverse(&frameA, actor.Rotate(&frameB, mgl64.Vec3{1, 0, 0}))
 
 	// both limited: elliptic cone
 	if j.SwingYMotion == MotionLimited && j.SwingZMotion == MotionLimited {
 		if c, axis, ok := swingLimit(p, j.SwingLimitY, j.SwingLimitZ); ok {
-			j.coneAxis = frameA.Rotate(axis)
+			j.coneAxis = actor.Rotate(&frameA, axis)
 			j.coneImpulse = j.solveAngularLimit(s, stateA, stateB, j.coneAxis, c, -1, j.coneImpulse, useBias)
 		}
 		return
@@ -229,7 +229,7 @@ func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, fra
 		if !ok {
 			continue
 		}
-		j.swingAxes[k] = frameA.Rotate(axis)
+		j.swingAxes[k] = actor.Rotate(&frameA, axis)
 		// the angle changes by rate per unit of angular velocity around the axis: the constraints are in angle / rate
 		if motions[k] == MotionLocked {
 			j.swingImpulses[k][0] = j.solveAngularEquality(stateA, stateB, j.swingAxes[k], angle/rate, 1, j.swingImpulses[k][0], useBias)
@@ -256,11 +256,12 @@ func solveAngular3(stateA, stateB *bodyState, c mgl64.Vec3, soft spring, useBias
 	if useBias {
 		bias, row = c.Mul(soft.biasRate), soft
 	}
-	k := stateA.inverseInertia.Add(stateB.inverseInertia)
-	if math.Abs(k.Det()) < 1e-30 {
+	k := actor.Add3(&stateA.inverseInertia, &stateB.inverseInertia)
+	if math.Abs(actor.Det3(&k)) < 1e-30 {
 		return accumulated
 	}
-	impulse := row.impulse3(k.Inv(), cdot, bias, accumulated)
+	inverse := actor.Inv3(&k)
+	impulse := row.impulse3(&inverse, cdot, bias, accumulated)
 	applyAngular(stateA, stateB, impulse)
 	return accumulated.Add(impulse)
 }

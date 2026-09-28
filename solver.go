@@ -94,23 +94,40 @@ func (s spring) impulse(mass, velocity, bias, accumulated float64) float64 {
 }
 
 // impulse3 of 3 rows solved together, with the inverse of their mass matrix
-func (s spring) impulse3(inverseMass mgl64.Mat3, velocity, bias, accumulated mgl64.Vec3) mgl64.Vec3 {
-	return inverseMass.Mul3x1(velocity.Add(bias)).Add(accumulated.Mul(s.gamma)).Mul(-1 / (1 + s.gamma))
+func (s spring) impulse3(inverseMass *mgl64.Mat3, velocity, bias, accumulated mgl64.Vec3) mgl64.Vec3 {
+	v := mgl64.Vec3{velocity[0] + bias[0], velocity[1] + bias[1], velocity[2] + bias[2]}
+	u := actor.MulMat3(inverseMass, v)
+	scale := -1 / (1 + s.gamma)
+	return mgl64.Vec3{(u[0] + accumulated[0]*s.gamma) * scale, (u[1] + accumulated[1]*s.gamma) * scale, (u[2] + accumulated[2]*s.gamma) * scale}
+}
+
+// skewTerm is [rX]x I [rY]x: the angular part of the mass matrix of a point constraint
+func skewTerm(inertia *mgl64.Mat3, rX, rY mgl64.Vec3) mgl64.Mat3 {
+	sx, sy := skew(rX), skew(rY)
+	t := actor.Mul3(&sx, inertia)
+	return actor.Mul3(&t, &sy)
 }
 
 // bodyState is the copy of a dynamic body used by the solver during a step
 type bodyState struct {
+	// the impulses read and write these 64 bytes: a cache line
 	body            *actor.RigidBody
 	velocity        mgl64.Vec3
 	angularVelocity mgl64.Vec3
-	deltaPosition   mgl64.Vec3 // since the beginning of the step
-	deltaRotation   mgl64.Quat // since the beginning of the step
-	deltaMatrix     mgl64.Mat3 // deltaRotation as a matrix, updated once per substep
 	invMass         float64
-	inverseInertia  mgl64.Mat3 // inverse inertia in world space, turned with the body during the step
-	startInertia    mgl64.Mat3 // inverse inertia in world space, at the beginning of the step
-	rotation        mgl64.Quat // at the beginning of the step
-	anisotropic     bool       // false if the inertia is the same on all axes: no gyroscopic torque, it doesn't turn
+
+	deltaPosition  mgl64.Vec3 // since the beginning of the step
+	deltaMatrix    mgl64.Mat3 // deltaRotation as a matrix, updated once per substep
+	deltaRotation  mgl64.Quat // since the beginning of the step
+	inverseInertia mgl64.Mat3 // inverse inertia in world space, turned with the body during the step
+	anisotropic    bool       // false if the inertia is the same on all axes: no gyroscopic torque, it doesn't turn
+}
+
+// bodyStart is what the solver keeps of a body at the beginning of the step, apart from its state: read by a few
+// bodies per substep (the ones turning, with an anisotropic inertia), the states stay compact for the contacts
+type bodyStart struct {
+	inertia  mgl64.Mat3 // inverse inertia in world space
+	rotation mgl64.Quat
 }
 
 // jacobian of a contact direction d: the angular part rA × d and rB × d,
@@ -174,6 +191,7 @@ type contactConstraint struct {
 
 type solver struct {
 	states      []bodyState
+	starts      []bodyStart
 	constraints []contactConstraint
 	joints      []Joint
 	// articulations: the trees of joints, solved together
@@ -284,8 +302,9 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	}
 	if cap(s.states) < len(s.stateBody) {
 		s.states = make([]bodyState, len(s.stateBody))
+		s.starts = make([]bodyStart, len(s.stateBody))
 	}
-	s.states = s.states[:len(s.stateBody)]
+	s.states, s.starts = s.states[:len(s.stateBody)], s.starts[:len(s.stateBody)]
 	s.bodies = bodies
 	s.pool.run(len(s.states), bodiesChunk, s.jobs.state)
 	s.bodies = nil
@@ -384,7 +403,13 @@ func (c *contactConstraint) prepareFriction(stateA, stateB *bodyState, staticFri
 	total := 0.0
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
-		weight := math.Min(math.Max(2-manifold.Points[j].Separation/SpeculativeDistance, minFrictionWeight), 1)
+		weight := 2 - manifold.Points[j].Separation/SpeculativeDistance
+		if weight < minFrictionWeight {
+			weight = minFrictionWeight
+		}
+		if weight > 1 {
+			weight = 1
+		}
 		centerA = centerA.Add(cp.coreA.Mul(weight))
 		centerB = centerB.Add(cp.coreB.Mul(weight))
 		total += weight
@@ -426,7 +451,7 @@ func (c *contactConstraint) makeFrictionRows(stateA, stateB *bodyState, rA, rB m
 		c.frictionMass = [3]float64{kyy / det, -kxy / det, kxx / det}
 	}
 	c.twistMass = 0
-	if k := c.normal.Dot(stateA.inverseInertia.Mul3x1(c.normal)) + c.normal.Dot(stateB.inverseInertia.Mul3x1(c.normal)); k > 0 {
+	if k := c.normal.Dot(actor.MulMat3(&stateA.inverseInertia, c.normal)) + c.normal.Dot(actor.MulMat3(&stateB.inverseInertia, c.normal)); k > 0 {
 		c.twistMass = 1 / k
 	}
 }
@@ -434,8 +459,8 @@ func (c *contactConstraint) makeFrictionRows(stateA, stateB *bodyState, rA, rB m
 // prepareRolling: the angular velocity given by a unit rolling impulse around both tangents, and its mass
 func (c *contactConstraint) prepareRolling(stateA, stateB *bodyState) {
 	for k := range c.tangents {
-		c.rollingA[k] = stateA.inverseInertia.Mul3x1(c.tangents[k])
-		c.rollingB[k] = stateB.inverseInertia.Mul3x1(c.tangents[k])
+		c.rollingA[k] = actor.MulMat3(&stateA.inverseInertia, c.tangents[k])
+		c.rollingB[k] = actor.MulMat3(&stateB.inverseInertia, c.tangents[k])
 		c.rollingMass[k] = 0
 		if mass := c.rollingA[k].Dot(c.tangents[k]) + c.rollingB[k].Dot(c.tangents[k]); mass > 0 {
 			c.rollingMass[k] = 1 / mass
@@ -475,6 +500,7 @@ func (s *solver) indexOf(body *actor.RigidBody) int {
 // stateOf fills the state of the body i
 func (s *solver) stateOf(i int) {
 	body := s.bodies[s.stateBody[i]]
+	inverseInertia := body.GetInverseInertiaWorld()
 	s.states[i] = bodyState{
 		body:            body,
 		velocity:        body.Velocity,
@@ -482,56 +508,69 @@ func (s *solver) stateOf(i int) {
 		deltaRotation:   mgl64.QuatIdent(),
 		deltaMatrix:     mgl64.Ident3(),
 		invMass:         body.InverseMass(),
-		inverseInertia:  body.GetInverseInertiaWorld(),
-		startInertia:    body.GetInverseInertiaWorld(),
-		rotation:        body.Transform.Rotation,
+		inverseInertia:  inverseInertia,
 		anisotropic:     !isIsotropic(body.InertiaLocal),
 	}
+	s.starts[i] = bodyStart{inertia: inverseInertia, rotation: body.Transform.Rotation}
 }
 
 // makeJacobian for an impulse along the direction, applied at rA and rB
 func makeJacobian(stateA, stateB *bodyState, rA, rB, direction mgl64.Vec3) jacobian {
-	j := jacobian{angularA: rA.Cross(direction), angularB: rB.Cross(direction)}
-	j.impulseA = stateA.inverseInertia.Mul3x1(j.angularA)
-	j.impulseB = stateB.inverseInertia.Mul3x1(j.angularB)
-
-	k := stateA.invMass + stateB.invMass + j.impulseA.Dot(j.angularA) + j.impulseB.Dot(j.angularB)
-	if k > 0 {
-		j.mass = 1 / k
-	}
+	var j jacobian
+	j.turnA(stateA, rA, direction)
+	j.turnB(stateB, rB, direction)
+	j.updateMass(stateA, stateB)
 	return j
 }
 
 // velocity of B relative to A along the direction of the jacobian
 func (j *jacobian) velocity(stateA, stateB *bodyState, direction mgl64.Vec3) float64 {
-	return stateB.velocity.Sub(stateA.velocity).Dot(direction) + stateB.angularVelocity.Dot(j.angularB) - stateA.angularVelocity.Dot(j.angularA)
+	vA, vB, wA, wB := &stateA.velocity, &stateB.velocity, &stateA.angularVelocity, &stateB.angularVelocity
+	return (vB[0]-vA[0])*direction[0] + (vB[1]-vA[1])*direction[1] + (vB[2]-vA[2])*direction[2] +
+		(wB[0]*j.angularB[0] + wB[1]*j.angularB[1] + wB[2]*j.angularB[2]) -
+		(wA[0]*j.angularA[0] + wA[1]*j.angularA[1] + wA[2]*j.angularA[2])
 }
 
-// apply the impulse λ along the direction: -λ on A, +λ on B
-// The static state is shared by all the static bodies: it is never written (it has no mass anyway)
+// apply the impulse λ along the direction: -λ on A, +λ on B.
+// The static state is shared by all the static bodies: it is never written (it has no mass anyway).
+// The components are written out: the vector methods go through the stack
 func (j *jacobian) apply(stateA, stateB *bodyState, direction mgl64.Vec3, lambda float64) {
 	if stateA.body != nil {
-		stateA.velocity = stateA.velocity.Sub(direction.Mul(lambda * stateA.invMass))
-		stateA.angularVelocity = stateA.angularVelocity.Sub(j.impulseA.Mul(lambda))
+		v, w, m := &stateA.velocity, &stateA.angularVelocity, lambda*stateA.invMass
+		v[0], v[1], v[2] = v[0]-direction[0]*m, v[1]-direction[1]*m, v[2]-direction[2]*m
+		w[0], w[1], w[2] = w[0]-j.impulseA[0]*lambda, w[1]-j.impulseA[1]*lambda, w[2]-j.impulseA[2]*lambda
 	}
 	if stateB.body != nil {
-		stateB.velocity = stateB.velocity.Add(direction.Mul(lambda * stateB.invMass))
-		stateB.angularVelocity = stateB.angularVelocity.Add(j.impulseB.Mul(lambda))
+		v, w, m := &stateB.velocity, &stateB.angularVelocity, lambda*stateB.invMass
+		v[0], v[1], v[2] = v[0]+direction[0]*m, v[1]+direction[1]*m, v[2]+direction[2]*m
+		w[0], w[1], w[2] = w[0]+j.impulseB[0]*lambda, w[1]+j.impulseB[1]*lambda, w[2]+j.impulseB[2]*lambda
 	}
 }
 
 // relativeVelocity of B relative to A, at the contact point
 func relativeVelocity(stateA, stateB *bodyState, rA, rB mgl64.Vec3) mgl64.Vec3 {
-	vA := stateA.velocity.Add(stateA.angularVelocity.Cross(rA))
-	vB := stateB.velocity.Add(stateB.angularVelocity.Cross(rB))
-	return vB.Sub(vA)
+	vA, wA, vB, wB := &stateA.velocity, &stateA.angularVelocity, &stateB.velocity, &stateB.angularVelocity
+	return mgl64.Vec3{
+		vB[0] + (wB[1]*rB[2] - wB[2]*rB[1]) - (vA[0] + (wA[1]*rA[2] - wA[2]*rA[1])),
+		vB[1] + (wB[2]*rB[0] - wB[0]*rB[2]) - (vA[1] + (wA[2]*rA[0] - wA[0]*rA[2])),
+		vB[2] + (wB[0]*rB[1] - wB[1]*rB[0]) - (vA[2] + (wA[0]*rA[1] - wA[1]*rA[0])),
+	}
 }
 
 // currentSeparation: the contact points are not computed again during the sub-steps,
 // the separation is updated from the motion of both bodies
 func currentSeparation(stateA, stateB *bodyState, cp *contactPoint, normal mgl64.Vec3) float64 {
-	delta := stateB.deltaPosition.Sub(stateA.deltaPosition).Add(stateB.deltaMatrix.Mul3x1(cp.coreB)).Sub(stateA.deltaMatrix.Mul3x1(cp.coreA))
-	return cp.baseSeparation + delta.Dot(normal)
+	// a static body doesn't move: its core stays (its delta is the identity)
+	coreA := cp.coreA
+	if stateA.body != nil {
+		coreA = actor.MulMat3(&stateA.deltaMatrix, cp.coreA)
+	}
+	m, c := &stateB.deltaMatrix, cp.coreB
+	pA, pB := &stateA.deltaPosition, &stateB.deltaPosition
+	x := pB[0] - pA[0] + (m[0]*c[0] + m[3]*c[1] + m[6]*c[2]) - coreA[0]
+	y := pB[1] - pA[1] + (m[1]*c[0] + m[4]*c[1] + m[7]*c[2]) - coreA[1]
+	z := pB[2] - pA[2] + (m[2]*c[0] + m[5]*c[1] + m[8]*c[2]) - coreA[2]
+	return cp.baseSeparation + (x*normal[0] + y*normal[1] + z*normal[2])
 }
 
 // turnAnchors: the lever arms of the contacts turn with the bodies, once per substep (before Relax).
@@ -547,20 +586,20 @@ func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
 		if turnA {
-			cp.normal.turnA(stateA, stateA.deltaMatrix.Mul3x1(cp.coreA).Add(c.normal.Mul(c.radiusA)), c.normal)
+			cp.normal.turnA(stateA, actor.MulMat3(&stateA.deltaMatrix, cp.coreA).Add(c.normal.Mul(c.radiusA)), c.normal)
 		}
 		if turnB {
-			cp.normal.turnB(stateB, stateB.deltaMatrix.Mul3x1(cp.coreB).Sub(c.normal.Mul(c.radiusB)), c.normal)
+			cp.normal.turnB(stateB, actor.MulMat3(&stateB.deltaMatrix, cp.coreB).Sub(c.normal.Mul(c.radiusB)), c.normal)
 		}
 		cp.normal.updateMass(stateA, stateB)
 	}
 	// the friction center turns with its bodies
 	coreA, coreB := c.centerCoreA, c.centerCoreB
 	if turnA {
-		coreA = stateA.deltaMatrix.Mul3x1(coreA)
+		coreA = actor.MulMat3(&stateA.deltaMatrix, coreA)
 	}
 	if turnB {
-		coreB = stateB.deltaMatrix.Mul3x1(coreB)
+		coreB = actor.MulMat3(&stateB.deltaMatrix, coreB)
 	}
 	rA, rB := c.frictionArms(coreA, coreB)
 	c.makeFrictionRows(stateA, stateB, rA, rB)
@@ -571,19 +610,23 @@ func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
 
 // turnA: the lever arm of A is rA
 func (j *jacobian) turnA(stateA *bodyState, rA, direction mgl64.Vec3) {
-	j.angularA = rA.Cross(direction)
-	j.impulseA = stateA.inverseInertia.Mul3x1(j.angularA)
+	a, m := &j.angularA, &stateA.inverseInertia
+	a[0], a[1], a[2] = rA[1]*direction[2]-rA[2]*direction[1], rA[2]*direction[0]-rA[0]*direction[2], rA[0]*direction[1]-rA[1]*direction[0]
+	j.impulseA = mgl64.Vec3{m[0]*a[0] + m[3]*a[1] + m[6]*a[2], m[1]*a[0] + m[4]*a[1] + m[7]*a[2], m[2]*a[0] + m[5]*a[1] + m[8]*a[2]}
 }
 
 // turnB: the lever arm of B is rB
 func (j *jacobian) turnB(stateB *bodyState, rB, direction mgl64.Vec3) {
-	j.angularB = rB.Cross(direction)
-	j.impulseB = stateB.inverseInertia.Mul3x1(j.angularB)
+	b, m := &j.angularB, &stateB.inverseInertia
+	b[0], b[1], b[2] = rB[1]*direction[2]-rB[2]*direction[1], rB[2]*direction[0]-rB[0]*direction[2], rB[0]*direction[1]-rB[1]*direction[0]
+	j.impulseB = mgl64.Vec3{m[0]*b[0] + m[3]*b[1] + m[6]*b[2], m[1]*b[0] + m[4]*b[1] + m[7]*b[2], m[2]*b[0] + m[5]*b[1] + m[8]*b[2]}
 }
 
 func (j *jacobian) updateMass(stateA, stateB *bodyState) {
 	j.mass = 0
-	if k := stateA.invMass + stateB.invMass + j.impulseA.Dot(j.angularA) + j.impulseB.Dot(j.angularB); k > 0 {
+	k := stateA.invMass + stateB.invMass + (j.impulseA[0]*j.angularA[0] + j.impulseA[1]*j.angularA[1] + j.impulseA[2]*j.angularA[2]) +
+		(j.impulseB[0]*j.angularB[0] + j.impulseB[1]*j.angularB[1] + j.impulseB[2]*j.angularB[2])
+	if k > 0 {
 		j.mass = 1 / k
 	}
 }
@@ -611,16 +654,19 @@ func (s *solver) integrateVelocity(i int) {
 	angularDamping := 1 / (1 + h*body.Material.AngularDamping)
 
 	// ========== LINEAR ==========
-	state.velocity = state.velocity.Mul(linearDamping).Add(gravity.Add(body.Force().Mul(state.invMass)).Mul(h))
+	v, force, invMass := &state.velocity, body.Force(), state.invMass
+	v[0] = v[0]*linearDamping + (gravity[0]+force[0]*invMass)*h
+	v[1] = v[1]*linearDamping + (gravity[1]+force[1]*invMass)*h
+	v[2] = v[2]*linearDamping + (gravity[2]+force[2]*invMass)*h
 
 	// ========== ANGULAR ==========
 	angularVelocity := state.angularVelocity
 	if state.anisotropic {
-		angularVelocity = gyroscopic(angularVelocity, state.deltaRotation.Mul(state.rotation).Normalize(), body.InertiaLocal, h)
+		angularVelocity = gyroscopic(angularVelocity, state.deltaRotation.Mul(s.starts[i].rotation).Normalize(), body.InertiaLocal, h)
 	}
-	state.angularVelocity = angularVelocity.Mul(angularDamping)
+	state.angularVelocity = mgl64.Vec3{angularVelocity[0] * angularDamping, angularVelocity[1] * angularDamping, angularVelocity[2] * angularDamping}
 	if torque := body.Torque(); torque != (mgl64.Vec3{}) {
-		state.angularVelocity = state.angularVelocity.Add(state.inverseInertia.Mul3x1(torque).Mul(h))
+		state.angularVelocity = state.angularVelocity.Add(actor.MulMat3(&state.inverseInertia, torque).Mul(h))
 	}
 }
 
@@ -652,25 +698,28 @@ func (s *solver) integratePositions(dt float64) {
 func (s *solver) integratePosition(i int) {
 	h, maxAngularSpeed := s.h, s.maxAngularSpeed
 	state := &s.states[i]
-	if speed := state.velocity.Len(); speed > MaxLinearSpeed {
-		state.velocity = state.velocity.Mul(MaxLinearSpeed / speed)
+	if state.velocity.LenSqr() > MaxLinearSpeed*MaxLinearSpeed {
+		state.velocity = state.velocity.Mul(MaxLinearSpeed / state.velocity.Len())
 	}
-	if speed := state.angularVelocity.Len(); speed > maxAngularSpeed {
-		state.angularVelocity = state.angularVelocity.Mul(maxAngularSpeed / speed)
+	if state.angularVelocity.LenSqr() > maxAngularSpeed*maxAngularSpeed {
+		state.angularVelocity = state.angularVelocity.Mul(maxAngularSpeed / state.angularVelocity.Len())
 	}
 
-	state.deltaPosition = state.deltaPosition.Add(state.velocity.Mul(h))
-	state.deltaRotation = integrateRotation(state.deltaRotation, state.angularVelocity.Mul(h))
-	state.deltaMatrix = rotationMatrix(state.deltaRotation)
+	p, v, w := &state.deltaPosition, &state.velocity, &state.angularVelocity
+	p[0], p[1], p[2] = p[0]+v[0]*h, p[1]+v[1]*h, p[2]+v[2]*h
+	state.deltaRotation = integrateRotation(&state.deltaRotation, mgl64.Vec3{w[0] * h, w[1] * h, w[2] * h})
+	state.deltaMatrix = rotationMatrix(&state.deltaRotation)
 
 	// the inertia turns with the body, as the anchors of its contacts (turnAnchors): I⁻¹ = ΔR I⁻¹start ΔRᵀ
 	if state.anisotropic && math.Abs(state.deltaRotation.W) < turnAnchorsCos {
-		state.inverseInertia = state.deltaMatrix.Mul3(state.startInertia).Mul3(state.deltaMatrix.Transpose())
+		turned := actor.Mul3(&state.deltaMatrix, &s.starts[i].inertia)
+		transposed := actor.Transpose3(&state.deltaMatrix)
+		state.inverseInertia = actor.Mul3(&turned, &transposed)
 	}
 }
 
 // rotationMatrix of a unit quaternion (column major)
-func rotationMatrix(q mgl64.Quat) mgl64.Mat3 {
+func rotationMatrix(q *mgl64.Quat) mgl64.Mat3 {
 	w, x, y, z := q.W, q.V[0], q.V[1], q.V[2]
 	return mgl64.Mat3{
 		1 - 2*(y*y+z*z), 2 * (x*y + w*z), 2 * (x*z - w*y),
@@ -679,10 +728,29 @@ func rotationMatrix(q mgl64.Quat) mgl64.Mat3 {
 	}
 }
 
-// integrateRotation for a small rotation vector: q + 0.5 * θ * q
-func integrateRotation(q mgl64.Quat, theta mgl64.Vec3) mgl64.Quat {
-	qDot := mgl64.Quat{W: 0, V: theta}.Mul(q).Scale(0.5)
-	return q.Add(qDot).Normalize()
+// integrateRotation for a small rotation vector: q + 0.5 * θ * q, then normalized. The arithmetic of mgl64
+// (Quat.Mul, Scale, Add, Normalize), written out: the methods are not inlined
+func integrateRotation(q *mgl64.Quat, theta mgl64.Vec3) mgl64.Quat {
+	// (0, θ) × q
+	qv, qw := &q.V, q.W
+	w := 0*qw - (theta[0]*qv[0] + theta[1]*qv[1] + theta[2]*qv[2])
+	x := theta[1]*qv[2] - theta[2]*qv[1] + qv[0]*0 + theta[0]*qw
+	y := theta[2]*qv[0] - theta[0]*qv[2] + qv[1]*0 + theta[1]*qw
+	z := theta[0]*qv[1] - theta[1]*qv[0] + qv[2]*0 + theta[2]*qw
+	// q + 0.5 (0, θ) q
+	r := mgl64.Quat{W: qw + w*0.5, V: mgl64.Vec3{qv[0] + x*0.5, qv[1] + y*0.5, qv[2] + z*0.5}}
+	length := math.Sqrt(r.W*r.W + r.V[0]*r.V[0] + r.V[1]*r.V[1] + r.V[2]*r.V[2])
+	if mgl64.FloatEqual(1, length) {
+		return r
+	}
+	if length == 0 {
+		return mgl64.QuatIdent()
+	}
+	if length == mgl64.InfPos {
+		length = mgl64.MaxValue
+	}
+	inverse := 1 / length
+	return mgl64.Quat{W: r.W * 1 / length, V: mgl64.Vec3{r.V[0] * inverse, r.V[1] * inverse, r.V[2] * inverse}}
 }
 
 // The joints are solved before the contacts, on a single goroutine
@@ -750,6 +818,10 @@ func (s *solver) relaxConstraint(c *contactConstraint) {
 // to tip, and the rounding decides which way
 func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, soft bool) {
 	n := c.pointsCount
+	if n == 1 {
+		s.solveNormal(c, stateA, stateB, soft)
+		return
+	}
 	var block normalBlock
 	block.count = n
 	for i := 0; i < n; i++ {
@@ -759,7 +831,10 @@ func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, s
 		if separation > 0 {
 			bias = separation * s.invH
 		} else if soft {
-			bias = math.Max(c.spring.biasRate*separation, -ContactSpeed)
+			bias = c.spring.biasRate * separation
+			if bias < -ContactSpeed {
+				bias = -ContactSpeed
+			}
 			gamma = c.spring.gamma
 		}
 		for j := 0; j <= i; j++ {
@@ -777,6 +852,36 @@ func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, s
 		cp := &c.points[i]
 		cp.addNormalImpulse(stateA, stateB, c.normal, impulses[i]-cp.normalImpulse)
 	}
+}
+
+// solveNormal: a single point (a sphere, a corner), the block of one row: λ = max(0, -r / a), the same arithmetic as
+// the block solver, without its enumeration
+func (s *solver) solveNormal(c *contactConstraint, stateA, stateB *bodyState, soft bool) {
+	cp := &c.points[0]
+	separation := currentSeparation(stateA, stateB, cp, c.normal)
+	bias, gamma := 0.0, 0.0
+	if separation > 0 {
+		bias = separation * s.invH
+	} else if soft {
+		bias = c.spring.biasRate * separation
+		if bias < -ContactSpeed {
+			bias = -ContactSpeed
+		}
+		gamma = c.spring.gamma
+	}
+	k := stateA.invMass + stateB.invMass + cp.normal.angularA.Dot(cp.normal.impulseA) + cp.normal.angularB.Dot(cp.normal.impulseB)
+	previous := cp.normalImpulse
+	r := cp.normal.velocity(stateA, stateB, c.normal) + bias
+	r -= k * previous
+	a := k + (gamma*k + blockRegularization*k)
+	r -= blockRegularization * k * previous
+	impulse := 0.0
+	if a > 0 {
+		if lambda := -r / a; lambda > 0 {
+			impulse = lambda
+		}
+	}
+	cp.addNormalImpulse(stateA, stateB, c.normal, impulse-previous)
 }
 
 // normalBlock: the normal rows of a contact. Their accumulated impulses λ are the solution of the linear
@@ -890,7 +995,10 @@ func solveActive(a *[constraint.MaxContactPoints][constraint.MaxContactPoints]fl
 // addNormalImpulse: the accumulated impulse of a contact stays positive (it pushes, never pulls).
 // Returns the impulse applied
 func (cp *contactPoint) addNormalImpulse(stateA, stateB *bodyState, normal mgl64.Vec3, impulse float64) float64 {
-	accumulated := math.Max(cp.normalImpulse+impulse, 0)
+	accumulated := cp.normalImpulse + impulse
+	if accumulated <= 0 {
+		accumulated = 0
+	}
 	impulse = accumulated - cp.normalImpulse
 	cp.normalImpulse = accumulated
 	cp.totalNormalImpulse += impulse
@@ -930,10 +1038,17 @@ func (c *contactConstraint) solveFriction(stateA, stateB *bodyState) {
 	}
 
 	// twist
-	twistSpeed := c.normal.Dot(stateB.angularVelocity.Sub(stateA.angularVelocity))
+	wA, wB := &stateA.angularVelocity, &stateB.angularVelocity
+	twistSpeed := (wB[0]-wA[0])*c.normal[0] + (wB[1]-wA[1])*c.normal[1] + (wB[2]-wA[2])*c.normal[2]
 	previousTwist := c.twistImpulse
-	c.twistImpulse = math.Max(-c.friction*twistLimit, math.Min(c.friction*twistLimit, previousTwist-c.twistMass*twistSpeed))
-	c.applyTwist(stateA, stateB, c.twistImpulse-previousTwist)
+	twist, limit := previousTwist-c.twistMass*twistSpeed, c.friction*twistLimit
+	if twist > limit {
+		twist = limit
+	} else if twist < -limit {
+		twist = -limit
+	}
+	c.twistImpulse = twist
+	c.applyTwist(stateA, stateB, twist-previousTwist)
 
 	// both tangents, together
 	v0 := c.frictionRows[0].velocity(stateA, stateB, c.tangents[0])
@@ -949,11 +1064,18 @@ func (c *contactConstraint) solveFriction(stateA, stateB *bodyState) {
 
 // applyTwist: the angular impulse around the normal, -λ on A, +λ on B
 func (c *contactConstraint) applyTwist(stateA, stateB *bodyState, lambda float64) {
+	t := [3]float64{c.normal[0] * lambda, c.normal[1] * lambda, c.normal[2] * lambda}
 	if stateA.body != nil {
-		stateA.angularVelocity = stateA.angularVelocity.Sub(stateA.inverseInertia.Mul3x1(c.normal.Mul(lambda)))
+		w, m := &stateA.angularVelocity, &stateA.inverseInertia
+		w[0] -= m[0]*t[0] + m[3]*t[1] + m[6]*t[2]
+		w[1] -= m[1]*t[0] + m[4]*t[1] + m[7]*t[2]
+		w[2] -= m[2]*t[0] + m[5]*t[1] + m[8]*t[2]
 	}
 	if stateB.body != nil {
-		stateB.angularVelocity = stateB.angularVelocity.Add(stateB.inverseInertia.Mul3x1(c.normal.Mul(lambda)))
+		w, m := &stateB.angularVelocity, &stateB.inverseInertia
+		w[0] += m[0]*t[0] + m[3]*t[1] + m[6]*t[2]
+		w[1] += m[1]*t[0] + m[4]*t[1] + m[7]*t[2]
+		w[2] += m[2]*t[0] + m[5]*t[1] + m[8]*t[2]
 	}
 }
 
@@ -1025,7 +1147,7 @@ func (s *solver) finalizeBody(i int) {
 	state := &s.states[i]
 	body := state.body
 	body.Transform.Position = body.Transform.Position.Add(state.deltaPosition)
-	body.Transform.Rotation = state.deltaRotation.Mul(state.rotation).Normalize()
+	body.Transform.Rotation = state.deltaRotation.Mul(s.starts[i].rotation).Normalize()
 	body.Velocity = state.velocity
 	body.AngularVelocity = state.angularVelocity
 	body.ClearForces()

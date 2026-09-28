@@ -18,7 +18,7 @@ func (a AABB) ContainsPoint(point mgl64.Vec3) bool {
 // Overlaps checks if two AABBs overlap
 func (a AABB) Overlaps(other AABB) bool {
 	// AABBs overlap if they overlap on all three axes
-	return a.Max.X() >= other.Min.X() && a.Min.X() <= other.Max.X() &&
-		a.Max.Y() >= other.Min.Y() && a.Min.Y() <= other.Max.Y() &&
-		a.Max.Z() >= other.Min.Z() && a.Min.Z() <= other.Max.Z()
+	return a.Max[0] >= other.Min[0] && a.Min[0] <= other.Max[0] &&
+		a.Max[1] >= other.Min[1] && a.Min[1] <= other.Max[1] &&
+		a.Max[2] >= other.Min[2] && a.Min[2] <= other.Max[2]
 }

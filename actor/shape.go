@@ -49,22 +49,21 @@ func (b *Box) ComputeAABB(transform Transform) AABB {
 		{+b.HalfExtents.X(), +b.HalfExtents.Y(), +b.HalfExtents.Z()},
 	}
 
-	// the first corner initializes min & max
-	worldCorner := transform.Rotation.Rotate(corners[0]).Add(transform.Position)
+	// the first corner initializes min & max, the other corners extend the AABB
+	q, position := &transform.Rotation, transform.Position
+	worldCorner := Rotate(q, corners[0]).Add(position)
 	min := worldCorner
 	max := worldCorner
-
-	// the other corners extend the AABB
 	for i := 1; i < 8; i++ {
-		worldCorner = transform.Rotation.Rotate(corners[i]).Add(transform.Position)
-
-		min[0] = math.Min(min[0], worldCorner[0])
-		min[1] = math.Min(min[1], worldCorner[1])
-		min[2] = math.Min(min[2], worldCorner[2])
-
-		max[0] = math.Max(max[0], worldCorner[0])
-		max[1] = math.Max(max[1], worldCorner[1])
-		max[2] = math.Max(max[2], worldCorner[2])
+		worldCorner = Rotate(q, corners[i]).Add(position)
+		for k := 0; k < 3; k++ {
+			if worldCorner[k] < min[k] {
+				min[k] = worldCorner[k]
+			}
+			if worldCorner[k] > max[k] {
+				max[k] = worldCorner[k]
+			}
+		}
 	}
 
 	return AABB{Min: min, Max: max}
@@ -172,10 +171,11 @@ func (b *Box) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, cou
 func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	var face [8]mgl64.Vec3
 	var count int
-	b.GetContactFeature(myTransform.Rotation.Conjugate().Rotate(planeNormal.Mul(-1)), &face, &count)
+	q := &myTransform.Rotation
+	b.GetContactFeature(RotateInverse(q, planeNormal.Mul(-1)), &face, &count)
 
 	for _, vertex := range face[:count] {
-		worldVertex := myTransform.ToWorld(vertex)
+		worldVertex := myTransform.Position.Add(Rotate(q, vertex))
 		separation := worldVertex.Dot(planeNormal) + planeDistance
 		if separation > margin {
 			continue

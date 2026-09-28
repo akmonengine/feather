@@ -16,11 +16,14 @@ with its AABB enlarged by `AABBMargin` (0.1 m): while it moves inside, the tree 
 touches it. The leaves are inserted by the surface area heuristic and the tree is kept balanced by rotations
 (Box2D v2.4). The planes and the heightfields are not in the trees: they are tested against every awake body.
 
-The pairs come from a traversal of the dynamic tree against itself and against the static tree (the tree-versus-tree
-collision of `btDbvt`): each pair of overlapping nodes is visited once, a subtree without any awake body is pruned (a
-resting scene costs nothing). The pairs of nodes near the roots are split into batches for the workers. The pairs are
-then sorted by the index of their first body (a counting sort): the list is the same whatever the workers, and the
-same as the former uniform grid gave, so the solver keeps its order and its results bit for bit.
+The pairs of bodies whose stored AABBs overlap are kept from a step to the next (the persistent pairs of Box2D v3):
+only a body put in a tree since the last step (a dynamic body out of its enlarged AABB, a static body moved by the
+game, a body added) queries the trees for its pairs, and a pair is dropped when its stored AABBs no longer overlap.
+A resting scene costs nothing, an awake one only pays for the bodies which left their enlarged AABB (2000 bodies
+settling: 1.6 ms for a traversal of the trees against each other, 0.3 ms with the pairs kept). The pairs of the step
+are those whose exact AABBs overlap, with an awake dynamic body, sorted by the index of their first body (a counting
+sort): the list is the same as a search from scratch, and the same as the former uniform grid gave, so the solver keeps
+its order and its results bit for bit.
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -81,6 +84,11 @@ A box touches a plane (or the face of a triangle) with its supporting face, the 
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
 Parallel capsules get 2 points.
+Against the other shapes, a rounded shape is its **core** with a radius (the convex radius of Bullet & Jolt): a point
+for a sphere, a segment for a capsule. GJK gives the distance and the closest points of the cores (exact against a
+polytope, in 3 or 4 iterations), the radii and the margin are added along their direction, and the contact points are
+clipped as above. EPA runs on the full shapes only if the cores overlap (the center of a sphere inside a box): on the
+rounded shape, it would tessellate it (13 iterations and 7 µs for a sphere against a box, against 1.8 µs).
 
 ## Solver
 TGS Soft, from Box2D v3 (Erin Catto, [Solver2D](https://box2d.org/posts/2024/02/solver2d/)), in 3D.

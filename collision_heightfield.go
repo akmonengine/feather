@@ -200,13 +200,8 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 
 // collideTriangle adds the contact of the body with the triangle of s.shape
 func (s *heightfieldScratch) collideTriangle(object *actor.RigidBody, edges uint8, margin float64) {
-	s.simplex.Reset()
-	proxyA, proxyB := gjk.NewProxy(&s.triangle), gjk.NewProxy(object)
-	if !gjk.GJKProxies(&proxyA, &proxyB, margin, &s.simplex) {
-		return
-	}
-	result, err := epa.EPAProxies(&proxyA, &proxyB, &s.simplex, margin)
-	if err != nil {
+	result, ok := penetration(&s.triangle, object, margin, &s.simplex)
+	if !ok {
 		return
 	}
 

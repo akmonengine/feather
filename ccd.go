@@ -77,7 +77,7 @@ func (w *World) continuous(s *solver, dt float64) {
 			}
 			minExtent, maxExtent := shapeExtents(body.Shape)
 			motion := sweep{
-				start: actor.Transform{Position: body.Transform.Position.Sub(state.deltaPosition), Rotation: state.rotation},
+				start: actor.Transform{Position: body.Transform.Position.Sub(state.deltaPosition), Rotation: s.starts[i].rotation},
 				end:   body.Transform,
 			}
 			motion.angle = rotationAngle(state.deltaRotation)

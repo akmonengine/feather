@@ -8,6 +8,7 @@ import (
 	"github.com/akmonengine/feather/constraint"
 	"github.com/akmonengine/feather/epa"
 	"github.com/akmonengine/feather/gjk"
+	"github.com/go-gl/mathgl/mgl64"
 )
 
 const (
@@ -106,26 +107,28 @@ func setLocalAnchors(m *constraint.Manifold) {
 // the previous contact points are moved with the bodies instead of running the collision detection again
 // (like the body pair cache of Jolt). The separation of each point is measured again.
 func reuseManifold(previous *constraint.Manifold, margin float64, m *constraint.Manifold) bool {
-	transformA, transformB := previous.BodyA.Transform, previous.BodyB.Transform
+	transformA, transformB := &previous.BodyA.Transform, &previous.BodyB.Transform
+	rotationA := &transformA.Rotation
 
-	relativePosition := transformA.ToLocal(transformB.Position)
+	relativePosition := actor.RotateInverse(rotationA, transformB.Position.Sub(transformA.Position))
 	if relativePosition.Sub(previous.RelativePosition).LenSqr() > pairCacheMaxDeltaPosition*pairCacheMaxDeltaPosition {
 		return false
 	}
-	relativeRotation := transformA.Rotation.Conjugate().Mul(transformB.Rotation)
+	conjugateA := mgl64.Quat{W: rotationA.W, V: rotationA.V.Mul(-1)}
+	relativeRotation := actor.MulQuat(&conjugateA, &transformB.Rotation)
 	if math.Abs(relativeRotation.Dot(previous.RelativeRotation)) < pairCacheCosMaxDeltaRotationDiv2 {
 		return false
 	}
 
 	m.Reset(previous.BodyA, previous.BodyB)
-	m.Normal = transformA.Rotation.Rotate(previous.LocalNormal)
+	m.Normal = actor.Rotate(rotationA, previous.LocalNormal)
 	m.LocalNormal = previous.LocalNormal
 	m.RelativePosition = previous.RelativePosition
 	m.RelativeRotation = previous.RelativeRotation
 	for j := 0; j < previous.Count; j++ {
 		point := &previous.Points[j]
-		onA := transformA.ToWorld(point.LocalAnchorA)
-		onB := transformB.ToWorld(point.LocalAnchorB)
+		onA := transformA.Position.Add(actor.Rotate(rotationA, point.LocalAnchorA))
+		onB := transformB.Position.Add(actor.Rotate(&transformB.Rotation, point.LocalAnchorB))
 		separation := onB.Sub(onA).Dot(m.Normal)
 		if separation > margin {
 			continue
@@ -203,18 +206,47 @@ func collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 
 	simplex := gjk.SimplexPool.Get().(*gjk.Simplex)
 	defer gjk.SimplexPool.Put(simplex)
-	simplex.Reset()
 
-	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
-	if !gjk.GJKProxies(&proxyA, &proxyB, margin, simplex) {
-		return false
-	}
-	result, err := epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
-	if err != nil {
+	result, ok := penetration(a, b, margin, simplex)
+	if !ok {
 		return false
 	}
 	epa.Manifold(a, b, result, margin, m)
 	return m.Count > 0
+}
+
+// penetration of a + margin into b (the convex shapes), false if they are further than the margin.
+// A rounded shape (sphere, capsule) is its core with a radius: GJK gives the distance and the closest points of the
+// cores, exact against a polytope (Bullet, Jolt), and the radii are added along their direction. EPA runs on the full
+// shapes only if the cores overlap, or are too close for their direction to be a normal
+func penetration(a, b *actor.RigidBody, margin float64, simplex *gjk.Simplex) (epa.Result, bool) {
+	coreA, radiusA := gjk.NewCoreProxy(a)
+	coreB, radiusB := gjk.NewCoreProxy(b)
+	if radiusA+radiusB > 0 {
+		if closest := gjk.Distance(&coreA, &coreB); !closest.Overlap && closest.Distance > normalEpsilon {
+			depth := radiusA + radiusB + margin - closest.Distance
+			if depth < 0 {
+				return epa.Result{}, false
+			}
+			return epa.Result{
+				Normal:   closest.Normal,
+				Depth:    depth,
+				WitnessA: closest.PointA.Add(closest.Normal.Mul(radiusA + margin)),
+				WitnessB: closest.PointB.Sub(closest.Normal.Mul(radiusB)),
+			}, true
+		}
+	}
+
+	simplex.Reset()
+	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
+	if !gjk.GJKProxies(&proxyA, &proxyB, margin, simplex) {
+		return epa.Result{}, false
+	}
+	result, err := epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
+	if err != nil {
+		return epa.Result{}, false
+	}
+	return result, true
 }
 
 // planeBuffers: the buffers of collidePlane, reused to avoid the allocations

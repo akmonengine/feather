@@ -539,11 +539,11 @@ func TestRotationMatrix(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		q := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}.Normalize())
 		v := mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}
-		if d := rotationMatrix(q).Mul3x1(v).Sub(q.Rotate(v)).Len(); d > 1e-12 {
+		if d := rotationMatrix(&q).Mul3x1(v).Sub(q.Rotate(v)).Len(); d > 1e-12 {
 			t.Fatalf("rotation %v of %v: %.2e from the quaternion", q, v, d)
 		}
 	}
-	if math.Abs(rotationMatrix(mgl64.QuatIdent()).Det()-1) > 1e-15 {
+	if q := mgl64.QuatIdent(); math.Abs(rotationMatrix(&q).Det()-1) > 1e-15 {
 		t.Error("identity")
 	}
 }

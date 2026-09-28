@@ -1,6 +1,7 @@
 package feather
 
 import (
+	"github.com/akmonengine/feather/actor"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -205,7 +206,7 @@ func (s *solver) solveArticulations(useBias bool) {
 		stateA, stateB := s.state(j.indexA), s.state(j.indexB)
 		rA, rB := j.currentAnchors(stateA, stateB)
 		a.anchorA[i], a.anchorB[i] = rA, rB
-		cdot := stateB.velocity.Add(stateB.angularVelocity.Cross(rB)).Sub(stateA.velocity.Add(stateA.angularVelocity.Cross(rA)))
+		cdot := relativeVelocity(stateA, stateB, rA, rB)
 		if useBias {
 			separation := stateB.deltaPosition.Sub(stateA.deltaPosition).Add(rB.Sub(rA)).Add(j.deltaCenter)
 			cdot = cdot.Add(separation.Mul(j.spring.biasRate))
@@ -226,27 +227,29 @@ func (s *solver) solveArticulations(useBias bool) {
 
 	// ========== factor: A = L D Lᵀ, from the leaves ==========
 	for i := 0; i < n; i++ {
-		inverse := a.diag[i].Inv()
+		inverse := actor.Inv3(&a.diag[i])
 		a.inverse[i] = inverse
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			// update the later blocks with -A_ki D⁻¹ A_li
 			k := a.later[t]
-			ak := a.lower[t]
+			transposed := actor.Transpose3(&a.lower[t])
 			for u := a.start[i]; u < a.start[i+1]; u++ {
 				l := a.later[u]
 				if l < k {
 					continue
 				}
-				update := a.lower[u].Mul3(inverse).Mul3(ak.Transpose())
+				partial := actor.Mul3(&a.lower[u], &inverse)
+				update := actor.Mul3(&partial, &transposed)
 				if l == k {
-					a.diag[k] = a.diag[k].Sub(update)
+					a.diag[k] = actor.Sub3(&a.diag[k], &update)
 				} else {
-					a.lower[a.find(k, l)] = a.lower[a.find(k, l)].Sub(update)
+					block := &a.lower[a.find(k, l)]
+					*block = actor.Sub3(block, &update)
 				}
 			}
 		}
 		for t := a.start[i]; t < a.start[i+1]; t++ {
-			a.lower[t] = a.lower[t].Mul3(inverse)
+			a.lower[t] = actor.Mul3(&a.lower[t], &inverse)
 		}
 	}
 
@@ -254,15 +257,16 @@ func (s *solver) solveArticulations(useBias bool) {
 	for i := 0; i < n; i++ {
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			k := a.later[t]
-			a.vector[k] = a.vector[k].Sub(a.lower[t].Mul3x1(a.vector[i]))
+			a.vector[k] = a.vector[k].Sub(actor.MulMat3(&a.lower[t], a.vector[i]))
 		}
 	}
 	for i := 0; i < n; i++ {
-		a.vector[i] = a.inverse[i].Mul3x1(a.vector[i])
+		a.vector[i] = actor.MulMat3(&a.inverse[i], a.vector[i])
 	}
 	for i := n - 1; i >= 0; i-- {
 		for t := a.start[i]; t < a.start[i+1]; t++ {
-			a.vector[i] = a.vector[i].Sub(a.lower[t].Transpose().Mul3x1(a.vector[a.later[t]]))
+			transposed := actor.Transpose3(&a.lower[t])
+			a.vector[i] = a.vector[i].Sub(actor.MulMat3(&transposed, a.vector[a.later[t]]))
 		}
 	}
 
@@ -294,8 +298,14 @@ func (s *solver) coupling(x, y *JointBase, rAx, rBx, rAy, rBy mgl64.Vec3) mgl64.
 	var block mgl64.Mat3
 	add := func(body int, signX float64, rX mgl64.Vec3, signY float64, rY mgl64.Vec3) {
 		state := s.state(body)
-		term := mgl64.Ident3().Mul(state.invMass).Sub(skew(rX).Mul3(state.inverseInertia).Mul3(skew(rY)))
-		block = block.Add(term.Mul(signX * signY))
+		m := state.invMass
+		identity := mgl64.Mat3{1 * m, 0 * m, 0 * m, 0 * m, 1 * m, 0 * m, 0 * m, 0 * m, 1 * m}
+		angular := skewTerm(&state.inverseInertia, rX, rY)
+		term := actor.Sub3(&identity, &angular)
+		sign := signX * signY
+		for c := range term {
+			block[c] += term[c] * sign
+		}
 	}
 	if x.indexA >= 0 && x.indexA == y.indexA {
 		add(x.indexA, -1, rAx, -1, rAy)

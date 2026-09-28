@@ -14,8 +14,9 @@ import (
 // AABB enlarged by AABBMargin: a body which moves inside its enlarged AABB doesn't touch the tree, a sleeping body
 // never does. The planes and the heightfields are not in the trees: they are tested against every awake body.
 //
-// The pairs come from a traversal of the trees against themselves (see findPairs), sorted by the index of the first
-// body, the planes of a body before its other pairs. The result doesn't depend on the number of workers.
+// The pairs of overlapping stored AABBs are kept from a step to the next (see findPairs): only a body put back in a
+// tree queries it. The pairs of the step are those whose exact AABBs overlap, sorted by the index of the first body,
+// the planes of a body before its other pairs.
 
 const (
 	// AABBMargin: the AABB of a dynamic body is enlarged by this margin in the tree (m). Larger: fewer updates of the
@@ -34,6 +35,8 @@ type Pair struct {
 	// the sort keys: the index of the body owning the pair, the index of the other body or of the plane
 	first, second int32
 	plane         bool
+	// slot of the pair in the records of the broad phase, for the contacts of the previous step
+	slot int32
 }
 
 type treeNode struct {
@@ -43,7 +46,6 @@ type treeNode struct {
 	child2 int32
 	height int32 // 0 for a leaf
 	body   int32 // index of the body (leaves)
-	awake  bool  // an awake dynamic body under this node (this step)
 }
 
 // aabbTree: a binary tree of AABBs, the bodies at its leaves
@@ -312,15 +314,44 @@ type Tree struct {
 	proxies  []proxy
 	bodies   []*actor.RigidBody // the bodies the proxies were made for: a mismatch rebuilds everything
 
-	// buffers of the pair search
-	batches []nodePair
-	next    []nodePair
-	chunks  []treeChunk
-	pairs   []Pair
-	sorted  []Pair
-	counts  []int32
-	boxes   []actor.AABB
-	job     func(i int)
+	// the pairs of proxies whose stored AABBs overlap, kept from a step to the next, and the proxies put in a tree
+	// since the last search
+	fat      []pairRecord
+	fatIndex map[fatPair]struct{}
+	dead     int // records of pairs which no longer overlap, compacted at the next search
+	moved    []int32
+
+	// buffers of the pair search: a chunk of work per worker
+	chunks   []treeChunk
+	queryJob func(i int)
+	scanJob  func(i int)
+	bodyList []*actor.RigidBody
+	boxes    []actor.AABB
+	pairs    []Pair
+	sorted   []Pair
+	counts   []int32
+}
+
+// treeChunk: the buffers of a unit of work of the workers
+type treeChunk struct {
+	stack      []int32
+	candidates []int32
+	found      []fatPair // the pairs found by the queries of the moved proxies
+	pairs      []Pair    // the pairs of the step
+	dead       []fatPair // the pairs whose stored AABBs no longer overlap
+}
+
+// fatPair: a pair of proxies, a < b
+type fatPair struct {
+	a, b int32
+}
+
+// pairRecord: a pair kept from a step to the next, with the contacts the World computed for it during the step stamp
+// (the pair cache and the warm start of the next step). A record whose pair no longer overlaps is a tombstone (a < 0)
+type pairRecord struct {
+	key          fatPair
+	first, count int32
+	stamp        uint32
 }
 
 func kindOf(body *actor.RigidBody) proxyKind {
@@ -350,21 +381,29 @@ func enlarged(aabb actor.AABB) actor.AABB {
 // sync the trees with the bodies and their AABBs of this step: a dynamic body out of its enlarged AABB is moved, a
 // static body whose AABB changed too. The bodies must be the same slice as the last time, else everything is rebuilt
 func (t *Tree) sync(bodies []*actor.RigidBody, boxes []actor.AABB) {
-	if !t.matches(bodies) {
+	if len(t.bodies) == 0 || !t.matches(bodies) {
 		t.rebuild(bodies, boxes)
 		return
 	}
-	for i := range bodies {
+	known := len(t.bodies)
+	for i := range bodies[:known] {
 		t.update(int32(i), bodies[i], boxes[i])
+	}
+	// the bodies added since the last step
+	for i := known; i < len(bodies); i++ {
+		t.proxies = append(t.proxies, proxy{node: nullNode, kind: proxyLarge})
+		t.bodies = append(t.bodies, bodies[i])
+		t.place(int32(i), bodies[i], boxes[i])
 	}
 }
 
+// matches: the bodies known start the slice (bodies were added at its end at most)
 func (t *Tree) matches(bodies []*actor.RigidBody) bool {
-	if len(t.bodies) != len(bodies) {
+	if len(t.bodies) > len(bodies) {
 		return false
 	}
-	for i, body := range bodies {
-		if t.bodies[i] != body {
+	for i, body := range t.bodies {
+		if bodies[i] != body {
 			return false
 		}
 	}
@@ -376,6 +415,10 @@ func (t *Tree) rebuild(bodies []*actor.RigidBody, boxes []actor.AABB) {
 	t.statics.clear()
 	t.planes = t.planes[:0]
 	t.proxies = t.proxies[:0]
+	t.fat = t.fat[:0]
+	clear(t.fatIndex)
+	t.dead = 0
+	t.moved = t.moved[:0]
 	t.bodies = append(t.bodies[:0], bodies...)
 	for i, body := range bodies {
 		t.proxies = append(t.proxies, proxy{node: nullNode, kind: proxyLarge})
@@ -391,13 +434,16 @@ func (t *Tree) place(i int32, body *actor.RigidBody, aabb actor.AABB) {
 	case proxyDynamic:
 		p.aabb = enlarged(aabb)
 		p.node = t.dynamics.insert(p.aabb, i)
+		t.moved = append(t.moved, i)
 	case proxyStatic:
 		p.aabb = aabb
 		p.node = t.statics.insert(aabb, i)
+		t.moved = append(t.moved, i)
 	default:
 		p.aabb = aabb
 		p.node = nullNode
 		t.planes = append(t.planes, i)
+		t.moved = append(t.moved, i)
 	}
 }
 
@@ -430,15 +476,20 @@ func (t *Tree) update(i int32, body *actor.RigidBody, aabb actor.AABB) {
 			t.dynamics.remove(p.node)
 			p.aabb = enlarged(aabb)
 			p.node = t.dynamics.insert(p.aabb, i)
+			t.moved = append(t.moved, i)
 		}
 	case proxyStatic:
 		if p.aabb != aabb {
 			t.statics.remove(p.node)
 			p.aabb = aabb
 			p.node = t.statics.insert(aabb, i)
+			t.moved = append(t.moved, i)
 		}
 	default:
-		p.aabb = aabb
+		if p.aabb != aabb {
+			p.aabb = aabb
+			t.moved = append(t.moved, i)
+		}
 	}
 }
 
@@ -450,6 +501,7 @@ func (t *Tree) removed(k int) {
 	t.unplace(int32(k))
 	t.proxies = slices.Delete(t.proxies, k, k+1)
 	t.bodies = slices.Delete(t.bodies, k, k+1)
+	t.forget(int32(k))
 	for i := k; i < len(t.proxies); i++ {
 		p := &t.proxies[i]
 		if p.node != nullNode {
@@ -467,6 +519,47 @@ func (t *Tree) removed(k int) {
 	}
 }
 
+// forget the pairs of the proxy k, removed: the proxies after it move up by one
+func (t *Tree) forget(k int32) {
+	kept := t.fat[:0]
+	for _, record := range t.fat {
+		pair := record.key
+		if pair.a < 0 || pair.a == k || pair.b == k {
+			continue
+		}
+		if pair.a > k {
+			pair.a--
+		}
+		if pair.b > k {
+			pair.b--
+		}
+		record.key = pair
+		kept = append(kept, record)
+	}
+	t.fat = kept
+	t.dead = 0
+	clear(t.fatIndex)
+	for _, record := range t.fat {
+		t.fatIndex[record.key] = struct{}{}
+	}
+	for i, index := range t.moved {
+		if index > k {
+			t.moved[i] = index - 1
+		}
+	}
+}
+
+// shiftContacts: contacts were removed from the contacts of the step stamp: shift[i] of them before the contact i.
+// The records move their contacts down
+func (t *Tree) shiftContacts(shift []int32, stamp uint32) {
+	for i := range t.fat {
+		record := &t.fat[i]
+		if record.stamp == stamp && record.count > 0 {
+			record.first -= shift[record.first]
+		}
+	}
+}
+
 // queryCandidates appends the indices of the bodies whose stored AABB overlaps the AABB, the planes first
 func (t *Tree) queryCandidates(aabb actor.AABB, stack []int32, out []int32) ([]int32, []int32) {
 	out = append(out, t.planes...)
@@ -476,90 +569,139 @@ func (t *Tree) queryCandidates(aabb actor.AABB, stack []int32, out []int32) ([]i
 }
 
 // ========== PAIRS ==========
-// The pairs are found by a traversal of the trees against themselves (the tree-versus-tree collision of the btDbvt of
-// Bullet, the same in PhysX): each pair of overlapping nodes is visited once, a subtree without any awake body is
-// pruned. The pairs of nodes at the top of the trees are split into batches for the workers; the pairs found are
-// sorted at the end, so the result doesn't depend on the workers.
-
-const (
-	// pairBatches: the traversal starts with about this many pairs of nodes, spread on the workers
-	pairBatches = 256
-	// batchesPerChunk: pairs of nodes per unit of work
-	batchesPerChunk = 4
-)
-
-type nodePair struct {
-	a, b int32
-}
-
-type treeChunk struct {
-	pairs []Pair
-	stack []nodePair
-}
-
-// flagAwake marks the nodes with an awake dynamic body under them
-func (t *Tree) flagAwake(bodies []*actor.RigidBody) {
-	nodes := t.dynamics.nodes
-	for i := range nodes {
-		nodes[i].awake = false
-	}
-	for i, body := range bodies {
-		p := &t.proxies[i]
-		if p.kind != proxyDynamic || !isAwakeDynamic(body) {
-			continue
-		}
-		for n := p.node; n != nullNode && !nodes[n].awake; n = nodes[n].parent {
-			nodes[n].awake = true
-		}
-	}
-}
+// The pairs of proxies whose stored AABBs overlap are kept from a step to the next, as the pairs of Box2D v3: only a
+// proxy put in a tree since the last search (a dynamic body out of its enlarged AABB, a static body moved by the
+// game, a body added) queries the trees, and a resting body costs nothing. The planes and the heightfields pair with
+// every body which moved. The pairs are dropped when their stored AABBs no longer overlap. The pairs of the step are
+// the ones whose exact AABBs overlap, with an awake dynamic body: the same pairs as a search from scratch, in the same
+// order. Each pair keeps the contacts of its last step (pairRecord): the World finds them without any lookup
 
 // findPairs: the pairs of bodies whose AABBs overlap, with at least an awake dynamic body, sorted by the index of the
 // first body (the planes of a body before its other pairs, in the order of the planes). The slice is reused
 func (t *Tree) findPairs(bodies []*actor.RigidBody, boxes []actor.AABB, pool *workerPool) []Pair {
-	t.flagAwake(bodies)
-	t.boxes = boxes
 	t.pairs = t.pairs[:0]
+	t.bodyList, t.boxes = bodies, boxes
+	if t.queryJob == nil {
+		t.queryJob, t.scanJob = t.query, t.scan
+	}
+	if t.fatIndex == nil {
+		t.fatIndex = map[fatPair]struct{}{}
+	}
+	if t.dead > 0 {
+		t.compact()
+	}
 
-	// the planes, against every awake body
-	for i, body := range bodies {
-		if !isAwakeDynamic(body) || t.proxies[i].kind == proxyLarge {
-			continue
-		}
-		for k, planeIdx := range t.planes {
-			if boxes[planeIdx].Overlaps(boxes[i]) {
-				t.pairs = append(t.pairs, Pair{BodyA: bodies[planeIdx], BodyB: body, IndexA: planeIdx, IndexB: int32(i), first: int32(i), second: int32(k), plane: true})
+	// the proxies put in a tree since the last search find their pairs, by chunks; the pairs are then recorded once
+	t.chunks = t.chunks[:0]
+	queries := (len(t.moved) + movedPerChunk - 1) / movedPerChunk
+	t.chunks = slices.Grow(t.chunks, queries)[:queries]
+	pool.run(queries, 1, t.queryJob)
+	for c := range t.chunks {
+		for _, pair := range t.chunks[c].found {
+			if _, known := t.fatIndex[pair]; !known {
+				t.fatIndex[pair] = struct{}{}
+				t.fat = append(t.fat, pairRecord{key: pair})
 			}
 		}
 	}
+	t.moved = t.moved[:0]
 
-	// the pairs of nodes at the top of the trees, then their traversal by batches
-	t.batches = t.batches[:0]
-	if root := t.dynamics.root; root != nullNode && t.dynamics.nodes[root].awake {
-		t.batches = append(t.batches, nodePair{root, root})
-		if t.statics.root != nullNode {
-			t.batches = append(t.batches, nodePair{root, ^t.statics.root})
+	// the pairs of the step, by chunks; the pairs which no longer overlap are then forgotten
+	scans := (len(t.fat) + fatPerChunk - 1) / fatPerChunk
+	t.chunks = slices.Grow(t.chunks[:0], scans)[:scans]
+	pool.run(scans, 1, t.scanJob)
+	for c := range t.chunks {
+		t.pairs = append(t.pairs, t.chunks[c].pairs...)
+		for _, pair := range t.chunks[c].dead {
+			delete(t.fatIndex, pair)
 		}
+		t.dead += len(t.chunks[c].dead)
 	}
-	t.batches = t.expand(t.batches)
-	chunksCount := (len(t.batches) + batchesPerChunk - 1) / batchesPerChunk
-	if len(t.chunks) < chunksCount {
-		t.chunks = append(t.chunks, make([]treeChunk, chunksCount-len(t.chunks))...)
-	}
-	if t.job == nil {
-		t.job = func(i int) {
-			start := i * batchesPerChunk
-			t.traverse(t.batches[start:min(start+batchesPerChunk, len(t.batches))], &t.chunks[i])
-		}
-	}
-	pool.run(chunksCount, 1, t.job)
-	for i := 0; i < chunksCount; i++ {
-		t.pairs = append(t.pairs, t.chunks[i].pairs...)
-	}
-	t.boxes = nil
+	t.bodyList, t.boxes = nil, nil
 
 	t.pairs = t.sortPairs(t.pairs, len(bodies))
 	return t.pairs
+}
+
+// compact the records: the tombstones leave
+func (t *Tree) compact() {
+	kept := t.fat[:0]
+	for _, record := range t.fat {
+		if record.key.a >= 0 {
+			kept = append(kept, record)
+		}
+	}
+	t.fat = kept
+	t.dead = 0
+}
+
+const (
+	// movedPerChunk: queries of moved proxies per unit of work of the workers
+	movedPerChunk = 64
+	// fatPerChunk: stored pairs per unit of work of the workers
+	fatPerChunk = 1024
+)
+
+// query: the chunk c of the moved proxies finds its pairs (a pair of static bodies never needs solving, nor a static
+// body against a plane)
+func (t *Tree) query(c int) {
+	chunk := &t.chunks[c]
+	chunk.found = chunk.found[:0]
+	start := c * movedPerChunk
+	for _, i := range t.moved[start:min(start+movedPerChunk, len(t.moved))] {
+		p := &t.proxies[i]
+		chunk.candidates = chunk.candidates[:0]
+		chunk.stack, chunk.candidates = t.dynamics.query(p.aabb, chunk.stack, chunk.candidates)
+		if p.kind == proxyDynamic {
+			chunk.stack, chunk.candidates = t.statics.query(p.aabb, chunk.stack, chunk.candidates)
+			chunk.candidates = append(chunk.candidates, t.planes...)
+		}
+		for _, j := range chunk.candidates {
+			if j == i {
+				continue
+			}
+			if j < i {
+				chunk.found = append(chunk.found, fatPair{j, i})
+			} else {
+				chunk.found = append(chunk.found, fatPair{i, j})
+			}
+		}
+	}
+}
+
+// scan: the chunk c of the records emits the pairs of the step, and the pairs which no longer overlap become
+// tombstones
+func (t *Tree) scan(c int) {
+	chunk := &t.chunks[c]
+	chunk.pairs, chunk.dead = chunk.pairs[:0], chunk.dead[:0]
+	bodies, boxes := t.bodyList, t.boxes
+	start := c * fatPerChunk
+	for k := start; k < min(start+fatPerChunk, len(t.fat)); k++ {
+		record := &t.fat[k]
+		i, j := record.key.a, record.key.b
+		if !t.proxies[i].aabb.Overlaps(t.proxies[j].aabb) {
+			chunk.dead = append(chunk.dead, record.key)
+			record.key.a = -1
+			continue
+		}
+		if !boxes[i].Overlaps(boxes[j]) {
+			continue
+		}
+		if plane := t.proxies[i].kind == proxyLarge; plane || t.proxies[j].kind == proxyLarge {
+			// a plane (or a heightfield) against a body: the pair of the body, the plane first
+			if !plane {
+				i, j = j, i
+			}
+			if !isAwakeDynamic(bodies[j]) {
+				continue
+			}
+			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: j, second: int32(slices.Index(t.planes, i)), plane: true, slot: int32(k)})
+			continue
+		}
+		if needsSolving(bodies[i], bodies[j]) {
+			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: i, second: j, slot: int32(k)})
+		}
+	}
 }
 
 // sortPairs by the index of the first body: a counting sort (O(pairs + bodies), the pairs are many and the keys are
@@ -610,104 +752,6 @@ func pairBefore(a, b Pair) bool {
 		return a.plane
 	}
 	return a.second < b.second
-}
-
-// A pair of nodes (a, b): b >= 0 is a node of the dynamic tree, b < 0 is the node ^b of the static tree.
-// (a, a) is the pair of a node with itself: its own leaves against each other
-
-// node of a pair: the node, its tree, and whether it is on the static side
-func (t *Tree) node(n int32) (*treeNode, *aabbTree) {
-	if n < 0 {
-		return &t.statics.nodes[^n], &t.statics
-	}
-	return &t.dynamics.nodes[n], &t.dynamics
-}
-
-// children of a pair of nodes: the pairs to visit next, appended to out (none for a pair of leaves)
-func (t *Tree) children(pair nodePair, out []nodePair) []nodePair {
-	na, _ := t.node(pair.a)
-	if pair.a == pair.b {
-		if na.height == 0 {
-			return out
-		}
-		c1, c2 := na.child1, na.child2
-		return append(out, nodePair{c1, c1}, nodePair{c2, c2}, nodePair{c1, c2})
-	}
-	nb, _ := t.node(pair.b)
-	if !na.aabb.Overlaps(nb.aabb) {
-		return out
-	}
-	// the static side is never awake: prune on the dynamic side
-	if !na.awake && (pair.b < 0 || !nb.awake) {
-		return out
-	}
-	if na.height == 0 && nb.height == 0 {
-		return append(out, pair) // a pair of leaves: kept as is
-	}
-	// split the taller node
-	if nb.height == 0 || (na.height != 0 && na.height >= nb.height) {
-		return append(out, nodePair{na.child1, pair.b}, nodePair{na.child2, pair.b})
-	}
-	if pair.b < 0 {
-		return append(out, nodePair{pair.a, ^nb.child1}, nodePair{pair.a, ^nb.child2})
-	}
-	return append(out, nodePair{pair.a, nb.child1}, nodePair{pair.a, nb.child2})
-}
-
-func isLeafPair(t *Tree, pair nodePair) bool {
-	if pair.a == pair.b {
-		return false
-	}
-	na, _ := t.node(pair.a)
-	nb, _ := t.node(pair.b)
-	return na.height == 0 && nb.height == 0
-}
-
-// expand the pairs of nodes breadth first until there are enough batches for the workers
-func (t *Tree) expand(batches []nodePair) []nodePair {
-	for len(batches) > 0 && len(batches) < pairBatches {
-		t.next = t.next[:0]
-		expanded := false
-		for _, pair := range batches {
-			if isLeafPair(t, pair) {
-				t.next = append(t.next, pair)
-			} else {
-				t.next = t.children(pair, t.next)
-				expanded = true
-			}
-		}
-		batches, t.next = t.next, batches
-		if !expanded {
-			break
-		}
-	}
-	return batches
-}
-
-// traverse the batches depth first, emitting the pairs of bodies whose exact AABBs overlap
-func (t *Tree) traverse(batches []nodePair, chunk *treeChunk) {
-	chunk.pairs = chunk.pairs[:0]
-	bodies, boxes := t.bodies, t.boxes
-	stack := append(chunk.stack[:0], batches...)
-	for len(stack) > 0 {
-		pair := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if isLeafPair(t, pair) {
-			na, _ := t.node(pair.a)
-			nb, _ := t.node(pair.b)
-			i, j := na.body, nb.body
-			if !boxes[i].Overlaps(boxes[j]) || !needsSolving(bodies[i], bodies[j]) {
-				continue
-			}
-			if j < i {
-				i, j = j, i
-			}
-			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: i, second: j})
-			continue
-		}
-		stack = t.children(pair, stack)
-	}
-	chunk.stack = stack
 }
 
 // needsSolving - At least one body must be dynamic and awake

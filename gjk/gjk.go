@@ -70,21 +70,56 @@ var SimplexPool = sync.Pool{
 	},
 }
 
+// Supporter is a convex shape, by its support function: the farthest point in a direction, in local space
+type Supporter interface {
+	Support(direction mgl64.Vec3) mgl64.Vec3
+}
+
 // Proxy is a body prepared for the support queries: its rotation as matrices, computed once per pair
 // instead of rotating each direction and each point with the quaternion
 type Proxy struct {
 	Position mgl64.Vec3
 	Rotation mgl64.Mat3 // local to world
 	Inverse  mgl64.Mat3 // world to local
-	Shape    actor.ShapeInterface
+	Shape    Supporter
 }
 
 func NewProxy(body *actor.RigidBody) Proxy {
 	return NewProxyAt(body.Transform, body.Shape)
 }
 
+// ========== CORES ==========
+// The core of a rounded shape is the shape without its radius (the convex radius of Bullet & Jolt): a point for a
+// sphere, a segment for a capsule. The distance between the cores is the distance between the shapes minus the radii,
+// and GJK finds it exactly against a polytope, where EPA on the rounded shape would tessellate it (13 iterations for a
+// sphere against a box)
+
+type sphereCore actor.Sphere
+
+func (*sphereCore) Support(mgl64.Vec3) mgl64.Vec3 { return mgl64.Vec3{} }
+
+type capsuleCore actor.Capsule
+
+func (c *capsuleCore) Support(direction mgl64.Vec3) mgl64.Vec3 {
+	if direction.Y() < 0 {
+		return mgl64.Vec3{0, -c.HalfHeight, 0}
+	}
+	return mgl64.Vec3{0, c.HalfHeight, 0}
+}
+
+// NewCoreProxy: the core of the body and its radius. The other shapes are their own core, with a radius of 0
+func NewCoreProxy(body *actor.RigidBody) (Proxy, float64) {
+	switch shape := body.Shape.(type) {
+	case *actor.Sphere:
+		return NewProxyAt(body.Transform, (*sphereCore)(shape)), shape.Radius
+	case *actor.Capsule:
+		return NewProxyAt(body.Transform, (*capsuleCore)(shape)), shape.Radius
+	}
+	return NewProxy(body), 0
+}
+
 // NewProxyAt: the shape at the transform (a body during its motion)
-func NewProxyAt(transform actor.Transform, shape actor.ShapeInterface) Proxy {
+func NewProxyAt(transform actor.Transform, shape Supporter) Proxy {
 	q := transform.Rotation
 	w, x, y, z := q.W, q.V[0], q.V[1], q.V[2]
 	rotation := mgl64.Mat3{

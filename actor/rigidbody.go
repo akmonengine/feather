@@ -239,6 +239,15 @@ func (rb *RigidBody) GetInverseInertiaWorld() mgl64.Mat3 {
 	if rb.BodyType == BodyTypeStatic {
 		return mgl64.Mat3{}
 	}
-	R := rb.Transform.Rotation.Mat4().Mat3()
-	return R.Mul3(rb.InverseInertiaLocal).Mul3(R.Transpose())
+	// the rotation matrix of mgl64 (Quat.Mat4), and R I⁻¹ Rᵀ without copying the matrices: the same arithmetic
+	q := rb.Transform.Rotation
+	w, x, y, z := q.W, q.V[0], q.V[1], q.V[2]
+	r := mgl64.Mat3{
+		1 - 2*y*y - 2*z*z, 2*x*y + 2*w*z, 2*x*z - 2*w*y,
+		2*x*y - 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z + 2*w*x,
+		2*x*z + 2*w*y, 2*y*z - 2*w*x, 1 - 2*x*x - 2*y*y,
+	}
+	ri := Mul3(&r, &rb.InverseInertiaLocal)
+	rt := Transpose3(&r)
+	return Mul3(&ri, &rt)
 }

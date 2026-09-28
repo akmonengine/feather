@@ -36,10 +36,12 @@ type World struct {
 	solver  solver
 	islands sleepIslands
 	// contacts of the previous step, to warm start the solver
-	contacts      []constraint.Manifold
-	contactsIndex map[pairKey]contactsRange
-	previous      []constraint.Manifold
-	aabbs         []actor.AABB
+	contacts []constraint.Manifold
+	previous []constraint.Manifold
+	aabbs    []actor.AABB
+	// step: the count of steps, the stamp of the contacts kept by the pairs of the broad phase
+	step  uint32
+	shift []int32 // buffer of RemoveBody
 	// the broad phase
 	tree Tree
 	// pairs of bodies linked by a joint that must not collide
@@ -143,15 +145,19 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 			w.islands.wake(other)
 		}
 	}
+	// the contacts of the body leave: the contacts kept by the other pairs move down
 	n := 0
-	for _, contact := range w.contacts {
+	for i := range w.contacts {
+		w.shift = append(w.shift, int32(i-n))
+		contact := &w.contacts[i]
 		if contact.BodyA != body && contact.BodyB != body {
-			w.contacts[n] = contact
+			w.contacts[n] = *contact
 			n++
 		}
 	}
 	w.contacts = w.contacts[:n]
-	w.indexContacts()
+	w.tree.shiftContacts(w.shift, w.step)
+	w.shift = w.shift[:0]
 }
 
 // workersHandle owns the workers of a World. When the World is not used anymore, the handle is collected
@@ -233,6 +239,7 @@ func (w *World) Step(dt float64) {
 	// The buffer of the previous step is kept for the warm start
 	w.previous = w.contacts
 	w.buffer = 1 - w.buffer
+	w.step++
 	manifolds := w.detectCollision(dt, pool)
 	if w.wakeTouched(manifolds) {
 		// the woken bodies get their contacts in this step (as in Jolt)
@@ -241,7 +248,6 @@ func (w *World) Step(dt float64) {
 	mark := time.Now()
 	w.changed = w.changed[:0]
 	manifolds = w.Events.recordCollisions(manifolds)
-	w.warmStart(manifolds)
 
 	// Phase 2: Solver, with substeps
 	s := &w.solver
@@ -264,7 +270,7 @@ func (w *World) Step(dt float64) {
 	w.continuous(s, dt)
 
 	w.contacts = manifolds
-	w.indexContacts()
+	w.recordContacts()
 	mark = w.lap(&w.profile.Continuous, mark)
 
 	// Phase 3: Sleep & events
@@ -371,7 +377,7 @@ func (w *World) computeAABB(i int) {
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
 	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
-	if w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
+	if len(w.jointPairs) > 0 && w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
 		w.counts[i] = 0
 		return
 	}
@@ -387,22 +393,54 @@ func (w *World) collide(i int) {
 		}
 
 		// pair cache: the contacts of the previous step, if the bodies barely moved relative to each other
-		if r, ok := w.contactsIndex[makePairKey(pair.BodyA, pair.BodyB)]; ok && w.previous[r.first].BodyA == pair.BodyA && !w.isChanged(pair) {
+		previous := w.previousContacts(pair)
+		if len(previous) > 0 && !w.isChanged(pair) {
 			count := 0
-			for k := r.first; k < r.first+r.count && count < len(out); k++ {
-				if reuseManifold(&w.previous[k], margin, &out[count]) {
+			for k := range previous {
+				if count < len(out) && reuseManifold(&previous[k], margin, &out[count]) {
 					count++
 				}
 			}
 			if count > 0 {
 				w.counts[i] = count
 				indexManifolds(out[:count], pair)
+				warmStartPair(out[:count], previous)
 				return
 			}
 		}
+		w.counts[i] = collidePair(pair, margin, out)
+		indexManifolds(out[:w.counts[i]], pair)
+		warmStartPair(out[:w.counts[i]], previous)
+		return
 	}
 	w.counts[i] = collidePair(pair, margin, out)
 	indexManifolds(out[:w.counts[i]], pair)
+}
+
+// previousContacts of the pair: the manifolds it had in the previous step (none if it had none, or if the bodies
+// changed)
+func (w *World) previousContacts(pair Pair) []constraint.Manifold {
+	record := &w.tree.fat[pair.slot]
+	if record.stamp != w.step-1 || record.count == 0 || w.previous[record.first].BodyA != pair.BodyA {
+		return nil
+	}
+	return w.previous[record.first : record.first+record.count]
+}
+
+// recordContacts: each pair keeps where its contacts of this step are, for the next step. The contacts with a trigger
+// are not kept (they are not in the contacts)
+func (w *World) recordContacts() {
+	first := int32(0)
+	for i := range w.pairs {
+		pair := &w.pairs[i]
+		count := int32(w.counts[i])
+		if pair.BodyA.IsTrigger || pair.BodyB.IsTrigger {
+			count = 0
+		}
+		record := &w.tree.fat[pair.slot]
+		record.first, record.count, record.stamp = first, count, w.step
+		first += count
+	}
 }
 
 // indexManifolds: the manifolds of the pair carry the indices of its bodies, for the solver
@@ -444,29 +482,26 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 	return speed
 }
 
-// warmStart: a contact point takes the impulses of the closest point of the previous step
-// (in the local space of body A), among the manifolds of the same pair. The contact takes the friction, twist & rolling
-// impulses of the previous contact of its first matched point
-func (w *World) warmStart(manifolds []constraint.Manifold) {
+// warmStartPair: a contact point takes the impulses of the closest point of the previous step (in the local space of
+// body A), among the previous manifolds of the same pair. The contact takes the friction, twist & rolling impulses
+// of the previous contact of its first matched point
+func warmStartPair(manifolds, previous []constraint.Manifold) {
+	if len(previous) == 0 {
+		return
+	}
 	for i := range manifolds {
 		manifold := &manifolds[i]
-		r, ok := w.contactsIndex[makePairKey(manifold.BodyA, manifold.BodyB)]
-		if !ok || w.previous[r.first].BodyA != manifold.BodyA {
-			continue
-		}
-
 		used := [MaxManifoldsPerPair][constraint.MaxContactPoints]bool{}
 		source := -1
 		for j := 0; j < manifold.Count; j++ {
 			local := manifold.Points[j].LocalAnchorA
 			closestManifold, closest, closestDistance := -1, -1, contactMatchDistance*contactMatchDistance
-			for k := 0; k < r.count; k++ {
-				previous := &w.previous[r.first+k]
-				for o := 0; o < previous.Count; o++ {
+			for k := range previous {
+				for o := 0; o < previous[k].Count; o++ {
 					if used[k][o] {
 						continue
 					}
-					distance := previous.Points[o].LocalAnchorA.Sub(local).LenSqr()
+					distance := previous[k].Points[o].LocalAnchorA.Sub(local).LenSqr()
 					if distance <= closestDistance {
 						closestManifold, closest, closestDistance = k, o, distance
 					}
@@ -475,7 +510,7 @@ func (w *World) warmStart(manifolds []constraint.Manifold) {
 
 			if closest >= 0 {
 				used[closestManifold][closest] = true
-				point := &w.previous[r.first+closestManifold].Points[closest]
+				point := &previous[closestManifold].Points[closest]
 				manifold.Points[j].NormalImpulse = point.NormalImpulse
 				if source < 0 {
 					source = closestManifold
@@ -484,32 +519,9 @@ func (w *World) warmStart(manifolds []constraint.Manifold) {
 		}
 		// the impulses of the whole contact come from the previous contact of its first point
 		if source >= 0 {
-			previous := &w.previous[r.first+source]
-			manifold.FrictionImpulse, manifold.TwistImpulse = previous.FrictionImpulse, previous.TwistImpulse
-			manifold.RollingImpulse = previous.RollingImpulse
+			manifold.FrictionImpulse, manifold.TwistImpulse = previous[source].FrictionImpulse, previous[source].TwistImpulse
+			manifold.RollingImpulse = previous[source].RollingImpulse
 		}
-	}
-}
-
-// contactsRange: the manifolds of a pair follow each other in the contacts
-type contactsRange struct {
-	first int
-	count int
-}
-
-func (w *World) indexContacts() {
-	if w.contactsIndex == nil {
-		w.contactsIndex = make(map[pairKey]contactsRange)
-	}
-	clear(w.contactsIndex)
-	for i := range w.contacts {
-		key := makePairKey(w.contacts[i].BodyA, w.contacts[i].BodyB)
-		r, ok := w.contactsIndex[key]
-		if !ok {
-			r.first = i
-		}
-		r.count++
-		w.contactsIndex[key] = r
 	}
 }
 
