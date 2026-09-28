@@ -1,7 +1,6 @@
 package feather
 
 import (
-	"sort"
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
@@ -126,8 +125,8 @@ func TestInsertSingleBody(t *testing.T) {
 	grid.Insert(0, body)
 
 	// Vérifier que le body est dans la bonne cellule
-	minCell := grid.worldToCell(body.Shape.GetAABB().Min)
-	maxCell := grid.worldToCell(body.Shape.GetAABB().Max)
+	minCell := grid.worldToCell(body.AABB().Min)
+	maxCell := grid.worldToCell(body.AABB().Max)
 
 	found := false
 	for x := minCell.X; x <= maxCell.X; x++ {
@@ -174,8 +173,8 @@ func TestInsertMultipleBodies(t *testing.T) {
 	// Vérifier que tous les bodies sont insérés
 	for i, body := range bodies {
 		found := false
-		minCell := grid.worldToCell(body.Shape.GetAABB().Min)
-		maxCell := grid.worldToCell(body.Shape.GetAABB().Max)
+		minCell := grid.worldToCell(body.AABB().Min)
+		maxCell := grid.worldToCell(body.AABB().Max)
 
 		for x := minCell.X; x <= maxCell.X; x++ {
 			for y := minCell.Y; y <= maxCell.Y; y++ {
@@ -239,7 +238,7 @@ func TestClear(t *testing.T) {
 	}
 
 	// Vérifier que les bodies sont présents
-	if len(grid.cells[grid.hashCell(grid.worldToCell(bodies[0].Shape.GetAABB().Min))].bodyIndices) == 0 {
+	if len(grid.cells[grid.hashCell(grid.worldToCell(bodies[0].AABB().Min))].bodyIndices) == 0 {
 		t.Error("Bodies should be present before clear")
 	}
 
@@ -254,31 +253,6 @@ func TestClear(t *testing.T) {
 	for _, cell := range grid.cells {
 		if len(cell.bodyIndices) != 0 {
 			t.Error("Cells should be empty after clear")
-		}
-	}
-}
-
-func TestSortCells(t *testing.T) {
-	grid := NewSpatialGrid(1.0, 16)
-
-	// Insérer des bodies dans la même cellule dans un ordre aléatoire
-	bodyIndices := []int{5, 2, 8, 1, 9, 3}
-	cellIdx := 0 // Utiliser la première cellule
-	grid.cells[cellIdx].bodyIndices = append(grid.cells[cellIdx].bodyIndices, bodyIndices...)
-
-	// Trier
-	grid.SortCells()
-
-	// Vérifier que la cellule est triée
-	if !sort.IntsAreSorted(grid.cells[cellIdx].bodyIndices) {
-		t.Error("Cell indices should be sorted")
-	}
-
-	// Vérifier que les indices sont corrects
-	expected := []int{1, 2, 3, 5, 8, 9}
-	for i, idx := range grid.cells[cellIdx].bodyIndices {
-		if idx != expected[i] {
-			t.Errorf("Expected index %d at position %d, got %d", expected[i], i, idx)
 		}
 	}
 }
@@ -489,8 +463,8 @@ func TestBoundaryCases(t *testing.T) {
 	grid.Insert(0, body)
 
 	// Vérifier que le body est dans les cellules attendues
-	minCell := grid.worldToCell(body.Shape.GetAABB().Min)
-	maxCell := grid.worldToCell(body.Shape.GetAABB().Max)
+	minCell := grid.worldToCell(body.AABB().Min)
+	maxCell := grid.worldToCell(body.AABB().Max)
 
 	// Devrait couvrir 2 cellules dans chaque dimension
 	if maxCell.X-minCell.X != 1 || maxCell.Y-minCell.Y != 1 || maxCell.Z-minCell.Z != 1 {
@@ -508,8 +482,8 @@ func TestLargeBodySpanningManyCells(t *testing.T) {
 	grid.Insert(0, body)
 
 	// Vérifier que le body est dans toutes les cellules attendues
-	minCell := grid.worldToCell(body.Shape.GetAABB().Min)
-	maxCell := grid.worldToCell(body.Shape.GetAABB().Max)
+	minCell := grid.worldToCell(body.AABB().Min)
+	maxCell := grid.worldToCell(body.AABB().Max)
 
 	expectedCells := (maxCell.X - minCell.X + 1) * (maxCell.Y - minCell.Y + 1) * (maxCell.Z - minCell.Z + 1)
 	actualCells := 0
@@ -565,7 +539,7 @@ func BenchmarkFindPairs(b *testing.B) {
 func findPairs(grid *SpatialGrid, bodies []*actor.RigidBody, workers int) []Pair {
 	boxes := make([]actor.AABB, len(bodies))
 	for i, body := range bodies {
-		boxes[i] = body.Shape.GetAABB()
+		boxes[i] = body.AABB()
 	}
 	return grid.FindPairs(bodies, boxes, workers)
 }

@@ -374,7 +374,7 @@ func TestCollisionEventsOnTouch(t *testing.T) {
 	ball := addBody(w, mgl64.Vec3{0, 1, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: cubeHalf}, actor.BodyTypeDynamic, 0.6, 0)
 	enteredAt := -1.0
 	elapsed := 0.0
-	w.Events.Subscribe(COLLISION_ENTER, func(Event) {
+	w.Events.Subscribe(EventCollisionEnter, func(Event) {
 		if enteredAt < 0 {
 			enteredAt = elapsed
 		}
@@ -771,5 +771,70 @@ func TestFastBodyOnTerrain(t *testing.T) {
 	t.Logf("worst depth %.2f mm", worst*1000)
 	if worst > 0.02 {
 		t.Errorf("the box went %.1f mm under the terrain", worst*1000)
+	}
+}
+
+// The restitution never adds energy: a pile of bouncing balls, and a box landing on a corner, never get more energy
+// than they had (kinetic + potential). With e = 1, Newton alone gains 411 J, Poisson alone 3523 J
+func TestRestitutionNeverAddsEnergy(t *testing.T) {
+	energy := func(bodies []*actor.RigidBody) float64 {
+		total := 0.0
+		for _, b := range bodies {
+			mass := b.Material.GetMass()
+			total += 0.5*mass*b.Velocity.LenSqr() + mass*sceneGravity*b.Transform.Position.Y()
+			total += 0.5 * b.AngularVelocity.Dot(b.GetInertiaWorld().Mul3x1(b.AngularVelocity))
+		}
+		return total
+	}
+	for _, e := range []float64{0.5, 1} {
+		w := newScene(1)
+		ground := addGround(w, 0)
+		ground.Material.Restitution = e
+		var bodies []*actor.RigidBody
+		for i := 0; i < 3; i++ {
+			bodies = append(bodies, addBody(w, mgl64.Vec3{0, 1 + float64(i)*0.6, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: 0.25}, actor.BodyTypeDynamic, 0, e))
+		}
+		bodies = append(bodies, addBody(w, mgl64.Vec3{2, 1.5, 0}, mgl64.QuatRotate(0.6, mgl64.Vec3{1, 0, 1}.Normalize()), cube(), actor.BodyTypeDynamic, 0, e))
+		start := energy(bodies)
+		worst := 0.0
+		simulate(w, 4, func() { worst = math.Max(worst, energy(bodies)-start) })
+		t.Logf("e=%.1f: start %.2f J, worst gain %.4f J", e, start, worst)
+		// a sub-step of free fall integrated explicitly: under 0.1 % of the energy
+		if worst > 1e-3*start {
+			t.Errorf("e=%.1f: the energy grew by %.4f J", e, worst)
+		}
+	}
+}
+
+// A World without settings works: default spatial grid, 1 substep, 1 worker
+func TestZeroWorld(t *testing.T) {
+	var w World
+	w.Gravity = mgl64.Vec3{0, -sceneGravity, 0}
+	w.AddBody(actor.NewRigidBody(actor.Transform{Rotation: mgl64.QuatIdent()}, &actor.Plane{Normal: mgl64.Vec3{0, 1, 0}}, actor.BodyTypeStatic, 0))
+	ball := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0, 1, 0}, Rotation: mgl64.QuatIdent()}, &actor.Sphere{Radius: 0.25}, actor.BodyTypeDynamic, 1)
+	w.AddBody(ball)
+	for i := 0; i < 120; i++ {
+		w.Step(sceneDt)
+	}
+	if math.Abs(ball.Transform.Position.Y()-0.25) > 0.005 {
+		t.Errorf("the ball rests at %.4f m, want 0.25", ball.Transform.Position.Y())
+	}
+}
+
+// A shape has no state: 2 bodies share the same box, each keeps its AABB and lands on the ground
+func TestSharedShape(t *testing.T) {
+	w := newScene(1)
+	addGround(w, 0.6)
+	shape := cube()
+	left := addBody(w, mgl64.Vec3{-2, 1, 0}, mgl64.QuatIdent(), shape, actor.BodyTypeDynamic, 0.6, 0)
+	right := addBody(w, mgl64.Vec3{2, 3, 0}, mgl64.QuatIdent(), shape, actor.BodyTypeDynamic, 0.6, 0)
+	if left.AABB() == right.AABB() {
+		t.Fatal("both bodies have the same AABB")
+	}
+	simulate(w, 2, nil)
+	for _, body := range []*actor.RigidBody{left, right} {
+		if math.Abs(body.Transform.Position.Y()-cubeHalf) > 0.002 || body.AABB().Min.Y() > 0.001 {
+			t.Errorf("body at %v, AABB %v: not resting on the ground", body.Transform.Position, body.AABB())
+		}
 	}
 }

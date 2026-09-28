@@ -67,7 +67,7 @@ func NewSpatialGrid(cellSize float64, numCells int) *SpatialGrid {
 
 // Insert - Inserts a body into all cells it occupies
 func (sg *SpatialGrid) Insert(bodyIndex int, body *actor.RigidBody) {
-	sg.InsertAABB(bodyIndex, body, body.Shape.GetAABB())
+	sg.InsertAABB(bodyIndex, body, body.AABB())
 }
 
 // InsertAABB - Inserts a body into all cells of the given AABB (e.g. an enlarged AABB)
@@ -96,15 +96,6 @@ func (sg *SpatialGrid) Clear() {
 
 	for i := range sg.cells {
 		sg.cells[i].bodyIndices = sg.cells[i].bodyIndices[:0]
-	}
-}
-
-// SortCells - Sorts body indices within each cell for optimized collision detection
-func (sg *SpatialGrid) SortCells() {
-	for i := range sg.cells {
-		if len(sg.cells[i].bodyIndices) > 1 {
-			sort.Ints(sg.cells[i].bodyIndices)
-		}
 	}
 }
 
@@ -156,8 +147,7 @@ func (sg *SpatialGrid) findPairsRange(bodies []*actor.RigidBody, boxes []actor.A
 		}
 
 		for _, planeIdx := range sg.planes.bodyIndices {
-			_, isPlane := bodies[planeIdx].Shape.(*actor.Plane)
-			if needsSolving(bodies[planeIdx], bodyA) && (isPlane || boxes[planeIdx].Overlaps(boxes[bodyIdx])) {
+			if needsSolving(bodies[planeIdx], bodyA) && boxes[planeIdx].Overlaps(boxes[bodyIdx]) {
 				chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[planeIdx], BodyB: bodyA})
 			}
 		}
@@ -295,5 +285,6 @@ func (sg *SpatialGrid) hashCell(key CellKey) int {
 	h *= mix2
 	h ^= h >> 16
 
-	return int(h) % len(sg.cells)
+	// modulo on uint32: int(h) would be negative on 32 bits platforms
+	return int(h % uint32(len(sg.cells)))
 }

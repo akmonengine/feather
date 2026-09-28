@@ -741,3 +741,17 @@ func vec3AlmostEqual(a, b mgl64.Vec3, epsilon float64) bool {
 		almostEqual(a.Y(), b.Y(), epsilon) &&
 		almostEqual(a.Z(), b.Z(), epsilon)
 }
+
+// A static body has no inertia: no infinite or NaN value, and a unique serial like every body
+func TestStaticBodyInertia(t *testing.T) {
+	static := NewRigidBody(NewTransform(), &Box{HalfExtents: mgl64.Vec3{1, 1, 1}}, BodyTypeStatic, 0)
+	for i := 0; i < 9; i++ {
+		if static.InertiaLocal[i] != 0 || static.InverseInertiaLocal[i] != 0 {
+			t.Fatalf("static inertia %v, inverse %v: want 0", static.InertiaLocal, static.InverseInertiaLocal)
+		}
+	}
+	other := NewRigidBody(NewTransform(), &Box{HalfExtents: mgl64.Vec3{1, 1, 1}}, BodyTypeStatic, 0)
+	if static.Serial() == 0 || static.Serial() == other.Serial() {
+		t.Errorf("serials %d and %d", static.Serial(), other.Serial())
+	}
+}

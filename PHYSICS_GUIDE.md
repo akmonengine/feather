@@ -101,6 +101,10 @@ world.UpdateHeightfield(terrain, minX, minZ, maxX, maxZ)
 - `Holes[x*(zSamples-1)+z]`: a cell without triangles (a cave, a tunnel entrance).
 - `World.UpdateHeightfield` wakes up the bodies above the changed region, and computes their contacts again.
 
+### Moving a body
+A shape has no state: several bodies can share the same shape. Each body keeps its AABB: after moving a body by hand
+(its `Transform`), call `UpdateAABB`.
+
 ### Timestep & substeps
 ```go
 world := feather.World{

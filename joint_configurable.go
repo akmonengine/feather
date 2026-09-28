@@ -48,8 +48,8 @@ type ConfigurableJoint struct {
 	AngularDriveHertz        float64
 	AngularDriveDampingRatio float64
 
-	linearDriveSoftness  softness
-	angularDriveSoftness softness
+	linearDriveRow  spring
+	angularDriveRow spring
 	// accumulated impulses, per axis: [0] for a locked axis or a lower limit, [1] for an upper limit
 	linearImpulses      [3][2]float64
 	linearDriveImpulses [3]float64
@@ -76,8 +76,12 @@ func NewConfigurableJoint(bodyA, bodyB *actor.RigidBody, anchor, axis mgl64.Vec3
 
 func (j *ConfigurableJoint) prepare(s *solver) {
 	j.prepareBase(s)
-	j.linearDriveSoftness = makeSoft(j.LinearDriveHertz, j.LinearDriveDampingRatio, s.h)
-	j.angularDriveSoftness = makeSoft(j.AngularDriveHertz, j.AngularDriveDampingRatio, s.h)
+	if j.EnableLinearDrive && j.LinearDriveHertz > 0 {
+		j.linearDriveRow = newSpring(j.LinearDriveHertz, j.LinearDriveDampingRatio, s.h)
+	}
+	if j.EnableAngularDrive && j.AngularDriveHertz > 0 {
+		j.angularDriveRow = newSpring(j.AngularDriveHertz, j.AngularDriveDampingRatio, s.h)
+	}
 }
 
 func (j *ConfigurableJoint) allLinearLocked() bool {
@@ -125,12 +129,12 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 	// ========== ANGULAR DRIVE ==========
 	if j.EnableAngularDrive && j.AngularDriveHertz > 0 {
 		c := rotationError(frameB, frameA.Mul(j.DriveTargetRotation))
-		j.angularDriveImpulse = solveAngular3(stateA, stateB, c, j.angularDriveSoftness, true, j.angularDriveImpulse)
+		j.angularDriveImpulse = solveAngular3(stateA, stateB, c, j.angularDriveRow, true, j.angularDriveImpulse)
 	}
 
 	// ========== ANGULAR ==========
 	if j.allAngularLocked() {
-		j.angularImpulse = solveAngular3(stateA, stateB, rotationError(frameB, frameA), j.softness, useBias, j.angularImpulse)
+		j.angularImpulse = solveAngular3(stateA, stateB, rotationError(frameB, frameA), j.spring, useBias, j.angularImpulse)
 	} else {
 		j.solveTwist(s, stateA, stateB, frameA, frameB, useBias)
 		j.solveSwing(s, stateA, stateB, frameA, frameB, useBias)
@@ -145,8 +149,8 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 			}
 			axis := frameA.Rotate(unitAxes[k])
 			c := offset.Dot(axis) - j.DriveTargetPosition[k]
-			ds := j.linearDriveSoftness
-			j.linearDriveImpulses[k] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, ds.biasRate*c, ds.massScale, ds.impulseScale, j.linearDriveImpulses[k], math.Inf(-1), math.Inf(1))
+			drive := j.linearDriveRow
+			j.linearDriveImpulses[k] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, drive.biasRate*c, drive, j.linearDriveImpulses[k], math.Inf(-1), math.Inf(1))
 		}
 	}
 
@@ -161,34 +165,26 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 		position := offset.Dot(axis)
 		switch j.LinearMotion[k] {
 		case MotionLocked:
-			bias, massScale, impulseScale := j.bias(useBias, position)
-			j.linearImpulses[k][0] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, bias, massScale, impulseScale, j.linearImpulses[k][0], math.Inf(-1), math.Inf(1))
+			bias, row := j.equalityRow(useBias, position)
+			j.linearImpulses[k][0] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, bias, row, j.linearImpulses[k][0], math.Inf(-1), math.Inf(1))
 		case MotionLimited:
 			// lower: position - min >= 0, upper: max - position >= 0 (along -axis)
-			bias, massScale, impulseScale := j.limitBias(s, useBias, position-j.LinearMin[k])
-			j.linearImpulses[k][0] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, bias, massScale, impulseScale, j.linearImpulses[k][0], 0, math.Inf(1))
-			bias, massScale, impulseScale = j.limitBias(s, useBias, j.LinearMax[k]-position)
-			j.linearImpulses[k][1] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis.Mul(-1), bias, massScale, impulseScale, j.linearImpulses[k][1], 0, math.Inf(1))
+			bias, row := j.limitRow(s, position-j.LinearMin[k], useBias)
+			j.linearImpulses[k][0] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis, bias, row, j.linearImpulses[k][0], 0, math.Inf(1))
+			bias, row = j.limitRow(s, j.LinearMax[k]-position, useBias)
+			j.linearImpulses[k][1] = solveLinearAxis(stateA, stateB, rA.Add(offset), rB, axis.Mul(-1), bias, row, j.linearImpulses[k][1], 0, math.Inf(1))
 		}
 	}
 }
 
 var unitAxes = [3]mgl64.Vec3{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}
 
-// bias of an equality constraint
-func (j *ConfigurableJoint) bias(useBias bool, c float64) (float64, float64, float64) {
+// equalityRow: the bias and the spring of an equality constraint C = 0, soft when useBias
+func (j *JointBase) equalityRow(useBias bool, c float64) (float64, spring) {
 	if !useBias {
-		return 0, 1, 0
+		return 0, rigid
 	}
-	return j.softness.biasRate * c, j.softness.massScale, j.softness.impulseScale
-}
-
-// limitBias of an inequality constraint C >= 0: speculative above, soft under
-func (j *ConfigurableJoint) limitBias(s *solver, useBias bool, c float64) (float64, float64, float64) {
-	if c > 0 {
-		return c * s.invH, 1, 0
-	}
-	return j.bias(useBias, c)
+	return j.spring.biasRate * c, j.spring
 }
 
 func (j *ConfigurableJoint) solveTwist(s *solver, stateA, stateB *bodyState, frameA, frameB mgl64.Quat, useBias bool) {
@@ -246,31 +242,25 @@ func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, fra
 
 // solveAngularEquality: C = 0 around the axis (a locked rotation), soft when useBias
 func (j *JointBase) solveAngularEquality(stateA, stateB *bodyState, axis mgl64.Vec3, c float64, direction float64, accumulated float64, useBias bool) float64 {
-	bias, massScale, impulseScale := 0.0, 1.0, 0.0
-	if useBias {
-		bias = j.softness.biasRate * c
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
-	}
+	bias, row := j.equalityRow(useBias, c)
 	cdot := direction * axis.Dot(stateB.angularVelocity.Sub(stateA.angularVelocity))
-	impulse := -massScale*axialMass(stateA, stateB, axis)*(cdot+bias) - impulseScale*accumulated
+	impulse := row.impulse(axialMass(stateA, stateB, axis), cdot, bias, accumulated)
 	applyAngular(stateA, stateB, axis.Mul(direction*impulse))
 	return accumulated + impulse
 }
 
 // solveAngular3: the 3 rotations together (K = IA + IB), towards the error c (rotation vector, world space)
-func solveAngular3(stateA, stateB *bodyState, c mgl64.Vec3, soft softness, useBias bool, accumulated mgl64.Vec3) mgl64.Vec3 {
+func solveAngular3(stateA, stateB *bodyState, c mgl64.Vec3, soft spring, useBias bool, accumulated mgl64.Vec3) mgl64.Vec3 {
 	cdot := stateB.angularVelocity.Sub(stateA.angularVelocity)
-	bias := mgl64.Vec3{}
-	massScale, impulseScale := 1.0, 0.0
+	bias, row := mgl64.Vec3{}, rigid
 	if useBias {
-		bias = c.Mul(soft.biasRate)
-		massScale, impulseScale = soft.massScale, soft.impulseScale
+		bias, row = c.Mul(soft.biasRate), soft
 	}
 	k := stateA.inverseInertia.Add(stateB.inverseInertia)
 	if math.Abs(k.Det()) < 1e-30 {
 		return accumulated
 	}
-	impulse := k.Inv().Mul3x1(cdot.Add(bias)).Mul(-massScale).Sub(accumulated.Mul(impulseScale))
+	impulse := row.impulse3(k.Inv(), cdot, bias, accumulated)
 	applyAngular(stateA, stateB, impulse)
 	return accumulated.Add(impulse)
 }

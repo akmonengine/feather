@@ -19,7 +19,6 @@ const (
 type Capsule struct {
 	HalfHeight float64 // Half length of the inner segment (cylinder part)
 	Radius     float64 // Radius of the cylinder and of both caps
-	aabb       AABB
 }
 
 // Segment returns both ends of the segment in world space (bottom, then top)
@@ -28,7 +27,7 @@ func (c *Capsule) Segment(transform Transform) (mgl64.Vec3, mgl64.Vec3) {
 	return transform.Position.Sub(axis), transform.Position.Add(axis)
 }
 
-func (c *Capsule) ComputeAABB(transform Transform) {
+func (c *Capsule) ComputeAABB(transform Transform) AABB {
 	axis := transform.Rotation.Rotate(mgl64.Vec3{0, c.HalfHeight, 0})
 	extent := mgl64.Vec3{
 		math.Abs(axis.X()) + c.Radius,
@@ -36,14 +35,10 @@ func (c *Capsule) ComputeAABB(transform Transform) {
 		math.Abs(axis.Z()) + c.Radius,
 	}
 
-	c.aabb = AABB{
+	return AABB{
 		Min: transform.Position.Sub(extent),
 		Max: transform.Position.Add(extent),
 	}
-}
-
-func (c *Capsule) GetAABB() AABB {
-	return c.aabb
 }
 
 // ComputeMass: cylinder + 1 full sphere

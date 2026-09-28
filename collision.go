@@ -22,7 +22,7 @@ const (
 func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody, workersCount int) []Pair {
 	boxes := make([]actor.AABB, len(bodies))
 	for i, body := range bodies {
-		boxes[i] = body.Shape.GetAABB()
+		boxes[i] = body.AABB()
 	}
 	spatialGrid.Clear()
 	for i, body := range bodies {

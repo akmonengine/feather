@@ -2,6 +2,7 @@ package actor
 
 import (
 	"math"
+	"sync/atomic"
 
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -37,8 +38,8 @@ type Material struct {
 	DynamicFriction float64
 	// RollingResistance slows down the rolling spheres and capsules, usually in the range [0,1]
 	RollingResistance float64
-	LinearDamping     float64 // 0.0 - 1.0, typique : 0.01
-	AngularDamping    float64 // 0.0 - 1.0, typique : 0.05
+	LinearDamping     float64 // 0.0 - 1.0, typical: 0.01
+	AngularDamping    float64 // 0.0 - 1.0, typical: 0.05
 }
 
 func (material Material) GetMass() float64 {
@@ -57,9 +58,9 @@ type RigidBody struct {
 	Velocity mgl64.Vec3 // Linear velocity (m/s)
 
 	// Angular motion
-	AngularVelocity mgl64.Vec3 // Vitesse de rotation (rad/s)
+	AngularVelocity mgl64.Vec3 // Angular velocity (rad/s)
 	// Inertia
-	InertiaLocal        mgl64.Mat3 // Tenseur d'inertie en espace local
+	InertiaLocal        mgl64.Mat3 // Inertia tensor, in the local space
 	InverseInertiaLocal mgl64.Mat3
 
 	// Force (N) & torque (N·m) applied during the next step
@@ -79,13 +80,20 @@ type RigidBody struct {
 
 	// Collision shape
 	Shape ShapeInterface // The collision shape
+	aabb  AABB
+	// serial: a unique number, given by NewRigidBody
+	serial uint64
 }
+
+// serials of the bodies created by NewRigidBody
+var serials atomic.Uint64
 
 // NewRigidBody creates a new rigid body with the given properties
 // density is used to calculate mass for dynamic bodies (ignored for static)
 func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, density float64) *RigidBody {
 	transform.Rotation = transform.Rotation.Normalize()
 	rb := &RigidBody{
+		serial:    serials.Add(1),
 		Transform: transform,
 		Shape:     shape,
 		BodyType:  bodyType,
@@ -114,11 +122,29 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 		}
 	}
 
-	rb.InertiaLocal = shape.ComputeInertia(rb.Material.mass)
-	rb.InverseInertiaLocal = rb.InertiaLocal.Inv()
-	rb.Shape.ComputeAABB(rb.Transform)
+	// a static body has no inertia (its inverse inertia is 0, it never turns)
+	if bodyType != BodyTypeStatic {
+		rb.InertiaLocal = shape.ComputeInertia(rb.Material.mass)
+		rb.InverseInertiaLocal = rb.InertiaLocal.Inv()
+	}
+	rb.UpdateAABB()
 
 	return rb
+}
+
+// Serial is a unique number of the body, given by NewRigidBody
+func (rb *RigidBody) Serial() uint64 {
+	return rb.serial
+}
+
+// AABB of the body, at its transform
+func (rb *RigidBody) AABB() AABB {
+	return rb.aabb
+}
+
+// UpdateAABB after a change of the transform (the World updates it after each step)
+func (rb *RigidBody) UpdateAABB() {
+	rb.aabb = rb.Shape.ComputeAABB(rb.Transform)
 }
 
 func (rb *RigidBody) InverseMass() float64 {
@@ -128,35 +154,11 @@ func (rb *RigidBody) InverseMass() float64 {
 	return 1 / rb.Material.mass
 }
 
-// TrySleep check if a body can be set to sleep.
-// returns 0 if no changes, 1 if set to sleep, 2 if waken
-func (rb *RigidBody) TrySleep(dt float64, timethreshold float64, velocityThreshold float64) uint8 {
-	if rb.BodyType == BodyTypeStatic {
-		return 0
-	}
-	if rb.Velocity.Len() < velocityThreshold && rb.AngularVelocity.Len() < velocityThreshold {
-		rb.SleepTimer += dt // Incrémente le timer
-		if !rb.IsSleeping && rb.SleepTimer >= timethreshold {
-			rb.Sleep()
-
-			return 1
-		}
-		return 0
-	}
-
-	wasSleeping := rb.IsSleeping
-	rb.WakeUp()
-	if wasSleeping {
-		return 2
-	}
-	return 0
-}
-
 func (rb *RigidBody) Sleep() {
 	rb.IsSleeping = true
 	rb.SleepTimer = 0.0
 
-	rb.Shape.ComputeAABB(rb.Transform)
+	rb.UpdateAABB()
 	rb.ClearForces()
 	rb.Velocity = mgl64.Vec3{}
 	rb.AngularVelocity = mgl64.Vec3{}

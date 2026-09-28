@@ -39,9 +39,8 @@ type triangleShape struct {
 	aabb     actor.AABB
 }
 
-func (t *triangleShape) ComputeAABB(transform actor.Transform) {}
-
-func (t *triangleShape) GetAABB() actor.AABB {
+// ComputeAABB: the vertices are in world space
+func (t *triangleShape) ComputeAABB(transform actor.Transform) actor.AABB {
 	return t.aabb
 }
 
@@ -113,7 +112,7 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 	s := heightfieldPool.Get().(*heightfieldScratch)
 	defer heightfieldPool.Put(s)
 
-	bounds := object.Shape.GetAABB()
+	bounds := object.AABB()
 	bounds = actor.AABB{Min: bounds.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: bounds.Max.Add(mgl64.Vec3{margin, margin, margin})}
 	s.cells = field.OverlapCells(localBounds(terrain.Transform, bounds), s.cells[:0])
 	s.contacts, s.points = s.contacts[:0], s.points[:0]

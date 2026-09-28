@@ -51,7 +51,7 @@ type JointBase struct {
 	anchorA        mgl64.Vec3 // anchors from the centers of mass, world orientation, at the beginning of the step
 	anchorB        mgl64.Vec3
 	deltaCenter    mgl64.Vec3
-	softness       softness
+	spring         spring
 
 	linearImpulse mgl64.Vec3
 }
@@ -72,7 +72,7 @@ func (j *JointBase) prepareBase(s *solver) {
 	if hertz <= 0 {
 		hertz = DefaultJointHertz
 	}
-	j.softness = makeSoft(math.Min(hertz, jointHertzPerSubstepRate*s.invH), j.DampingRatio, s.h)
+	j.spring = newSpring(math.Min(hertz, jointHertzPerSubstepRate*s.invH), j.DampingRatio, s.h)
 }
 
 // currentAnchors during the substeps
@@ -92,12 +92,11 @@ func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias boo
 	rA, rB := j.currentAnchors(stateA, stateB)
 	cdot := stateB.velocity.Add(stateB.angularVelocity.Cross(rB)).Sub(stateA.velocity.Add(stateA.angularVelocity.Cross(rA)))
 
-	bias := mgl64.Vec3{}
-	massScale, impulseScale := 1.0, 0.0
+	bias, row := mgl64.Vec3{}, rigid
 	if useBias {
 		separation := stateB.deltaPosition.Sub(stateA.deltaPosition).Add(rB.Sub(rA)).Add(j.deltaCenter)
-		bias = separation.Mul(j.softness.biasRate)
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
+		row = j.spring
+		bias = separation.Mul(row.biasRate)
 	}
 
 	// K = (mA + mB) I - [rA]x IA [rA]x - [rB]x IB [rB]x
@@ -106,7 +105,7 @@ func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias boo
 	if math.Abs(k.Det()) < 1e-30 {
 		return
 	}
-	impulse := k.Inv().Mul3x1(cdot.Add(bias)).Mul(-massScale).Sub(j.linearImpulse.Mul(impulseScale))
+	impulse := row.impulse3(k.Inv(), cdot, bias, j.linearImpulse)
 	j.linearImpulse = j.linearImpulse.Add(impulse)
 	applyLinear(stateA, stateB, rA, rB, impulse)
 }
@@ -145,18 +144,24 @@ func axialMass(stateA, stateB *bodyState, axis mgl64.Vec3) float64 {
 // solveAngularLimit: C >= 0 around the axis, with C = direction * (angle of B around the axis) + offset.
 // Returns the new accumulated impulse. Speculative when C > 0, soft when useBias.
 func (j *JointBase) solveAngularLimit(s *solver, stateA, stateB *bodyState, axis mgl64.Vec3, c float64, direction float64, accumulated float64, useBias bool) float64 {
-	bias, massScale, impulseScale := 0.0, 1.0, 0.0
-	if c > 0 {
-		bias = c * s.invH
-	} else if useBias {
-		bias = j.softness.biasRate * c
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
-	}
+	bias, row := j.limitRow(s, c, useBias)
 	cdot := direction * axis.Dot(stateB.angularVelocity.Sub(stateA.angularVelocity))
-	impulse := -massScale*axialMass(stateA, stateB, axis)*(cdot+bias) - impulseScale*accumulated
+	impulse := row.impulse(axialMass(stateA, stateB, axis), cdot, bias, accumulated)
 	newImpulse := math.Max(accumulated+impulse, 0)
 	applyAngular(stateA, stateB, axis.Mul(direction*(newImpulse-accumulated)))
 	return newImpulse
+}
+
+// limitRow: the bias and the spring of a limit C >= 0. Speculative when C > 0 (the bodies can get closer by C during
+// the substep), soft when useBias, rigid otherwise
+func (j *JointBase) limitRow(s *solver, c float64, useBias bool) (float64, spring) {
+	switch {
+	case c > 0:
+		return c * s.invH, rigid
+	case useBias:
+		return j.spring.biasRate * c, j.spring
+	}
+	return 0, rigid
 }
 
 // rotationError is the rotation vector (world space) from the target to the current rotation, for small errors
@@ -273,10 +278,10 @@ type DistanceJoint struct {
 	SpringHertz        float64
 	SpringDampingRatio float64
 
-	springSoftness softness
-	impulse        float64
-	lowerImpulse   float64
-	upperImpulse   float64
+	springRow    spring
+	impulse      float64
+	lowerImpulse float64
+	upperImpulse float64
 }
 
 // NewDistanceJoint links 2 anchors (world space), at their current distance
@@ -290,7 +295,9 @@ func NewDistanceJoint(bodyA, bodyB *actor.RigidBody, anchorA, anchorB mgl64.Vec3
 
 func (j *DistanceJoint) prepare(s *solver) {
 	j.prepareBase(s)
-	j.springSoftness = makeSoft(j.SpringHertz, j.SpringDampingRatio, s.h)
+	if j.SpringHertz > 0 {
+		j.springRow = newSpring(j.SpringHertz, j.SpringDampingRatio, s.h)
+	}
 }
 
 func (j *DistanceJoint) axis(stateA, stateB *bodyState) (mgl64.Vec3, mgl64.Vec3, mgl64.Vec3, float64) {
@@ -310,14 +317,14 @@ func (j *DistanceJoint) warmStart(s *solver) {
 }
 
 // solveLinearAxis solves an impulse along the axis, applied at rA on A and rB on B: returns the new accumulated impulse
-func solveLinearAxis(stateA, stateB *bodyState, rA, rB, axis mgl64.Vec3, bias, massScale, impulseScale, accumulated, low, high float64) float64 {
+func solveLinearAxis(stateA, stateB *bodyState, rA, rB, axis mgl64.Vec3, bias float64, row spring, accumulated, low, high float64) float64 {
 	cdot := axis.Dot(stateB.velocity.Add(stateB.angularVelocity.Cross(rB)).Sub(stateA.velocity.Add(stateA.angularVelocity.Cross(rA))))
 	rnA, rnB := rA.Cross(axis), rB.Cross(axis)
 	k := stateA.invMass + stateB.invMass + rnA.Dot(stateA.inverseInertia.Mul3x1(rnA)) + rnB.Dot(stateB.inverseInertia.Mul3x1(rnB))
 	if k <= 0 {
 		return accumulated
 	}
-	impulse := -massScale/k*(cdot+bias) - impulseScale*accumulated
+	impulse := row.impulse(1/k, cdot, bias, accumulated)
 	newImpulse := math.Max(low, math.Min(high, accumulated+impulse))
 	applyLinear(stateA, stateB, rA, rB, axis.Mul(newImpulse-accumulated))
 	return newImpulse
@@ -331,8 +338,8 @@ func (j *DistanceJoint) solve(s *solver, useBias bool) {
 	if j.EnableSpring && (j.MinLength < j.MaxLength || !j.EnableLimit) {
 		// ========== SPRING ==========
 		if j.SpringHertz > 0 {
-			bias := j.springSoftness.biasRate * (length - j.Length)
-			j.impulse = solveLinearAxis(stateA, stateB, rA, rB, axis, bias, j.springSoftness.massScale, j.springSoftness.impulseScale, j.impulse, -infinite, infinite)
+			bias := j.springRow.biasRate * (length - j.Length)
+			j.impulse = solveLinearAxis(stateA, stateB, rA, rB, axis, bias, j.springRow, j.impulse, -infinite, infinite)
 		}
 
 		// ========== LIMITS ==========
@@ -344,24 +351,18 @@ func (j *DistanceJoint) solve(s *solver, useBias bool) {
 	}
 
 	// ========== RIGID ==========
-	bias, massScale, impulseScale := 0.0, 1.0, 0.0
+	bias, row := 0.0, rigid
 	if useBias {
-		bias = j.softness.biasRate * (length - j.Length)
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
+		row = j.spring
+		bias = row.biasRate * (length - j.Length)
 	}
-	j.impulse = solveLinearAxis(stateA, stateB, rA, rB, axis, bias, massScale, impulseScale, j.impulse, -infinite, infinite)
+	j.impulse = solveLinearAxis(stateA, stateB, rA, rB, axis, bias, row, j.impulse, -infinite, infinite)
 }
 
 // solveLimit: C >= 0 along the axis
 func (j *DistanceJoint) solveLimit(s *solver, stateA, stateB *bodyState, rA, rB, axis mgl64.Vec3, c, accumulated float64, useBias bool) float64 {
-	bias, massScale, impulseScale := 0.0, 1.0, 0.0
-	if c > 0 {
-		bias = c * s.invH
-	} else if useBias {
-		bias = j.softness.biasRate * c
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
-	}
-	return solveLinearAxis(stateA, stateB, rA, rB, axis, bias, massScale, impulseScale, accumulated, 0, math.Inf(1))
+	bias, row := j.limitRow(s, c, useBias)
+	return solveLinearAxis(stateA, stateB, rA, rB, axis, bias, row, accumulated, 0, math.Inf(1))
 }
 
 // ========== Ball ==========
@@ -385,7 +386,7 @@ type BallJoint struct {
 	DriveHertz        float64
 	DriveDampingRatio float64
 
-	driveSoftness     softness
+	driveRow          spring
 	swingImpulse      float64
 	twistLowerImpulse float64
 	twistUpperImpulse float64
@@ -401,7 +402,9 @@ func NewBallJoint(bodyA, bodyB *actor.RigidBody, anchor, twistAxis mgl64.Vec3) *
 
 func (j *BallJoint) prepare(s *solver) {
 	j.prepareBase(s)
-	j.driveSoftness = makeSoft(j.DriveHertz, j.DriveDampingRatio, s.h)
+	if j.DriveHertz > 0 {
+		j.driveRow = newSpring(j.DriveHertz, j.DriveDampingRatio, s.h)
+	}
 }
 
 func (j *BallJoint) warmStart(s *solver) {
@@ -421,7 +424,7 @@ func (j *BallJoint) solve(s *solver, useBias bool) {
 		cdot := stateB.angularVelocity.Sub(stateA.angularVelocity)
 		k := stateA.inverseInertia.Add(stateB.inverseInertia)
 		if math.Abs(k.Det()) > 1e-30 {
-			impulse := k.Inv().Mul3x1(cdot.Add(c.Mul(j.driveSoftness.biasRate))).Mul(-j.driveSoftness.massScale).Sub(j.driveImpulse.Mul(j.driveSoftness.impulseScale))
+			impulse := j.driveRow.impulse3(k.Inv(), cdot, c.Mul(j.driveRow.biasRate), j.driveImpulse)
 			j.driveImpulse = j.driveImpulse.Add(impulse)
 			applyAngular(stateA, stateB, impulse)
 		}
@@ -468,7 +471,7 @@ type HingeJoint struct {
 	SpringHertz        float64
 	SpringDampingRatio float64
 
-	springSoftness softness
+	springRow      spring
 	angularImpulse mgl64.Vec3 // keeps the axes aligned
 	lowerImpulse   float64
 	upperImpulse   float64
@@ -484,7 +487,9 @@ func NewHingeJoint(bodyA, bodyB *actor.RigidBody, anchor, axis mgl64.Vec3) *Hing
 
 func (j *HingeJoint) prepare(s *solver) {
 	j.prepareBase(s)
-	j.springSoftness = makeSoft(j.SpringHertz, j.SpringDampingRatio, s.h)
+	if j.SpringHertz > 0 {
+		j.springRow = newSpring(j.SpringHertz, j.SpringDampingRatio, s.h)
+	}
 	j.axis = j.frameA.Rotate(mgl64.Vec3{1, 0, 0})
 }
 
@@ -520,7 +525,7 @@ func (j *HingeJoint) solve(s *solver, useBias bool) {
 	// ========== SPRING ==========
 	if j.EnableSpring && j.SpringHertz > 0 {
 		c := math.Remainder(angle-j.TargetAngle, 2*math.Pi)
-		impulse := -j.springSoftness.massScale*mass*(cdot()+j.springSoftness.biasRate*c) - j.springSoftness.impulseScale*j.springImpulse
+		impulse := j.springRow.impulse(mass, cdot(), j.springRow.biasRate*c, j.springImpulse)
 		j.springImpulse += impulse
 		applyAngular(stateA, stateB, j.axis.Mul(impulse))
 	}
@@ -549,17 +554,19 @@ func (j *HingeJoint) solve(s *solver, useBias bool) {
 		k11, k12, k22 := u1.Dot(k.Mul3x1(u1)), u1.Dot(k.Mul3x1(u2)), u2.Dot(k.Mul3x1(u2))
 		det := k11*k22 - k12*k12
 		if det > 1e-30 {
-			bias1, bias2, massScale, impulseScale := 0.0, 0.0, 1.0, 0.0
+			bias1, bias2, row := 0.0, 0.0, rigid
 			if useBias {
-				bias1, bias2 = j.softness.biasRate*u1.Dot(axisError), j.softness.biasRate*u2.Dot(axisError)
-				massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
+				row = j.spring
+				bias1, bias2 = row.biasRate*u1.Dot(axisError), row.biasRate*u2.Dot(axisError)
 			}
 			b1, b2 := u1.Dot(relative)+bias1, u2.Dot(relative)+bias2
 			// solve the 2x2 system
 			l1 := (k22*b1 - k12*b2) / det
 			l2 := (k11*b2 - k12*b1) / det
 			accumulated1, accumulated2 := j.angularImpulse.Dot(u1), j.angularImpulse.Dot(u2)
-			impulse := u1.Mul(-massScale*l1 - impulseScale*accumulated1).Add(u2.Mul(-massScale*l2 - impulseScale*accumulated2))
+			// λ = -(K⁻¹ (v + b) + gamma * accumulated) / (1 + gamma), on both axes
+			scale := -1 / (1 + row.gamma)
+			impulse := u1.Mul(scale * (l1 + row.gamma*accumulated1)).Add(u2.Mul(scale * (l2 + row.gamma*accumulated2)))
 			j.angularImpulse = j.angularImpulse.Add(impulse)
 			applyAngular(stateA, stateB, impulse)
 		}
@@ -598,14 +605,14 @@ func (j *FixedJoint) solve(s *solver, useBias bool) {
 	frameA, frameB := j.currentFrames(stateA, stateB)
 	cdot := stateB.angularVelocity.Sub(stateA.angularVelocity)
 	bias := mgl64.Vec3{}
-	massScale, impulseScale := 1.0, 0.0
+	row := rigid
 	if useBias {
-		bias = rotationError(frameB, frameA).Mul(j.softness.biasRate)
-		massScale, impulseScale = j.softness.massScale, j.softness.impulseScale
+		row = j.spring
+		bias = rotationError(frameB, frameA).Mul(row.biasRate)
 	}
 	k := stateA.inverseInertia.Add(stateB.inverseInertia)
 	if math.Abs(k.Det()) > 1e-30 {
-		impulse := k.Inv().Mul3x1(cdot.Add(bias)).Mul(-massScale).Sub(j.angularImpulse.Mul(impulseScale))
+		impulse := row.impulse3(k.Inv(), cdot, bias, j.angularImpulse)
 		j.angularImpulse = j.angularImpulse.Add(impulse)
 		applyAngular(stateA, stateB, impulse)
 	}

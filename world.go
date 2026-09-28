@@ -9,7 +9,14 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const DEFAULT_WORKERS = 1
+// DefaultWorkers: the collision detection and the solver run on one goroutine by default
+const DefaultWorkers = 1
+
+const (
+	// defaultCellSize & defaultCells: the spatial grid of a World without SpatialGrid (m)
+	defaultCellSize = 2.0
+	defaultCells    = 4096
+)
 
 type World struct {
 	// List of all rigid bodies in the world
@@ -122,11 +129,11 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	// the bodies touching the removed body wake up (with their islands): they may have to fall.
 	// The sleeping bodies have no contact anymore: their AABB is used
 	w.islands.remove(body)
-	aabb := body.Shape.GetAABB()
+	aabb := body.AABB()
 	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
 	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
 	for _, other := range w.Bodies {
-		if other.IsSleeping && aabb.Overlaps(other.Shape.GetAABB()) {
+		if other.IsSleeping && aabb.Overlaps(other.AABB()) {
 			w.islands.wake(other)
 		}
 	}
@@ -170,7 +177,7 @@ func (w *World) Close() {
 func (w *World) UpdateHeightfield(body *actor.RigidBody, minX, minZ, maxX, maxZ int) {
 	field := body.Shape.(*actor.Heightfield)
 	field.Update(minX, minZ, maxX, maxZ)
-	body.Shape.ComputeAABB(body.Transform)
+	body.UpdateAABB()
 	w.changed = append(w.changed, body)
 
 	// the region in the local space of the terrain, around the changed samples
@@ -181,7 +188,7 @@ func (w *World) UpdateHeightfield(body *actor.RigidBody, minX, minZ, maxX, maxZ 
 		if !other.IsSleeping {
 			continue
 		}
-		bounds := localBounds(body.Transform, other.Shape.GetAABB())
+		bounds := localBounds(body.Transform, other.AABB())
 		if bounds.Max.X() >= regionMinX && bounds.Min.X() <= regionMaxX && bounds.Max.Z() >= regionMinZ && bounds.Min.Z() <= regionMaxZ {
 			w.islands.wake(other)
 		}
@@ -197,11 +204,15 @@ func (w *World) Step(dt float64) {
 	if dt <= 0 {
 		return
 	}
-	workers := max(DEFAULT_WORKERS, w.Workers)
+	workers := max(DefaultWorkers, w.Workers)
 	substeps := max(1, w.Substeps)
 	contactHertz := w.ContactHertz
 	if contactHertz <= 0 {
 		contactHertz = DefaultContactHertz
+	}
+
+	if w.SpatialGrid == nil {
+		w.SpatialGrid = NewSpatialGrid(defaultCellSize, defaultCells)
 	}
 
 	w.wakeTouchedBodies()
@@ -234,9 +245,7 @@ func (w *World) Step(dt float64) {
 		s.integratePositions(dt)
 		s.relax()
 	}
-	for range restitutionIterations {
-		s.restitution()
-	}
+	s.restitution()
 	s.storeImpulses()
 	s.finalize()
 	pool.end()
@@ -327,7 +336,7 @@ func (w *World) activeJoints() []Joint {
 // computeAABB of the body i, enlarged by the distance it can travel during the step
 func (w *World) computeAABB(i int) {
 	body := w.Bodies[i]
-	aabb := body.Shape.GetAABB()
+	aabb := body.AABB()
 	if _, isPlane := body.Shape.(*actor.Plane); !isPlane {
 		margin := reach(body, aabb, w.dt)
 		aabb = actor.AABB{Min: aabb.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: aabb.Max.Add(mgl64.Vec3{margin, margin, margin})}
@@ -390,7 +399,7 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 		if _, isPlane := body.Shape.(*actor.Plane); isPlane {
 			continue
 		}
-		aabb := body.Shape.GetAABB()
+		aabb := body.AABB()
 		speed += body.AngularVelocity.Len() * aabb.Max.Sub(aabb.Min).Len() / 2
 	}
 	return speed

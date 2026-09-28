@@ -140,23 +140,23 @@ func TestCapsuleInertiaSphereLimit(t *testing.T) {
 func TestCapsuleComputeAABB(t *testing.T) {
 	c := &Capsule{HalfHeight: 1, Radius: 0.5}
 
-	c.ComputeAABB(capsuleTransform(mgl64.Vec3{1, 2, 3}, mgl64.QuatIdent()))
+	got := c.ComputeAABB(capsuleTransform(mgl64.Vec3{1, 2, 3}, mgl64.QuatIdent()))
 	want := AABB{Min: mgl64.Vec3{0.5, 0.5, 2.5}, Max: mgl64.Vec3{1.5, 3.5, 3.5}}
-	if got := c.GetAABB(); !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
+	if !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
 		t.Errorf("upright AABB = %v, want %v", got, want)
 	}
 
-	c.ComputeAABB(capsuleTransform(mgl64.Vec3{0, 0, 0}, lyingAlongX))
+	got = c.ComputeAABB(capsuleTransform(mgl64.Vec3{0, 0, 0}, lyingAlongX))
 	want = AABB{Min: mgl64.Vec3{-1.5, -0.5, -0.5}, Max: mgl64.Vec3{1.5, 0.5, 0.5}}
-	if got := c.GetAABB(); !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
+	if !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
 		t.Errorf("lying AABB = %v, want %v", got, want)
 	}
 
 	// 45° around Z: the segment end sits at (±sqrt(2)/2, ±sqrt(2)/2, 0).
-	c.ComputeAABB(capsuleTransform(mgl64.Vec3{0, 0, 0}, mgl64.QuatRotate(math.Pi/4, mgl64.Vec3{0, 0, 1})))
+	got = c.ComputeAABB(capsuleTransform(mgl64.Vec3{0, 0, 0}, mgl64.QuatRotate(math.Pi/4, mgl64.Vec3{0, 0, 1})))
 	e := math.Sqrt2/2 + 0.5
 	want = AABB{Min: mgl64.Vec3{-e, -e, -0.5}, Max: mgl64.Vec3{e, e, 0.5}}
-	if got := c.GetAABB(); !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
+	if !vec3Equal(got.Min, want.Min, 1e-12) || !vec3Equal(got.Max, want.Max, 1e-12) {
 		t.Errorf("tilted AABB = %v, want %v", got, want)
 	}
 }

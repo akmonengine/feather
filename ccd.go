@@ -99,10 +99,8 @@ func (w *World) continuous(s *solver, dt float64) {
 // stopAtImpact moves the body back to its first impact during its motion
 func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float64, scratch *ccdScratch) {
 	// the bodies around the motion
-	body.Shape.ComputeAABB(motion.start)
-	swept := body.Shape.GetAABB()
-	body.Shape.ComputeAABB(motion.end)
-	end := body.Shape.GetAABB()
+	swept := body.Shape.ComputeAABB(motion.start)
+	end := body.Shape.ComputeAABB(motion.end)
 	for k := 0; k < 3; k++ {
 		swept.Min[k] = math.Min(swept.Min[k], end.Min[k])
 		swept.Max[k] = math.Max(swept.Max[k], end.Max[k])
@@ -119,10 +117,8 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 		if other.BodyType != actor.BodyTypeStatic && (!body.IsBullet || other.IsBullet) {
 			continue
 		}
-		if !swept.Overlaps(other.Shape.GetAABB()) {
-			if _, isPlane := other.Shape.(*actor.Plane); !isPlane {
-				continue
-			}
+		if !swept.Overlaps(other.AABB()) {
+			continue
 		}
 		switch shape := other.Shape.(type) {
 		case *actor.Plane:
@@ -138,7 +134,7 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 	if fraction < 1 {
 		body.Transform = motion.at(fraction)
 	}
-	body.Shape.ComputeAABB(body.Transform)
+	body.UpdateAABB()
 }
 
 // impact: the fraction of the motion at the first impact with the convex shape or the plane, 1 if there is none.
@@ -225,7 +221,7 @@ func shapeExtents(shape actor.ShapeInterface) (float64, float64) {
 		h := shape.HalfExtents
 		return math.Min(h.X(), math.Min(h.Y(), h.Z())), h.Len()
 	}
-	aabb := shape.GetAABB()
+	aabb := shape.ComputeAABB(actor.NewTransform())
 	size := aabb.Max.Sub(aabb.Min).Mul(0.5)
 	return math.Min(size.X(), math.Min(size.Y(), size.Z())), size.Len()
 }

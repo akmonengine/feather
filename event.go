@@ -1,21 +1,19 @@
 package feather
 
 import (
-	"unsafe"
-
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
 )
 
 const (
-	TRIGGER_ENTER EventType = iota
-	COLLISION_ENTER
-	TRIGGER_STAY
-	COLLISION_STAY
-	TRIGGER_EXIT
-	COLLISION_EXIT
-	ON_SLEEP
-	ON_WAKE
+	EventTriggerEnter EventType = iota
+	EventCollisionEnter
+	EventTriggerStay
+	EventCollisionStay
+	EventTriggerExit
+	EventCollisionExit
+	EventSleep
+	EventWake
 )
 
 type pairKey struct {
@@ -23,12 +21,10 @@ type pairKey struct {
 	bodyB *actor.RigidBody
 }
 
-// makePairKey creates a normalized pair key with consistent ordering
+// makePairKey creates a normalized pair key with consistent ordering (the serials of the bodies).
+// The key is only used to find a pair, never to order the computations
 func makePairKey(bodyA, bodyB *actor.RigidBody) pairKey {
-	ptrA := uintptr(unsafe.Pointer(bodyA))
-	ptrB := uintptr(unsafe.Pointer(bodyB))
-
-	if ptrB < ptrA {
+	if bodyB.Serial() < bodyA.Serial() {
 		bodyA, bodyB = bodyB, bodyA
 	}
 
@@ -48,21 +44,21 @@ type TriggerEnterEvent struct {
 	BodyB *actor.RigidBody
 }
 
-func (e TriggerEnterEvent) Type() EventType { return TRIGGER_ENTER }
+func (e TriggerEnterEvent) Type() EventType { return EventTriggerEnter }
 
 type TriggerStayEvent struct {
 	BodyA *actor.RigidBody
 	BodyB *actor.RigidBody
 }
 
-func (e TriggerStayEvent) Type() EventType { return TRIGGER_STAY }
+func (e TriggerStayEvent) Type() EventType { return EventTriggerStay }
 
 type TriggerExitEvent struct {
 	BodyA *actor.RigidBody
 	BodyB *actor.RigidBody
 }
 
-func (e TriggerExitEvent) Type() EventType { return TRIGGER_EXIT }
+func (e TriggerExitEvent) Type() EventType { return EventTriggerExit }
 
 // Collision events
 type CollisionEnterEvent struct {
@@ -70,34 +66,34 @@ type CollisionEnterEvent struct {
 	BodyB *actor.RigidBody
 }
 
-func (e CollisionEnterEvent) Type() EventType { return COLLISION_ENTER }
+func (e CollisionEnterEvent) Type() EventType { return EventCollisionEnter }
 
 type CollisionStayEvent struct {
 	BodyA *actor.RigidBody
 	BodyB *actor.RigidBody
 }
 
-func (e CollisionStayEvent) Type() EventType { return COLLISION_STAY }
+func (e CollisionStayEvent) Type() EventType { return EventCollisionStay }
 
 type CollisionExitEvent struct {
 	BodyA *actor.RigidBody
 	BodyB *actor.RigidBody
 }
 
-func (e CollisionExitEvent) Type() EventType { return COLLISION_EXIT }
+func (e CollisionExitEvent) Type() EventType { return EventCollisionExit }
 
 // Sleep/Wake events
 type SleepEvent struct {
 	Body *actor.RigidBody
 }
 
-func (e SleepEvent) Type() EventType { return ON_SLEEP }
+func (e SleepEvent) Type() EventType { return EventSleep }
 
 type WakeEvent struct {
 	Body *actor.RigidBody
 }
 
-func (e WakeEvent) Type() EventType { return ON_WAKE }
+func (e WakeEvent) Type() EventType { return EventWake }
 
 // EventListener - callback for events
 type EventListener func(event Event)
@@ -196,14 +192,14 @@ func (e *Events) processCollisionEvents() {
 		if e.previousActivePairs[pair] {
 			// Pair was active before and still is, Stay
 			if isTrigger {
-				if e.hasListeners(TRIGGER_STAY) {
+				if e.hasListeners(EventTriggerStay) {
 					e.buffer = append(e.buffer, TriggerStayEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
 					})
 				}
 			} else {
-				if e.hasListeners(COLLISION_STAY) {
+				if e.hasListeners(EventCollisionStay) {
 					e.buffer = append(e.buffer, CollisionStayEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
@@ -213,14 +209,14 @@ func (e *Events) processCollisionEvents() {
 		} else {
 			// New pair, Enter
 			if isTrigger {
-				if e.hasListeners(TRIGGER_ENTER) {
+				if e.hasListeners(EventTriggerEnter) {
 					e.buffer = append(e.buffer, TriggerEnterEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
 					})
 				}
 			} else {
-				if e.hasListeners(COLLISION_ENTER) {
+				if e.hasListeners(EventCollisionEnter) {
 					e.buffer = append(e.buffer, CollisionEnterEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
@@ -242,14 +238,14 @@ func (e *Events) processCollisionEvents() {
 			isTrigger := pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
 
 			if isTrigger {
-				if e.hasListeners(TRIGGER_EXIT) {
+				if e.hasListeners(EventTriggerExit) {
 					e.buffer = append(e.buffer, TriggerExitEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
 					})
 				}
 			} else {
-				if e.hasListeners(COLLISION_EXIT) {
+				if e.hasListeners(EventCollisionExit) {
 					e.buffer = append(e.buffer, CollisionExitEvent{
 						BodyA: pair.bodyA,
 						BodyB: pair.bodyB,
@@ -277,12 +273,12 @@ func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
 		}
 
 		if !trackedState && body.IsSleeping {
-			if e.hasListeners(ON_SLEEP) {
+			if e.hasListeners(EventSleep) {
 				e.buffer = append(e.buffer, SleepEvent{Body: body})
 			}
 			e.sleepStates[body] = true
 		} else if trackedState && !body.IsSleeping {
-			if e.hasListeners(ON_WAKE) {
+			if e.hasListeners(EventWake) {
 				e.buffer = append(e.buffer, WakeEvent{Body: body})
 			}
 			e.sleepStates[body] = false

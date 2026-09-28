@@ -85,13 +85,16 @@ Up to v0.2.0, Feather used a simplified XPBD solver. The same scenes (`bench/`, 
 | 10 N during 1 s on 32.7 kg | 15279 m/s | 0.306 m/s | 0.306 m/s |
 | Same scene, run twice | 39/40 bodies differ | identical | identical |
 | EPA sphere-box normal (p99) | 2.7° | 0.03° | 0° |
-| Step, 10 / 100 / 500 bodies, 1 worker | 0.41 / 1.94 / 8.8 ms | 0.03 / 0.25 / 1.17 ms | |
+| Step, 10 / 100 / 500 bodies resting on the ground (one layer of boxes & spheres), 1 worker | 0.41 / 1.94 / 8.8 ms | 0.03 / 0.27 / 1.28 ms | |
 
 ```
 cd bench
 go run .                                            # current version
 go run -tags v020 -modfile=go.v020.mod .            # v0.2.0
 ```
+
+Both versions run 12 substeps at 50 Hz. A heavier scene, 500 boxes & spheres falling on each other (`BenchmarkWorldStep`),
+takes ~5.5 ms per step on 1 worker, ~1.9 ms on 8 workers.
 
 ### Constraints
 - Contact: generated when a collision is detected between two rigid bodies, up to 4 points (manifold), with friction,
@@ -122,23 +125,24 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
 
 ## Sources
 - https://box2d.org/posts/2024/02/solver2d/
-- https://github.com/erincatto/box2d (v3, contact_solver.c & solver.c)
+- https://github.com/erincatto/box2d (v3)
 - https://box2d.org/files/ErinCatto_SoftConstraints_GDC2011.pdf
 - https://box2d.org/files/ErinCatto_NumericalMethods_GDC2015.pdf (gyroscopic torque)
 - https://github.com/bepu/bepuphysics2
 - https://cse442-17f.github.io/Gilbert-Johnson-Keerthi-Distance-Algorithm/
 - https://winter.dev/articles/epa-algorithm
 - Christer Ericson, Real-Time Collision Detection (2004)
-- https://github.com/jrouwe/JoltPhysics (active edges, contact reduction, body pair cache)
+- https://github.com/jrouwe/JoltPhysics (active edges, contact patches, body pair cache)
+- W. J. Stronge, Impact Mechanics (2000): Poisson's hypothesis for the restitution
 - Brian Mirtich, Impulse-based Dynamic Simulation of Rigid Body Systems (1996): conservative advancement
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
-Feather implements algorithms described by these projects, without their code:
-- [Box2D](https://github.com/erincatto/box2d), by Erin Catto (MIT License): the TGS Soft solver, the graph coloring,
-  the continuous collision
-- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe (MIT License): the active edges of the
-  terrains, the contact patches, the body pair cache
+Feather is written from the publications and the documentation of these projects:
+- [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
+  the graph coloring, the continuous collision
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
+  the contact patches, the body pair cache
 
 ## Contributing Guidelines
 

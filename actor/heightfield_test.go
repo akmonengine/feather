@@ -186,8 +186,7 @@ func TestHeightfieldUpdate(t *testing.T) {
 func TestHeightfieldAABB(t *testing.T) {
 	h := randomHeightfield(7, 9, 5)
 	transform := Transform{Position: mgl64.Vec3{1, 2, 3}, Rotation: mgl64.QuatRotate(0.7, mgl64.Vec3{0, 1, 0})}
-	h.ComputeAABB(transform)
-	aabb := h.GetAABB()
+	aabb := h.ComputeAABB(transform)
 	for x := 0; x < h.XSamples; x++ {
 		for z := 0; z < h.ZSamples; z++ {
 			if !aabb.ContainsPoint(transform.ToWorld(h.localVertex(x, z))) {

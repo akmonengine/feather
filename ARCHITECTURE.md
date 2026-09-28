@@ -76,5 +76,8 @@ the static and sleeping bodies share a state with no mass.
 - The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
   triangle during the step, and sink by a few mm before the next step.
 - No friction around the normal: a ball spinning on itself on the ground never stops (no sleep).
+- A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
+  the feature of the body above the triangle, the middle of the capsule is missed.
+- No kinematic bodies (moving platforms): a body is static or dynamic.
 - The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
   not the other pairs: 2 fast dynamic bodies rely on their speculative contacts.

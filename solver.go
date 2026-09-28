@@ -49,30 +49,47 @@ const (
 	// the contact hertz can't exceed 1/8 of the sub-steps rate, otherwise it becomes unstable
 	hertzPerSubstepRate = 0.125
 
-	restitutionIterations = 2
-
 	// a new contact point takes the impulses of an old point closer than this distance (m)
 	contactMatchDistance = 4 * LinearSlop
 )
 
-// softness is a soft constraint (spring + damper), from its frequency and damping ratio
-type softness struct {
-	biasRate     float64
-	massScale    float64
-	impulseScale float64
+// spring is a soft constraint (Erin Catto, "Soft Constraints", GDC 2011): the error of the constraint is a spring
+// of frequency ω and damping ratio ζ, whatever the mass (k = m ω², c = 2 m ζ ω), integrated implicitly over h:
+//
+//	biasRate = k / (c + h k) = ω / (2ζ + h ω)                     // the part of the error removed per second
+//	gamma    = m / (h (c + h k)) = 1 / (h ω (2ζ + h ω))            // the softness γ of the paper, times the mass
+//
+// A row of effective mass m, relative velocity v and bias b (biasRate * error) gets the impulse
+//
+//	λ = -(m (v + b) + gamma * accumulated) / (1 + gamma)
+//
+// A rigid row has gamma = 0: λ = -m (v + b)
+type spring struct {
+	biasRate float64
+	gamma    float64
 }
 
-func makeSoft(hertz, zeta, h float64) softness {
-	if hertz == 0 {
-		return softness{}
+// rigid: a constraint without softness
+var rigid = spring{}
+
+// newSpring for a frequency and a damping ratio, over the substep h. A spring of 0 hertz doesn't exist (it would be
+// infinitely soft): the callers check the frequency first
+func newSpring(hertz, dampingRatio, h float64) spring {
+	if hertz <= 0 {
+		panic("feather: a spring needs a frequency > 0")
 	}
-
 	omega := 2 * math.Pi * hertz
-	a1 := 2*zeta + h*omega
-	a2 := h * omega * a1
-	a3 := 1 / (1 + a2)
+	return spring{biasRate: omega / (2*dampingRatio + h*omega), gamma: 1 / (h * omega * (2*dampingRatio + h*omega))}
+}
 
-	return softness{biasRate: omega / a1, massScale: a2 * a3, impulseScale: a3}
+// impulse of a row of effective mass m
+func (s spring) impulse(mass, velocity, bias, accumulated float64) float64 {
+	return -(mass*(velocity+bias) + s.gamma*accumulated) / (1 + s.gamma)
+}
+
+// impulse3 of 3 rows solved together, with the inverse of their mass matrix
+func (s spring) impulse3(inverseMass mgl64.Mat3, velocity, bias, accumulated mgl64.Vec3) mgl64.Vec3 {
+	return inverseMass.Mul3x1(velocity.Add(bias)).Add(accumulated.Mul(s.gamma)).Mul(-1 / (1 + s.gamma))
 }
 
 // bodyState is the copy of a dynamic body used by the solver during a step
@@ -84,9 +101,10 @@ type bodyState struct {
 	deltaRotation   mgl64.Quat // since the beginning of the step
 	deltaMatrix     mgl64.Mat3 // deltaRotation as a matrix, updated once per substep
 	invMass         float64
-	inverseInertia  mgl64.Mat3 // inverse inertia in world space, at the beginning of the step
+	inverseInertia  mgl64.Mat3 // inverse inertia in world space, turned with the body during the step
+	startInertia    mgl64.Mat3 // inverse inertia in world space, at the beginning of the step
 	rotation        mgl64.Quat // at the beginning of the step
-	gyroscopic      bool       // false if the inertia is the same on all axes: no gyroscopic torque
+	anisotropic     bool       // false if the inertia is the same on all axes: no gyroscopic torque, it doesn't turn
 }
 
 // jacobian of a contact direction d: the angular part rA × d and rB × d,
@@ -111,8 +129,7 @@ type contactPoint struct {
 	tangents           [2]jacobian
 	normalImpulse      float64
 	tangentImpulse     [2]float64
-	totalNormalImpulse float64
-	restitutionImpulse float64
+	totalNormalImpulse float64 // the normal impulse of the step: the impulse which stopped the point, for the restitution
 	normalVelocity     float64 // before the solver, for the restitution
 	friction           float64
 }
@@ -124,7 +141,7 @@ type contactConstraint struct {
 	normal      mgl64.Vec3
 	tangents    [2]mgl64.Vec3
 	restitution float64
-	softness    softness
+	spring      spring
 	points      [constraint.MaxContactPoints]contactPoint
 	pointsCount int
 
@@ -150,8 +167,8 @@ type solver struct {
 
 	// parameters of the current stage, for the jobs
 	manifolds       []constraint.Manifold
-	contactSoftness softness
-	staticSoftness  softness
+	contactSpring   spring
+	staticSpring    spring
 	gravity         mgl64.Vec3
 	maxAngularSpeed float64
 	stage           func(c *contactConstraint)
@@ -232,15 +249,16 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 			deltaMatrix:     mgl64.Ident3(),
 			invMass:         body.InverseMass(),
 			inverseInertia:  body.GetInverseInertiaWorld(),
+			startInertia:    body.GetInverseInertiaWorld(),
 			rotation:        body.Transform.Rotation,
-			gyroscopic:      !isIsotropic(body.InertiaLocal),
+			anisotropic:     !isIsotropic(body.InertiaLocal),
 		})
 	}
 
 	// ========== 2. Contact constraints ==========
 	hertz := math.Min(contactHertz, hertzPerSubstepRate*s.invH)
-	s.contactSoftness = makeSoft(hertz, ContactDampingRatio, s.h)
-	s.staticSoftness = makeSoft(2*hertz, ContactDampingRatio, s.h)
+	s.contactSpring = newSpring(hertz, ContactDampingRatio, s.h)
+	s.staticSpring = newSpring(2*hertz, ContactDampingRatio, s.h)
 
 	s.manifolds = manifolds
 	if cap(s.constraints) < len(manifolds) {
@@ -282,9 +300,9 @@ func (s *solver) prepareConstraint(i int) {
 		return
 	}
 
-	c.softness = s.contactSoftness
+	c.spring = s.contactSpring
 	if c.indexA < 0 || c.indexB < 0 {
-		c.softness = s.staticSoftness
+		c.spring = s.staticSpring
 	}
 	c.tangents[0], c.tangents[1] = tangentBasis(c.normal)
 	c.restitution = constraint.ComputeRestitution(manifold.BodyA.Material, manifold.BodyB.Material)
@@ -296,12 +314,8 @@ func (s *solver) prepareConstraint(i int) {
 	c.radiusA, c.radiusB = radiusA, radiusB
 	c.rollingResistance = constraint.ComputeRollingResistance(manifold.BodyA.Material, manifold.BodyB.Material, radiusA, radiusB)
 	if c.rollingResistance > 0 {
+		c.prepareRolling(stateA, stateB)
 		for k := range c.tangents {
-			c.rollingA[k] = stateA.inverseInertia.Mul3x1(c.tangents[k])
-			c.rollingB[k] = stateB.inverseInertia.Mul3x1(c.tangents[k])
-			if mass := c.rollingA[k].Dot(c.tangents[k]) + c.rollingB[k].Dot(c.tangents[k]); mass > 0 {
-				c.rollingMass[k] = 1 / mass
-			}
 			c.rollingImpulse[k] = manifold.RollingImpulse.Dot(c.tangents[k])
 		}
 	}
@@ -331,6 +345,18 @@ func (s *solver) prepareConstraint(i int) {
 		cp.friction = dynamicFriction
 		if tangentSpeed < StaticFrictionSpeed {
 			cp.friction = staticFriction
+		}
+	}
+}
+
+// prepareRolling: the angular velocity given by a unit rolling impulse around both tangents, and its mass
+func (c *contactConstraint) prepareRolling(stateA, stateB *bodyState) {
+	for k := range c.tangents {
+		c.rollingA[k] = stateA.inverseInertia.Mul3x1(c.tangents[k])
+		c.rollingB[k] = stateB.inverseInertia.Mul3x1(c.tangents[k])
+		c.rollingMass[k] = 0
+		if mass := c.rollingA[k].Dot(c.tangents[k]) + c.rollingB[k].Dot(c.tangents[k]); mass > 0 {
+			c.rollingMass[k] = 1 / mass
 		}
 	}
 }
@@ -436,6 +462,9 @@ func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
 		cp.tangents[0].updateMass(stateA, stateB)
 		cp.tangents[1].updateMass(stateA, stateB)
 	}
+	if c.rollingResistance > 0 {
+		c.prepareRolling(stateA, stateB)
+	}
 }
 
 // turnA: the lever arm of A is rA
@@ -484,7 +513,7 @@ func (s *solver) integrateVelocity(i int) {
 
 	// ========== ANGULAR ==========
 	angularVelocity := state.angularVelocity
-	if state.gyroscopic {
+	if state.anisotropic {
 		angularVelocity = gyroscopic(angularVelocity, state.deltaRotation.Mul(state.rotation).Normalize(), body.InertiaLocal, h)
 	}
 	state.angularVelocity = angularVelocity.Mul(angularDamping)
@@ -531,6 +560,11 @@ func (s *solver) integratePosition(i int) {
 	state.deltaPosition = state.deltaPosition.Add(state.velocity.Mul(h))
 	state.deltaRotation = integrateRotation(state.deltaRotation, state.angularVelocity.Mul(h))
 	state.deltaMatrix = rotationMatrix(state.deltaRotation)
+
+	// the inertia turns with the body, as the anchors of its contacts (turnAnchors): I⁻¹ = ΔR I⁻¹start ΔRᵀ
+	if state.anisotropic && math.Abs(state.deltaRotation.W) < turnAnchorsCos {
+		state.inverseInertia = state.deltaMatrix.Mul3(state.startInertia).Mul3(state.deltaMatrix.Transpose())
+	}
 }
 
 // rotationMatrix of a unit quaternion (column major)
@@ -571,7 +605,7 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 	}
 }
 
-// push solves the contacts with the soft constraint, to remove the overlap. No friction here.
+// push solves the contacts with their spring, to push the overlap out. No friction here.
 func (s *solver) push() {
 	for _, joint := range s.joints {
 		joint.solve(s, true)
@@ -580,35 +614,10 @@ func (s *solver) push() {
 }
 
 func (s *solver) pushConstraint(c *contactConstraint) {
-	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
-	for j := 0; j < c.pointsCount; j++ {
-		cp := &c.points[j]
-		separation := currentSeparation(stateA, stateB, cp, c.normal)
-
-		var bias, massScale, impulseScale float64
-		if separation > 0 {
-			// speculative contact: the bodies can move closer, but not further than the gap
-			bias = separation * s.invH
-			massScale = 1
-		} else {
-			bias = math.Max(c.softness.massScale*c.softness.biasRate*separation, -ContactSpeed)
-			massScale = c.softness.massScale
-			impulseScale = c.softness.impulseScale
-		}
-
-		normalVel := cp.normal.velocity(stateA, stateB, c.normal)
-		lambda := -cp.normal.mass*(massScale*normalVel+bias) - impulseScale*cp.normalImpulse
-
-		// the total impulse can't be attractive
-		newImpulse := math.Max(cp.normalImpulse+lambda, 0)
-		lambda = newImpulse - cp.normalImpulse
-		cp.normalImpulse = newImpulse
-		cp.totalNormalImpulse += lambda
-		cp.normal.apply(stateA, stateB, c.normal, lambda)
-	}
+	s.solveNormals(c, s.state(c.indexA), s.state(c.indexB), true)
 }
 
-// relax solves the contacts again without the soft constraint (it adds energy), then the friction
+// relax solves the contacts again as rigid constraints (pushing the overlap out adds energy), then the friction
 func (s *solver) relax() {
 	for _, joint := range s.joints {
 		joint.solve(s, false)
@@ -619,77 +628,99 @@ func (s *solver) relax() {
 func (s *solver) relaxConstraint(c *contactConstraint) {
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
 	c.turnAnchors(stateA, stateB)
+	s.solveNormals(c, stateA, stateB, false)
+	c.solveRolling(stateA, stateB)
+	c.solveFriction(stateA, stateB)
+}
 
-	// ========== NORMAL ==========
+// ========== NORMAL ==========
+// solveNormals: the points of the contact must not overlap. A speculative point (separation > 0) can get closer by its
+// separation during the substep, not further. An overlapping point is pushed out by the spring of the contact (soft,
+// at ContactSpeed at most), or only stopped (rigid)
+func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, soft bool) {
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
 		separation := currentSeparation(stateA, stateB, cp, c.normal)
-		bias := 0.0
+		row, bias := rigid, 0.0
 		if separation > 0 {
 			bias = separation * s.invH
+		} else if soft {
+			row = c.spring
+			bias = math.Max(row.biasRate*separation, -ContactSpeed)
 		}
-
-		normalVel := cp.normal.velocity(stateA, stateB, c.normal)
-		lambda := -cp.normal.mass * (normalVel + bias)
-		newImpulse := math.Max(cp.normalImpulse+lambda, 0)
-		lambda = newImpulse - cp.normalImpulse
-		cp.normalImpulse = newImpulse
-		cp.totalNormalImpulse += lambda
-		cp.normal.apply(stateA, stateB, c.normal, lambda)
-	}
-
-	// ========== ROLLING RESISTANCE ==========
-	if c.rollingResistance > 0 {
-		totalNormalImpulse := 0.0
-		for j := 0; j < c.pointsCount; j++ {
-			totalNormalImpulse += c.points[j].normalImpulse
-		}
-		relativeAngularVel := stateB.angularVelocity.Sub(stateA.angularVelocity)
-		previous := c.rollingImpulse
-		rollingImpulse := [2]float64{
-			previous[0] - c.rollingMass[0]*relativeAngularVel.Dot(c.tangents[0]),
-			previous[1] - c.rollingMass[1]*relativeAngularVel.Dot(c.tangents[1]),
-		}
-		maxRolling := c.rollingResistance * totalNormalImpulse
-		if length := math.Hypot(rollingImpulse[0], rollingImpulse[1]); length > maxRolling {
-			scale := 0.0
-			if length > 0 {
-				scale = maxRolling / length
-			}
-			rollingImpulse[0] *= scale
-			rollingImpulse[1] *= scale
-		}
-		c.rollingImpulse = rollingImpulse
-		c.applyRolling(stateA, stateB, [2]float64{rollingImpulse[0] - previous[0], rollingImpulse[1] - previous[1]})
-	}
-
-	// ========== FRICTION ==========
-	for j := 0; j < c.pointsCount; j++ {
-		cp := &c.points[j]
-		previous := cp.tangentImpulse
-		tangentImpulse := [2]float64{
-			previous[0] - cp.tangents[0].mass*cp.tangents[0].velocity(stateA, stateB, c.tangents[0]),
-			previous[1] - cp.tangents[1].mass*cp.tangents[1].velocity(stateA, stateB, c.tangents[1]),
-		}
-
-		// Coulomb's law: |friction| <= µ * normal impulse
-		maxFriction := cp.friction * cp.normalImpulse
-		if length := math.Hypot(tangentImpulse[0], tangentImpulse[1]); length > maxFriction {
-			scale := 0.0
-			if length > 0 {
-				scale = maxFriction / length
-			}
-			tangentImpulse[0] *= scale
-			tangentImpulse[1] *= scale
-		}
-		cp.tangentImpulse = tangentImpulse
-
-		cp.tangents[0].apply(stateA, stateB, c.tangents[0], tangentImpulse[0]-previous[0])
-		cp.tangents[1].apply(stateA, stateB, c.tangents[1], tangentImpulse[1]-previous[1])
+		velocity := cp.normal.velocity(stateA, stateB, c.normal)
+		cp.addNormalImpulse(stateA, stateB, c.normal, row.impulse(cp.normal.mass, velocity, bias, cp.normalImpulse))
 	}
 }
 
-// restitution is applied once, after the sub-steps. The bounce can't add energy.
+// addNormalImpulse: the accumulated impulse of a contact stays positive (it pushes, never pulls).
+// Returns the impulse applied
+func (cp *contactPoint) addNormalImpulse(stateA, stateB *bodyState, normal mgl64.Vec3, impulse float64) float64 {
+	accumulated := math.Max(cp.normalImpulse+impulse, 0)
+	impulse = accumulated - cp.normalImpulse
+	cp.normalImpulse = accumulated
+	cp.totalNormalImpulse += impulse
+	cp.normal.apply(stateA, stateB, normal, impulse)
+	return impulse
+}
+
+// ========== ROLLING RESISTANCE ==========
+// solveRolling: a torque against the rolling, up to rollingResistance * the normal impulse
+func (c *contactConstraint) solveRolling(stateA, stateB *bodyState) {
+	if c.rollingResistance <= 0 {
+		return
+	}
+	normalImpulse := 0.0
+	for j := 0; j < c.pointsCount; j++ {
+		normalImpulse += c.points[j].normalImpulse
+	}
+	rolling := stateB.angularVelocity.Sub(stateA.angularVelocity)
+	previous := c.rollingImpulse
+	impulse := [2]float64{
+		previous[0] - c.rollingMass[0]*rolling.Dot(c.tangents[0]),
+		previous[1] - c.rollingMass[1]*rolling.Dot(c.tangents[1]),
+	}
+	clampDisk(&impulse, c.rollingResistance*normalImpulse)
+	c.rollingImpulse = impulse
+	c.applyRolling(stateA, stateB, [2]float64{impulse[0] - previous[0], impulse[1] - previous[1]})
+}
+
+// ========== FRICTION ==========
+// solveFriction: Coulomb's law, the friction impulse is at most µ * the normal impulse (a disk in the tangent plane)
+func (c *contactConstraint) solveFriction(stateA, stateB *bodyState) {
+	for j := 0; j < c.pointsCount; j++ {
+		cp := &c.points[j]
+		previous := cp.tangentImpulse
+		impulse := [2]float64{
+			previous[0] - cp.tangents[0].mass*cp.tangents[0].velocity(stateA, stateB, c.tangents[0]),
+			previous[1] - cp.tangents[1].mass*cp.tangents[1].velocity(stateA, stateB, c.tangents[1]),
+		}
+		clampDisk(&impulse, cp.friction*cp.normalImpulse)
+		cp.tangentImpulse = impulse
+		cp.tangents[0].apply(stateA, stateB, c.tangents[0], impulse[0]-previous[0])
+		cp.tangents[1].apply(stateA, stateB, c.tangents[1], impulse[1]-previous[1])
+	}
+}
+
+// clampDisk scales the 2D impulse down to the radius
+func clampDisk(impulse *[2]float64, radius float64) {
+	length := math.Hypot(impulse[0], impulse[1])
+	if length <= radius {
+		return
+	}
+	scale := 0.0
+	if length > 0 {
+		scale = radius / length
+	}
+	impulse[0] *= scale
+	impulse[1] *= scale
+}
+
+// ========== RESTITUTION ==========
+// restitution, after the substeps: a point which hit faster than RestitutionThreshold bounces. Its impulse goes towards
+// the velocity -restitution * its velocity before the step (Newton), and is at most restitution times the impulse which
+// stopped it, its normal impulse of the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics): a pile of bodies
+// doesn't give back more than it absorbed
 func (s *solver) restitution() {
 	s.solveConstraints(s.jobs.restitution)
 }
@@ -698,35 +729,18 @@ func (s *solver) restitutionConstraint(c *contactConstraint) {
 	if c.restitution == 0 {
 		return
 	}
-
 	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
-		compressionImpulse := cp.totalNormalImpulse - cp.restitutionImpulse
-		bouncing := cp.normalVelocity < -RestitutionThreshold && compressionImpulse > 0
-
-		var bias float64
-		if bouncing {
-			bias = c.restitution * cp.normalVelocity
-		} else if separation := currentSeparation(stateA, stateB, cp, c.normal); separation > 0 {
-			bias = separation * s.invH
+		if cp.normalVelocity >= -RestitutionThreshold || cp.totalNormalImpulse <= 0 {
+			continue
 		}
-
-		normalVel := cp.normal.velocity(stateA, stateB, c.normal)
-		lambda := -cp.normal.mass * (normalVel + bias)
-		newImpulse := math.Max(cp.normalImpulse+lambda, 0)
-		lambda = newImpulse - cp.normalImpulse
-
-		approachImpulse := math.Min(math.Max(-cp.normal.mass*normalVel, 0), math.Max(lambda, 0))
-		if bouncing {
-			allowance := c.restitution*(compressionImpulse+approachImpulse) - cp.restitutionImpulse
-			lambda = math.Min(lambda, approachImpulse+math.Max(allowance, 0))
+		velocity := cp.normal.velocity(stateA, stateB, c.normal)
+		newton := -cp.normal.mass * (velocity + c.restitution*cp.normalVelocity)
+		poisson := c.restitution * cp.totalNormalImpulse
+		if impulse := math.Min(newton, poisson); impulse > 0 {
+			cp.addNormalImpulse(stateA, stateB, c.normal, impulse)
 		}
-
-		cp.normalImpulse += lambda
-		cp.restitutionImpulse += lambda - approachImpulse
-		cp.totalNormalImpulse += lambda
-		cp.normal.apply(stateA, stateB, c.normal, lambda)
 	}
 }
 
@@ -759,5 +773,5 @@ func (s *solver) finalizeBody(i int) {
 	body.Velocity = state.velocity
 	body.AngularVelocity = state.angularVelocity
 	body.ClearForces()
-	body.Shape.ComputeAABB(body.Transform)
+	body.UpdateAABB()
 }

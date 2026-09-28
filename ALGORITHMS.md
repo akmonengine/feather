@@ -55,7 +55,8 @@ From the normal of EPA, each body gives the feature facing the other body (a fac
 - **Otherwise** (crossing edges, a vertex, a sphere): the witness point of EPA.
 
 The deepest point has the separation of EPA, the other points are higher along the normal.
-The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most area.
+The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most
+area.
 The contacts with a plane are reduced the same way.
 
 Spheres and capsules don't use EPA: their contact comes from the closest points of their segments (Ericson 5.1.9).
@@ -94,31 +95,40 @@ wheels), and keeps the anchors fixed during the step. Feather lets the bodies tu
 contacts turn with the bodies before each `Relax` (`turnAnchors`), when a body turned more than 0.01 rad since the
 beginning of the step: a tumbling capsule at 30 rad/s turns by 0.5 rad per step, it would otherwise be pushed at the place
 of its contact at the beginning of the step, and the solver would see the contact open while it sinks.
-The cores and `turnAnchors` are Feather's own: without them, a pile of bodies tumbling on a slope sinks by 14 cm.
+The inertia turns with the body too (`I⁻¹ = ΔR I⁻¹start ΔRᵀ`).
+To our knowledge, the cores (the idea of the convex radius of Bullet & Jolt, applied to the separation) and `turnAnchors`
+are Feather's own: without them, the bodies tumbling on a slope sink by 14 cm (`TestPileLandsWithoutSinking`).
 
 ### Soft constraint
-The contact is a spring + damper, with a frequency `ω = 2π * hertz` and a damping ratio `ζ`:
+From Erin Catto, [Soft Constraints](https://box2d.org/files/ErinCatto_SoftConstraints_GDC2011.pdf) (GDC 2011): the
+overlap is a spring of frequency `ω = 2π * hertz` and damping ratio `ζ`, whatever the mass (`k = m ω²`, `c = 2 m ζ ω`),
+integrated implicitly over the substep `h`:
 ````
-a1 = 2ζ + hω
-a2 = hω * a1
-a3 = 1 / (1 + a2)
-biasRate = ω / a1,  massScale = a2 * a3,  impulseScale = a3
+biasRate = k / (c + h k) = ω / (2ζ + h ω)
+gamma    = m / (h (c + h k)) = 1 / (h ω (2ζ + h ω))       // the softness γ of the paper, times the mass
 
 Push:
-    if separation > 0 then bias = separation / h          // speculative: can get closer, not further than the gap
-    else bias = max(massScale * biasRate * separation, -ContactSpeed)
-    λ = -normalMass * (massScale * vn + bias) - impulseScale * λ_total
+    if separation > 0 then bias = separation / h           // speculative: can get closer, not further than the gap
+    else bias = max(biasRate * separation, -ContactSpeed)
+    λ = -(m (vn + bias) + gamma * λ_total) / (1 + gamma)
     λ_total = max(λ_total + λ, 0)
 ````
-`Relax` solves the same constraint without the spring (bias only for the speculative contacts), which removes the energy added by the spring.
+`Relax` solves the same constraint rigid (`gamma = 0`, bias only for the speculative contacts): the spring adds energy.
+The joints use the same soft rows.
 
 ### Friction
 Solved in `Relax`, along 2 tangents, with Coulomb's law: the tangent impulse stays in a disc of radius `µ * λ_normal`.
 µ is the static friction when the contact point slides slower than 1 cm/s, the dynamic friction otherwise.
 
 ### Restitution
-Applied after the substeps, for the contacts hitting faster than 1 m/s:
-`λ = -normalMass * (vn + e * vn_before)`, limited so that the bounce never adds energy.
+Applied once after the substeps, for the contacts hitting faster than 1 m/s. The bounce impulse goes towards the
+velocity `-e * vn_before` (Newton), and is at most `e` times the impulse which stopped the point, its normal impulse of
+the step (Poisson's hypothesis, W. J. Stronge, Impact Mechanics):
+````
+λ = max(0, min(-m (vn + e * vn_before), e * λ_step))
+````
+Both are needed: a pile of balls bouncing with `e = 1` gains energy with Newton alone (411 J) or Poisson alone
+(3523 J), never with both (`TestRestitutionNeverAddsEnergy`).
 
 ### Gyroscopic torque
 `ω × Iω` is integrated implicitly (1 Newton-Raphson iteration in body space), as described by Erin Catto

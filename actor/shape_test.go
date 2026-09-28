@@ -191,8 +191,7 @@ func TestBoxComputeAABBWithRotation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.box.ComputeAABB(tt.transform)
-			aabb := tt.box.GetAABB()
+			aabb := tt.box.ComputeAABB(tt.transform)
 
 			// Vérifications de base
 			if !vec3Equal(aabb.Min, tt.expectedMin, 1e-3) {
@@ -344,8 +343,7 @@ func TestShapeConsistency(t *testing.T) {
 			Rotation: mgl64.QuatRotate(mgl64.DegToRad(45), mgl64.Vec3{0, 0, 1}),
 		}
 
-		box.ComputeAABB(transform)
-		aabb := box.GetAABB()
+		aabb := box.ComputeAABB(transform)
 
 		// L'AABB doit contenir tous les coins transformés
 		corners := [8]mgl64.Vec3{
@@ -429,8 +427,7 @@ func TestSphereComputeAABB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.sphere.ComputeAABB(tt.transform)
-			aabb := tt.sphere.GetAABB()
+			aabb := tt.sphere.ComputeAABB(tt.transform)
 
 			// Vérifications de base
 			if !vec3Equal(aabb.Min, tt.expectedMin, 1e-9) {
@@ -452,8 +449,7 @@ func TestSphereComputeAABB(t *testing.T) {
 				Rotation: mgl64.QuatIdent(),
 			}
 
-			tt.sphere.ComputeAABB(transformNoRotation)
-			aabbNoRotation := tt.sphere.GetAABB()
+			aabbNoRotation := tt.sphere.ComputeAABB(transformNoRotation)
 			if !aabb.Min.ApproxEqual(aabbNoRotation.Min) || !aabb.Max.ApproxEqual(aabbNoRotation.Max) {
 				t.Errorf("Sphere AABB affected by rotation, but should not be")
 			}

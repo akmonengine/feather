@@ -52,7 +52,6 @@ type Heightfield struct {
 	edges     []uint16
 	minHeight float64
 	maxHeight float64
-	aabb      AABB
 }
 
 // heightBlock: lowest & highest heights of the samples of a block (local)
@@ -241,7 +240,7 @@ func (h *Heightfield) HeightAt(x, z float64) (float64, bool) {
 	return h00 + (h10-h00)*(u-v) + (h11-h00)*v, true
 }
 
-func (h *Heightfield) ComputeAABB(transform Transform) {
+func (h *Heightfield) ComputeAABB(transform Transform) AABB {
 	halfX := float64(h.XSamples-1) / 2 * h.Scale.X()
 	halfZ := float64(h.ZSamples-1) / 2 * h.Scale.Z()
 	min := mgl64.Vec3{math.Inf(1), math.Inf(1), math.Inf(1)}
@@ -263,11 +262,7 @@ func (h *Heightfield) ComputeAABB(transform Transform) {
 			max[k] = math.Max(max[k], world[k])
 		}
 	}
-	h.aabb = AABB{Min: min, Max: max}
-}
-
-func (h *Heightfield) GetAABB() AABB {
-	return h.aabb
+	return AABB{Min: min, Max: max}
 }
 
 // ComputeMass: a heightfield is static
