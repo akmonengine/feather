@@ -1,6 +1,7 @@
 package feather
 
 import (
+	"math"
 	"sync"
 
 	"github.com/akmonengine/feather/actor"
@@ -10,221 +11,276 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 )
 
-const STIFF_COMPLIANCE = CONCRETE_COMPLIANCE
-
+// The pair cache and its thresholds are those of the body pair cache of Jolt (PhysicsSettings: 1 mm, 2°)
 const (
-	CONCRETE_COMPLIANCE = 0.04e-9
-	WOOD_COMPLIANCE     = 0.16e-9
-	LEATHER_COMPLIANCE  = 14e-8
-	TENDON_COMPLIANCE   = 0.2e-7
-	RUBBER_COMPLIANCE   = 1e-6
-	MUSCLE_COMPLIANCE   = 0.2e-3
-	FAT_COMPLIANCE      = 1e-3
+	// pairCacheMaxDeltaPosition: the contact of a pair is computed again if B moved more than 1 mm relative to A (m)
+	pairCacheMaxDeltaPosition = 0.001
+
+	// pairCacheMaxDeltaRotation: or if B turned more than 2° relative to A (rad)
+	pairCacheMaxDeltaRotation = 2 * math.Pi / 180
 )
 
-// CollisionPair represents a pair of rigid bodies that potentially collide
-type CollisionPair struct {
-	BodyA   *actor.RigidBody
-	BodyB   *actor.RigidBody
-	simplex *gjk.Simplex
-}
+// pairCacheCosMaxDeltaRotationDiv2: the dot product of 2 unit quaternions is the cosine of half their angle
+var pairCacheCosMaxDeltaRotationDiv2 = math.Cos(pairCacheMaxDeltaRotation / 2)
 
-// BroadPhase performs broad-phase collision detection using AABB overlap tests
-// It returns pairs of bodies whose AABBs overlap and might be colliding
-// This is an O(n²) brute-force approach suitable for small numbers of bodies
-func BroadPhase(spatialGrid *SpatialGrid, bodies []*actor.RigidBody, workersCount int) <-chan Pair {
-	spatialGrid.Clear()
+// BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order (whatever the workers)
+func BroadPhase(bodies []*actor.RigidBody, workersCount int) []Pair {
+	boxes := make([]actor.AABB, len(bodies))
 	for i, body := range bodies {
-		spatialGrid.Insert(i, body)
+		boxes[i] = body.AABB()
 	}
-	spatialGrid.SortCells()
-
-	checkingPairs := spatialGrid.FindPairsParallel(bodies, workersCount)
-
-	return checkingPairs
+	var tree Tree
+	tree.rebuild(bodies, boxes)
+	pool := &workerPool{}
+	if workersCount > 1 {
+		pool.begin(workersCount)
+		defer pool.end()
+	}
+	return tree.findPairs(bodies, boxes, pool)
 }
 
-func NarrowPhase(pairs <-chan Pair, workersCount int) []*constraint.ContactConstraint {
-	// Dispatcher: separate pairs with planes, and normal convex objects
-	planePairs := make(chan Pair, workersCount)
-	gjkPairs := make(chan Pair, workersCount)
+// NarrowPhase returns the contacts of the overlapping pairs (without speculative contacts), in the order of the pairs
+func NarrowPhase(pairs []Pair, workersCount int) []constraint.Manifold {
+	return narrowPhase(pairs, workersCount, func(a, b *actor.RigidBody) float64 { return 0 })
+}
 
-	go func() {
-		defer close(planePairs)
-		defer close(gjkPairs)
+// narrowPhase runs Collide on each pair in parallel.
+// Each pair writes its manifolds at its own offset, so the order never depends on the workers
+func narrowPhase(pairs []Pair, workersCount int, margin func(a, b *actor.RigidBody) float64) []constraint.Manifold {
+	offsets := make([]int, len(pairs)+1)
+	for i, pair := range pairs {
+		offsets[i+1] = offsets[i] + manifoldsOf(pair)
+	}
+	manifolds := make([]constraint.Manifold, offsets[len(pairs)])
+	counts := make([]int, len(pairs))
+	parallelFor(len(pairs), workersCount, func(i int) {
+		counts[i] = collidePair(pairs[i], margin(pairs[i].BodyA, pairs[i].BodyB), manifolds[offsets[i]:offsets[i+1]])
+	})
+	return compactManifolds(manifolds, offsets, counts)
+}
 
-		for pair := range pairs {
-			_, aIsPlane := pair.BodyA.Shape.(*actor.Plane)
-			_, bIsPlane := pair.BodyB.Shape.(*actor.Plane)
+// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a heightfield
+func manifoldsOf(pair Pair) int {
+	if isHeightfield(pair.BodyA) || isHeightfield(pair.BodyB) {
+		return MaxManifoldsPerPair
+	}
+	return 1
+}
 
-			if aIsPlane || bIsPlane {
-				planePairs <- pair
-			} else {
-				gjkPairs <- pair
+func isHeightfield(body *actor.RigidBody) bool {
+	_, ok := body.Shape.(*actor.Heightfield)
+	return ok
+}
+
+// collidePair: triggers keep only the real overlaps
+func collidePair(pair Pair, margin float64, out []constraint.Manifold) int {
+	a, b := pair.BodyA, pair.BodyB
+	count := CollideAll(a, b, margin, out)
+	if a.IsTrigger || b.IsTrigger {
+		n := 0
+		for k := 0; k < count; k++ {
+			if out[k].MinSeparation() < 0 {
+				out[n] = out[k]
+				n++
 			}
 		}
-	}()
-
-	// Canal pour collecter tous les contacts
-	allContacts := make(chan *constraint.ContactConstraint, workersCount*2)
-	var wg sync.WaitGroup
-	// Path 1: GJK/EPA for convex objects
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		collisionPairs := GJK(gjkPairs, workersCount)
-		contactsChan := EPA(collisionPairs, workersCount)
-		for contact := range contactsChan {
-			allContacts <- contact
-		}
-	}()
-
-	// Path 2: analytic collisions with planes
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		contactsChan := collidePlane(planePairs, workersCount)
-		for contact := range contactsChan {
-			allContacts <- contact
-		}
-	}()
-
-	// Fermer le canal de sortie quand tout est fini
-	go func() {
-		wg.Wait()
-		close(allContacts)
-	}()
-
-	// Collecter tous les contacts
-	contacts := make([]*constraint.ContactConstraint, 0)
-	for c := range allContacts {
-		contacts = append(contacts, c)
+		count = n
 	}
-	//fmt.Println("COUNT PAIRS", len(contacts))
-	return contacts
+	for k := 0; k < count; k++ {
+		setLocalAnchors(&out[k])
+	}
+	return count
 }
 
-func GJK(pairChan <-chan Pair, workersCount int) <-chan CollisionPair {
-	collisionChan := make(chan CollisionPair, workersCount)
-
-	go func() {
-		var wg sync.WaitGroup
-		defer close(collisionChan)
-
-		for range workersCount {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-
-				for p := range pairChan {
-					simplex := gjk.SimplexPool.Get().(*gjk.Simplex)
-					simplex.Reset()
-
-					if collision := gjk.GJK(p.BodyA, p.BodyB, simplex); collision {
-						collisionChan <- CollisionPair{
-							BodyA:   p.BodyA,
-							BodyB:   p.BodyB,
-							simplex: simplex,
-						}
-					} else {
-						gjk.SimplexPool.Put(simplex)
-					}
-				}
-			}()
-
-		}
-		wg.Wait()
-	}()
-
-	return collisionChan
+// setLocalAnchors stores the contact in the local spaces of the bodies, for the next step
+func setLocalAnchors(m *constraint.Manifold) {
+	transformA, transformB := m.BodyA.Transform, m.BodyB.Transform
+	for j := 0; j < m.Count; j++ {
+		point := &m.Points[j]
+		// Position is halfway between both surfaces, the normal goes from A to B
+		halfSeparation := m.Normal.Mul(point.Separation / 2)
+		point.LocalAnchorA = transformA.ToLocal(point.Position.Sub(halfSeparation))
+		point.LocalAnchorB = transformB.ToLocal(point.Position.Add(halfSeparation))
+	}
+	m.LocalNormal = transformA.Rotation.Conjugate().Rotate(m.Normal)
+	m.RelativePosition = transformA.ToLocal(transformB.Position)
+	m.RelativeRotation = transformA.Rotation.Conjugate().Mul(transformB.Rotation)
 }
 
-func EPA(p <-chan CollisionPair, workersCount int) <-chan *constraint.ContactConstraint {
-	ch := make(chan *constraint.ContactConstraint, workersCount)
+// reuseManifold: if B moved less than 1 mm and 2° relative to A since the contact points were computed,
+// the previous contact points are moved with the bodies instead of running the collision detection again
+// (the body pair cache of Jolt). The separation of each point is measured again.
+func reuseManifold(previous *constraint.Manifold, margin float64, m *constraint.Manifold) bool {
+	transformA, transformB := &previous.BodyA.Transform, &previous.BodyB.Transform
+	rotationA := &transformA.Rotation
 
-	go func() {
-		var wg sync.WaitGroup
-		defer close(ch)
+	relativePosition := actor.RotateInverse(rotationA, transformB.Position.Sub(transformA.Position))
+	if relativePosition.Sub(previous.RelativePosition).LenSqr() > pairCacheMaxDeltaPosition*pairCacheMaxDeltaPosition {
+		return false
+	}
+	conjugateA := mgl64.Quat{W: rotationA.W, V: rotationA.V.Mul(-1)}
+	relativeRotation := actor.MulQuat(&conjugateA, &transformB.Rotation)
+	if math.Abs(relativeRotation.Dot(previous.RelativeRotation)) < pairCacheCosMaxDeltaRotationDiv2 {
+		return false
+	}
 
-		for range workersCount {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for pair := range p {
-					contact, err := epa.EPA(pair.BodyA, pair.BodyB, pair.simplex)
-					gjk.SimplexPool.Put(pair.simplex)
-					if err != nil {
-						continue
-					}
-					ch <- &contact
-				}
-			}()
+	m.Reset(previous.BodyA, previous.BodyB)
+	m.Normal = actor.Rotate(rotationA, previous.LocalNormal)
+	m.LocalNormal = previous.LocalNormal
+	m.RelativePosition = previous.RelativePosition
+	m.RelativeRotation = previous.RelativeRotation
+	for j := 0; j < previous.Count; j++ {
+		point := &previous.Points[j]
+		onA := transformA.Position.Add(actor.Rotate(rotationA, point.LocalAnchorA))
+		onB := transformB.Position.Add(actor.Rotate(&transformB.Rotation, point.LocalAnchorB))
+		separation := onB.Sub(onA).Dot(m.Normal)
+		if separation > margin {
+			continue
 		}
-
-		wg.Wait()
-	}()
-
-	return ch
+		m.Points[m.Count] = constraint.ContactPoint{
+			Position:     onA.Add(onB).Mul(0.5),
+			Separation:   separation,
+			LocalAnchorA: point.LocalAnchorA,
+			LocalAnchorB: point.LocalAnchorB,
+		}
+		m.Count++
+	}
+	return m.Count > 0
 }
 
-func collidePlane(pairs <-chan Pair, workersCount int) <-chan *constraint.ContactConstraint {
-	ch := make(chan *constraint.ContactConstraint, workersCount)
-
-	go func() {
-		var wg sync.WaitGroup
-		defer close(ch)
-
-		for range workersCount {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for pair := range pairs {
-					// Identifier quel body est le plan
-					var plane *actor.Plane
-					var object *actor.RigidBody
-					var planeBody *actor.RigidBody
-					var contactNormal mgl64.Vec3
-
-					if p, ok := pair.BodyA.Shape.(*actor.Plane); ok {
-						plane = p
-						planeBody = pair.BodyA
-						object = pair.BodyB
-						contactNormal = plane.Normal
-					} else if p, ok := pair.BodyB.Shape.(*actor.Plane); ok {
-						plane = p
-						planeBody = pair.BodyB
-						object = pair.BodyA
-						contactNormal = plane.Normal.Mul(-1)
-					} else {
-						continue // No plane (should not happen, the data is prefiltered in NarrowPhase)
-					}
-
-					collision, result := object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform)
-
-					if !collision {
-						continue
-					}
-
-					var points []constraint.ContactPoint
-					for _, point := range result {
-						points = append(points, constraint.ContactPoint{Position: point.Position, Penetration: point.Penetration})
-					}
-
-					// Créer la contrainte
-					contact := &constraint.ContactConstraint{
-						BodyA:  planeBody,
-						BodyB:  object,
-						Normal: contactNormal,
-						Points: points,
-					}
-
-					ch <- contact
-				}
-			}()
+// compactManifolds keeps the manifolds found, in the same order: counts[i] manifolds at offsets[i] for the pair i
+func compactManifolds(manifolds []constraint.Manifold, offsets, counts []int) []constraint.Manifold {
+	n := 0
+	for i, count := range counts {
+		for k := 0; k < count; k++ {
+			manifolds[n] = manifolds[offsets[i]+k]
+			n++
 		}
+	}
+	return manifolds[:n]
+}
 
-		wg.Wait()
-	}()
+// Collide computes the contact between a and b, including the points closer than margin.
+// The normal points from a to b.
+// - planes: CollideWithPlane of the shape
+// - spheres & capsules: closest points of their segments (collision_capsule.go)
+// - other shapes: GJK/EPA, then the contact points are clipped (epa/manifold.go)
+//
+// Against a heightfield, a body can touch the terrain with several normals: Collide keeps the deepest patch,
+// CollideAll returns all of them
+func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
+	var manifolds [1]constraint.Manifold
+	found := CollideAll(a, b, margin, manifolds[:]) > 0
+	*m = manifolds[0]
+	return found
+}
 
-	return ch
+// CollideAll writes in manifolds the contacts between a and b (MaxManifoldsPerPair at most), and returns their count
+func CollideAll(a, b *actor.RigidBody, margin float64, manifolds []constraint.Manifold) int {
+	if len(manifolds) == 0 {
+		return 0
+	}
+	m := &manifolds[0]
+	m.Reset(a, b)
+
+	if field, ok := a.Shape.(*actor.Heightfield); ok {
+		return collideHeightfield(a, field, b, margin, false, manifolds)
+	}
+	if field, ok := b.Shape.(*actor.Heightfield); ok {
+		return collideHeightfield(b, field, a, margin, true, manifolds)
+	}
+	if collide(a, b, margin, m) {
+		return 1
+	}
+	return 0
+}
+
+// collide the convex shapes a & b
+func collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
+	if plane, ok := a.Shape.(*actor.Plane); ok {
+		return collidePlane(plane, b, margin, false, m)
+	}
+	if plane, ok := b.Shape.(*actor.Plane); ok {
+		return collidePlane(plane, a, margin, true, m)
+	}
+
+	if isAnalyticPair(a.Shape, b.Shape) {
+		return collideAnalyticPair(a, b, margin, m)
+	}
+
+	simplex := gjk.SimplexPool.Get().(*gjk.Simplex)
+	defer gjk.SimplexPool.Put(simplex)
+
+	result, ok := penetration(a, b, margin, simplex)
+	if !ok {
+		return false
+	}
+	epa.Manifold(a, b, result, margin, m)
+	return m.Count > 0
+}
+
+// penetration of a + margin into b (the convex shapes), false if they are further than the margin.
+// A rounded shape (sphere, capsule) is its core with a radius: GJK gives the distance and the closest points of the
+// cores, exact against a polytope (Bullet, Jolt), and the radii are added along their direction. EPA runs on the full
+// shapes only if the cores overlap, or are too close for their direction to be a normal
+func penetration(a, b *actor.RigidBody, margin float64, simplex *gjk.Simplex) (epa.Result, bool) {
+	coreA, radiusA := gjk.NewCoreProxy(a)
+	coreB, radiusB := gjk.NewCoreProxy(b)
+	if radiusA+radiusB > 0 {
+		if closest := gjk.Distance(&coreA, &coreB); !closest.Overlap && closest.Distance > normalEpsilon {
+			depth := radiusA + radiusB + margin - closest.Distance
+			if depth < 0 {
+				return epa.Result{}, false
+			}
+			return epa.Result{
+				Normal:   closest.Normal,
+				Depth:    depth,
+				WitnessA: closest.PointA.Add(closest.Normal.Mul(radiusA + margin)),
+				WitnessB: closest.PointB.Sub(closest.Normal.Mul(radiusB)),
+			}, true
+		}
+	}
+
+	simplex.Reset()
+	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
+	if !gjk.GJKProxies(&proxyA, &proxyB, margin, simplex) {
+		return epa.Result{}, false
+	}
+	result, err := epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
+	if err != nil {
+		return epa.Result{}, false
+	}
+	return result, true
+}
+
+// planeBuffers: the buffers of collidePlane, reused to avoid the allocations
+type planeBuffers struct {
+	plane  actor.PlaneContact
+	points []constraint.ContactPoint
+}
+
+var planeContactsPool = sync.Pool{New: func() any {
+	return &planeBuffers{plane: make(actor.PlaneContact, 0, 8), points: make([]constraint.ContactPoint, 0, 8)}
+}}
+
+// collidePlane keeps the order of the pair: if the plane is body B, the normal is reversed.
+// The points of the shape are reduced to 4 like the other contacts: the deepest first
+func collidePlane(plane *actor.Plane, object *actor.RigidBody, margin float64, planeIsB bool, m *constraint.Manifold) bool {
+	buffers := planeContactsPool.Get().(*planeBuffers)
+	defer planeContactsPool.Put(buffers)
+	buffers.plane = object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin, buffers.plane[:0])
+	if len(buffers.plane) == 0 {
+		return false
+	}
+
+	m.Normal = plane.Normal
+	if planeIsB {
+		m.Normal = plane.Normal.Mul(-1)
+	}
+	buffers.points = buffers.points[:0]
+	for _, p := range buffers.plane {
+		buffers.points = append(buffers.points, constraint.ContactPoint{Position: p.Position, Separation: p.Separation})
+	}
+	epa.Reduce(buffers.points, m.Normal, m)
+	return m.Count > 0
 }

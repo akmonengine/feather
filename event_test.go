@@ -23,19 +23,11 @@ func createTestBody(id interface{}, isTrigger, isSleeping bool) *actor.RigidBody
 	return rb
 }
 
-// createTestConstraint creates a ContactConstraint for testing
-func createTestConstraint(bodyA, bodyB *actor.RigidBody) *constraint.ContactConstraint {
-	return &constraint.ContactConstraint{
-		BodyA:  bodyA,
-		BodyB:  bodyB,
-		Normal: mgl64.Vec3{1, 0, 0},
-		Points: []constraint.ContactPoint{
-			{
-				Position:    mgl64.Vec3{0, 0, 0},
-				Penetration: 0.1,
-			},
-		},
-	}
+// createTestConstraint creates a touching manifold for testing
+func createTestConstraint(bodyA, bodyB *actor.RigidBody) constraint.Manifold {
+	m := constraint.Manifold{BodyA: bodyA, BodyB: bodyB, Normal: mgl64.Vec3{1, 0, 0}}
+	m.Add(mgl64.Vec3{0, 0, 0}, -0.1)
+	return m
 }
 
 type eventCapture struct {
@@ -71,11 +63,11 @@ func TestEvents_Subscribe(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
 
-	events.Subscribe(COLLISION_ENTER, capture.capture)
+	events.Subscribe(EventCollisionEnter, capture.capture)
 
 	// Verify listener is registered
-	if len(events.listeners[COLLISION_ENTER]) != 1 {
-		t.Errorf("Expected 1 listener for COLLISION_ENTER, got %d", len(events.listeners[COLLISION_ENTER]))
+	if len(events.listeners[EventCollisionEnter]) != 1 {
+		t.Errorf("Expected 1 listener for EventCollisionEnter, got %d", len(events.listeners[EventCollisionEnter]))
 	}
 }
 
@@ -86,13 +78,13 @@ func TestEvents_MultipleListeners(t *testing.T) {
 	capture3 := &eventCapture{}
 
 	// Subscribe multiple listeners to the same event type
-	events.Subscribe(COLLISION_ENTER, capture1.capture)
-	events.Subscribe(COLLISION_ENTER, capture2.capture)
-	events.Subscribe(COLLISION_ENTER, capture3.capture)
+	events.Subscribe(EventCollisionEnter, capture1.capture)
+	events.Subscribe(EventCollisionEnter, capture2.capture)
+	events.Subscribe(EventCollisionEnter, capture3.capture)
 
 	// Verify all listeners are registered
-	if len(events.listeners[COLLISION_ENTER]) != 3 {
-		t.Errorf("Expected 3 listeners for COLLISION_ENTER, got %d", len(events.listeners[COLLISION_ENTER]))
+	if len(events.listeners[EventCollisionEnter]) != 3 {
+		t.Errorf("Expected 3 listeners for EventCollisionEnter, got %d", len(events.listeners[EventCollisionEnter]))
 	}
 
 	// Trigger an event
@@ -100,7 +92,7 @@ func TestEvents_MultipleListeners(t *testing.T) {
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// All listeners should have received the event
@@ -120,15 +112,15 @@ func TestEvents_DifferentEventTypes(t *testing.T) {
 	captureCollision := &eventCapture{}
 	captureTrigger := &eventCapture{}
 
-	events.Subscribe(COLLISION_ENTER, captureCollision.capture)
-	events.Subscribe(TRIGGER_ENTER, captureTrigger.capture)
+	events.Subscribe(EventCollisionEnter, captureCollision.capture)
+	events.Subscribe(EventTriggerEnter, captureTrigger.capture)
 
 	// Trigger a collision event
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Only collision listener should receive event
@@ -192,13 +184,15 @@ func TestMakePairKey_DifferentPairs(t *testing.T) {
 
 func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// Two normal bodies
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	constraints := []*constraint.ContactConstraint{c}
+	constraints := []constraint.Manifold{c}
 	result := events.recordCollisions(constraints)
 
 	// Normal collision should remain in constraints
@@ -215,13 +209,15 @@ func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 
 func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// One trigger body
 	bodyA := createTestBody("A", true, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	constraints := []*constraint.ContactConstraint{c}
+	constraints := []constraint.Manifold{c}
 	result := events.recordCollisions(constraints)
 
 	// Trigger collision should be filtered out
@@ -238,6 +234,8 @@ func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 
 func TestEvents_RecordCollisions_Mixed(t *testing.T) {
 	events := NewEvents()
+	// the pairs are recorded only if somebody listens
+	events.Subscribe(EventCollisionEnter, func(Event) {})
 
 	// Setup: 1 normal collision + 1 trigger collision
 	bodyA := createTestBody("A", false, false)
@@ -248,7 +246,7 @@ func TestEvents_RecordCollisions_Mixed(t *testing.T) {
 	c1 := createTestConstraint(bodyA, bodyB) // Normal
 	c2 := createTestConstraint(bodyC, bodyD) // Trigger
 
-	constraints := []*constraint.ContactConstraint{c1, c2}
+	constraints := []constraint.Manifold{c1, c2}
 	result := events.recordCollisions(constraints)
 
 	// Only normal collision should remain
@@ -269,19 +267,19 @@ func TestEvents_RecordCollisions_Mixed(t *testing.T) {
 func TestEvents_TriggerEnter(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(TRIGGER_ENTER, capture.capture)
+	events.Subscribe(EventTriggerEnter, capture.capture)
 
 	// First frame: trigger collision
 	bodyA := createTestBody("A", true, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should receive TRIGGER_ENTER event
-	if !capture.hasEventType(TRIGGER_ENTER) {
-		t.Error("Expected TRIGGER_ENTER event")
+	// Should receive EventTriggerEnter event
+	if !capture.hasEventType(EventTriggerEnter) {
+		t.Error("Expected EventTriggerEnter event")
 	}
 
 	if capture.count() != 1 {
@@ -298,61 +296,61 @@ func TestEvents_TriggerEnter(t *testing.T) {
 func TestEvents_TriggerStay(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(TRIGGER_STAY, capture.capture)
+	events.Subscribe(EventTriggerStay, capture.capture)
 
 	bodyA := createTestBody("A", true, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter (should not trigger STAY)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	if capture.hasEventType(TRIGGER_STAY) {
-		t.Error("TRIGGER_STAY should not occur on first frame")
+	if capture.hasEventType(EventTriggerStay) {
+		t.Error("EventTriggerStay should not occur on first frame")
 	}
 
 	capture.reset()
 
 	// Frame 2: Stay
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should receive TRIGGER_STAY event
-	if !capture.hasEventType(TRIGGER_STAY) {
-		t.Error("Expected TRIGGER_STAY event on second frame")
+	// Should receive EventTriggerStay event
+	if !capture.hasEventType(EventTriggerStay) {
+		t.Error("Expected EventTriggerStay event on second frame")
 	}
 }
 
 func TestEvents_TriggerExit(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(TRIGGER_EXIT, capture.capture)
+	events.Subscribe(EventTriggerExit, capture.capture)
 
 	bodyA := createTestBody("A", true, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Exit (no collision)
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
-	// Should receive TRIGGER_EXIT event
-	if !capture.hasEventType(TRIGGER_EXIT) {
-		t.Error("Expected TRIGGER_EXIT event")
+	// Should receive EventTriggerExit event
+	if !capture.hasEventType(EventTriggerExit) {
+		t.Error("Expected EventTriggerExit event")
 	}
 }
 
 func TestEvents_TriggerStay_SleepingBodies(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(TRIGGER_STAY, capture.capture)
+	events.Subscribe(EventTriggerStay, capture.capture)
 
 	// Both bodies sleeping
 	bodyA := createTestBody("A", true, true)
@@ -360,18 +358,18 @@ func TestEvents_TriggerStay_SleepingBodies(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Stay (but both sleeping)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should NOT receive TRIGGER_STAY when both bodies are sleeping
-	if capture.hasEventType(TRIGGER_STAY) {
-		t.Error("TRIGGER_STAY should not occur when both bodies are sleeping")
+	// Should NOT receive EventTriggerStay when both bodies are sleeping
+	if capture.hasEventType(EventTriggerStay) {
+		t.Error("EventTriggerStay should not occur when both bodies are sleeping")
 	}
 }
 
@@ -382,19 +380,19 @@ func TestEvents_TriggerStay_SleepingBodies(t *testing.T) {
 func TestEvents_CollisionEnter(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(COLLISION_ENTER, capture.capture)
+	events.Subscribe(EventCollisionEnter, capture.capture)
 
 	// First frame: normal collision
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should receive COLLISION_ENTER event
-	if !capture.hasEventType(COLLISION_ENTER) {
-		t.Error("Expected COLLISION_ENTER event")
+	// Should receive EventCollisionEnter event
+	if !capture.hasEventType(EventCollisionEnter) {
+		t.Error("Expected EventCollisionEnter event")
 	}
 
 	if capture.count() != 1 {
@@ -411,61 +409,61 @@ func TestEvents_CollisionEnter(t *testing.T) {
 func TestEvents_CollisionStay(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(COLLISION_STAY, capture.capture)
+	events.Subscribe(EventCollisionStay, capture.capture)
 
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter (should not trigger STAY)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	if capture.hasEventType(COLLISION_STAY) {
-		t.Error("COLLISION_STAY should not occur on first frame")
+	if capture.hasEventType(EventCollisionStay) {
+		t.Error("EventCollisionStay should not occur on first frame")
 	}
 
 	capture.reset()
 
 	// Frame 2: Stay
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should receive COLLISION_STAY event
-	if !capture.hasEventType(COLLISION_STAY) {
-		t.Error("Expected COLLISION_STAY event on second frame")
+	// Should receive EventCollisionStay event
+	if !capture.hasEventType(EventCollisionStay) {
+		t.Error("Expected EventCollisionStay event on second frame")
 	}
 }
 
 func TestEvents_CollisionExit(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(COLLISION_EXIT, capture.capture)
+	events.Subscribe(EventCollisionExit, capture.capture)
 
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Exit (no collision)
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
-	// Should receive COLLISION_EXIT event
-	if !capture.hasEventType(COLLISION_EXIT) {
-		t.Error("Expected COLLISION_EXIT event")
+	// Should receive EventCollisionExit event
+	if !capture.hasEventType(EventCollisionExit) {
+		t.Error("Expected EventCollisionExit event")
 	}
 }
 
 func TestEvents_CollisionStay_SleepingBodies(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(COLLISION_STAY, capture.capture)
+	events.Subscribe(EventCollisionStay, capture.capture)
 
 	// Both bodies sleeping
 	bodyA := createTestBody("A", false, true)
@@ -473,18 +471,18 @@ func TestEvents_CollisionStay_SleepingBodies(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	capture.reset()
 
 	// Frame 2: Stay (but both sleeping)
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
-	// Should NOT receive COLLISION_STAY when both bodies are sleeping
-	if capture.hasEventType(COLLISION_STAY) {
-		t.Error("COLLISION_STAY should not occur when both bodies are sleeping")
+	// Should NOT receive EventCollisionStay when both bodies are sleeping
+	if capture.hasEventType(EventCollisionStay) {
+		t.Error("EventCollisionStay should not occur when both bodies are sleeping")
 	}
 }
 
@@ -495,7 +493,7 @@ func TestEvents_CollisionStay_SleepingBodies(t *testing.T) {
 func TestEvents_OnSleep(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(ON_SLEEP, capture.capture)
+	events.Subscribe(EventSleep, capture.capture)
 
 	// Body starts awake
 	body := createTestBody("A", false, false)
@@ -515,9 +513,9 @@ func TestEvents_OnSleep(t *testing.T) {
 	events.processSleepEvents(bodies)
 	events.flush()
 
-	// Should receive ON_SLEEP event
-	if !capture.hasEventType(ON_SLEEP) {
-		t.Error("Expected ON_SLEEP event")
+	// Should receive EventSleep event
+	if !capture.hasEventType(EventSleep) {
+		t.Error("Expected EventSleep event")
 	}
 
 	if capture.count() != 1 {
@@ -534,7 +532,7 @@ func TestEvents_OnSleep(t *testing.T) {
 func TestEvents_OnWake(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(ON_WAKE, capture.capture)
+	events.Subscribe(EventWake, capture.capture)
 
 	// Body starts sleeping
 	body := createTestBody("A", false, true)
@@ -554,9 +552,9 @@ func TestEvents_OnWake(t *testing.T) {
 	events.processSleepEvents(bodies)
 	events.flush()
 
-	// Should receive ON_WAKE event
-	if !capture.hasEventType(ON_WAKE) {
-		t.Error("Expected ON_WAKE event")
+	// Should receive EventWake event
+	if !capture.hasEventType(EventWake) {
+		t.Error("Expected EventWake event")
 	}
 
 	if capture.count() != 1 {
@@ -573,7 +571,7 @@ func TestEvents_OnWake(t *testing.T) {
 func TestEvents_NoSleepEvent_AlreadySleeping(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(ON_SLEEP, capture.capture)
+	events.Subscribe(EventSleep, capture.capture)
 
 	// Body starts sleeping
 	body := createTestBody("A", false, true)
@@ -589,16 +587,16 @@ func TestEvents_NoSleepEvent_AlreadySleeping(t *testing.T) {
 	events.processSleepEvents(bodies)
 	events.flush()
 
-	// Should NOT receive ON_SLEEP event (already sleeping)
-	if capture.hasEventType(ON_SLEEP) {
-		t.Error("Should not receive ON_SLEEP when body is already sleeping")
+	// Should NOT receive EventSleep event (already sleeping)
+	if capture.hasEventType(EventSleep) {
+		t.Error("Should not receive EventSleep when body is already sleeping")
 	}
 }
 
 func TestEvents_NoWakeEvent_AlreadyAwake(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(ON_WAKE, capture.capture)
+	events.Subscribe(EventWake, capture.capture)
 
 	// Body starts awake
 	body := createTestBody("A", false, false)
@@ -614,9 +612,9 @@ func TestEvents_NoWakeEvent_AlreadyAwake(t *testing.T) {
 	events.processSleepEvents(bodies)
 	events.flush()
 
-	// Should NOT receive ON_WAKE event (already awake)
-	if capture.hasEventType(ON_WAKE) {
-		t.Error("Should not receive ON_WAKE when body is already awake")
+	// Should NOT receive EventWake event (already awake)
+	if capture.hasEventType(EventWake) {
+		t.Error("Should not receive EventWake when body is already awake")
 	}
 }
 
@@ -630,16 +628,16 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 	captureStay := &eventCapture{}
 	captureExit := &eventCapture{}
 
-	events.Subscribe(COLLISION_ENTER, captureEnter.capture)
-	events.Subscribe(COLLISION_STAY, captureStay.capture)
-	events.Subscribe(COLLISION_EXIT, captureExit.capture)
+	events.Subscribe(EventCollisionEnter, captureEnter.capture)
+	events.Subscribe(EventCollisionStay, captureStay.capture)
+	events.Subscribe(EventCollisionExit, captureExit.capture)
 
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {
@@ -654,7 +652,7 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 
 	// Frame 2: Stay
 	captureEnter.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 0 {
@@ -669,7 +667,7 @@ func TestEvents_CompleteWorkflow(t *testing.T) {
 
 	// Frame 3: Exit
 	captureStay.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	if captureEnter.count() != 0 {
@@ -688,8 +686,8 @@ func TestEvents_MixedTriggerAndCollision(t *testing.T) {
 	captureTrigger := &eventCapture{}
 	captureCollision := &eventCapture{}
 
-	events.Subscribe(TRIGGER_ENTER, captureTrigger.capture)
-	events.Subscribe(COLLISION_ENTER, captureCollision.capture)
+	events.Subscribe(EventTriggerEnter, captureTrigger.capture)
+	events.Subscribe(EventCollisionEnter, captureCollision.capture)
 
 	// Setup: 1 normal collision + 1 trigger collision
 	bodyA := createTestBody("A", false, false)
@@ -700,15 +698,15 @@ func TestEvents_MixedTriggerAndCollision(t *testing.T) {
 	c1 := createTestConstraint(bodyA, bodyB) // Normal
 	c2 := createTestConstraint(bodyC, bodyD) // Trigger
 
-	events.recordCollisions([]*constraint.ContactConstraint{c1, c2})
+	events.recordCollisions([]constraint.Manifold{c1, c2})
 	events.flush()
 
 	// Should receive both event types
 	if captureCollision.count() != 1 {
-		t.Errorf("Expected 1 COLLISION_ENTER, got %d", captureCollision.count())
+		t.Errorf("Expected 1 EventCollisionEnter, got %d", captureCollision.count())
 	}
 	if captureTrigger.count() != 1 {
-		t.Errorf("Expected 1 TRIGGER_ENTER, got %d", captureTrigger.count())
+		t.Errorf("Expected 1 EventTriggerEnter, got %d", captureTrigger.count())
 	}
 }
 
@@ -717,8 +715,8 @@ func TestEvents_SleepWakeWorkflow(t *testing.T) {
 	captureSleep := &eventCapture{}
 	captureWake := &eventCapture{}
 
-	events.Subscribe(ON_SLEEP, captureSleep.capture)
-	events.Subscribe(ON_WAKE, captureWake.capture)
+	events.Subscribe(EventSleep, captureSleep.capture)
+	events.Subscribe(EventWake, captureWake.capture)
 
 	body := createTestBody("A", false, false)
 	bodies := []*actor.RigidBody{body}
@@ -737,7 +735,7 @@ func TestEvents_SleepWakeWorkflow(t *testing.T) {
 	events.flush()
 
 	if captureSleep.count() != 1 {
-		t.Errorf("Expected 1 ON_SLEEP event, got %d", captureSleep.count())
+		t.Errorf("Expected 1 EventSleep event, got %d", captureSleep.count())
 	}
 
 	// Frame 3: Wake up
@@ -747,21 +745,21 @@ func TestEvents_SleepWakeWorkflow(t *testing.T) {
 	events.flush()
 
 	if captureWake.count() != 1 {
-		t.Errorf("Expected 1 ON_WAKE event, got %d", captureWake.count())
+		t.Errorf("Expected 1 EventWake event, got %d", captureWake.count())
 	}
 }
 
 func TestEvents_Flush_ClearsBuffer(t *testing.T) {
 	events := NewEvents()
 	capture := &eventCapture{}
-	events.Subscribe(COLLISION_ENTER, capture.capture)
+	events.Subscribe(EventCollisionEnter, capture.capture)
 
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Add events to buffer
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Buffer should be cleared after flush
@@ -796,7 +794,7 @@ func TestEvents_NoListeners(t *testing.T) {
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Process events without any listeners
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	// Should succeed without error
@@ -807,15 +805,15 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 	captureEnter := &eventCapture{}
 	captureExit := &eventCapture{}
 
-	events.Subscribe(COLLISION_ENTER, captureEnter.capture)
-	events.Subscribe(COLLISION_EXIT, captureExit.capture)
+	events.Subscribe(EventCollisionEnter, captureEnter.capture)
+	events.Subscribe(EventCollisionExit, captureExit.capture)
 
 	bodyA := createTestBody("A", false, false)
 	bodyB := createTestBody("B", false, false)
 	c := createTestConstraint(bodyA, bodyB)
 
 	// Frame 1: Enter
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {
@@ -824,7 +822,7 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 
 	// Frame 2: Exit
 	captureEnter.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{})
+	events.recordCollisions([]constraint.Manifold{})
 	events.flush()
 
 	if captureExit.count() != 1 {
@@ -833,7 +831,7 @@ func TestEvents_MultipleFrames_EnterExitEnter(t *testing.T) {
 
 	// Frame 3: Enter again
 	captureExit.reset()
-	events.recordCollisions([]*constraint.ContactConstraint{c})
+	events.recordCollisions([]constraint.Manifold{c})
 	events.flush()
 
 	if captureEnter.count() != 1 {

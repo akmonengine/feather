@@ -191,8 +191,7 @@ func TestBoxComputeAABBWithRotation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.box.ComputeAABB(tt.transform)
-			aabb := tt.box.GetAABB()
+			aabb := tt.box.ComputeAABB(tt.transform)
 
 			// Vérifications de base
 			if !vec3Equal(aabb.Min, tt.expectedMin, 1e-3) {
@@ -344,8 +343,7 @@ func TestShapeConsistency(t *testing.T) {
 			Rotation: mgl64.QuatRotate(mgl64.DegToRad(45), mgl64.Vec3{0, 0, 1}),
 		}
 
-		box.ComputeAABB(transform)
-		aabb := box.GetAABB()
+		aabb := box.ComputeAABB(transform)
 
 		// L'AABB doit contenir tous les coins transformés
 		corners := [8]mgl64.Vec3{
@@ -429,8 +427,7 @@ func TestSphereComputeAABB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.sphere.ComputeAABB(tt.transform)
-			aabb := tt.sphere.GetAABB()
+			aabb := tt.sphere.ComputeAABB(tt.transform)
 
 			// Vérifications de base
 			if !vec3Equal(aabb.Min, tt.expectedMin, 1e-9) {
@@ -452,8 +449,7 @@ func TestSphereComputeAABB(t *testing.T) {
 				Rotation: mgl64.QuatIdent(),
 			}
 
-			tt.sphere.ComputeAABB(transformNoRotation)
-			aabbNoRotation := tt.sphere.GetAABB()
+			aabbNoRotation := tt.sphere.ComputeAABB(transformNoRotation)
 			if !aabb.Min.ApproxEqual(aabbNoRotation.Min) || !aabb.Max.ApproxEqual(aabbNoRotation.Max) {
 				t.Errorf("Sphere AABB affected by rotation, but should not be")
 			}
@@ -461,69 +457,18 @@ func TestSphereComputeAABB(t *testing.T) {
 	}
 }
 
-func TestGetTangentBasis(t *testing.T) {
-	tests := []struct {
-		name            string
-		normal          mgl64.Vec3
-		expectedLengths [2]float64 // longueur attendue des deux tangents
-	}{
-		{
-			name:            "X-axis normal",
-			normal:          mgl64.Vec3{1, 0, 0},
-			expectedLengths: [2]float64{1, 1},
-		},
-		{
-			name:            "Y-axis normal",
-			normal:          mgl64.Vec3{0, 1, 0},
-			expectedLengths: [2]float64{1, 1},
-		},
-		{
-			name:            "Z-axis normal",
-			normal:          mgl64.Vec3{0, 0, 1},
-			expectedLengths: [2]float64{1, 1},
-		},
-		{
-			name:            "diagonal normal",
-			normal:          mgl64.Vec3{1, 1, 1}.Normalize(),
-			expectedLengths: [2]float64{1, 1},
-		},
-		{
-			name:            "arbitrary normal",
-			normal:          mgl64.Vec3{0.5, 0.8, 0.3}.Normalize(),
-			expectedLengths: [2]float64{1, 1},
-		},
+// A thin box tilted over a plane, with a margin larger than its thickness: only the corners of its bottom face touch
+func TestBoxCollideWithPlaneKeepsSupportingFace(t *testing.T) {
+	box := &Box{HalfExtents: mgl64.Vec3{0.3, 0.02, 0.3}}
+	transform := Transform{Position: mgl64.Vec3{0, 0.1, 0}, Rotation: mgl64.QuatRotate(0.05, mgl64.Vec3{1, 0, 0})}
+	contacts := box.CollideWithPlane(mgl64.Vec3{0, 1, 0}, 0, transform, 1, nil)
+	if len(contacts) != 4 {
+		t.Fatalf("%d contacts, want 4", len(contacts))
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tangent1, tangent2 := getTangentBasis(tt.normal)
-
-			// Les tangents doivent avoir une longueur de 1
-			if !floatEqual(tangent1.Len(), tt.expectedLengths[0], 1e-6) {
-				t.Errorf("Tangent1 length = %v, want %v", tangent1.Len(), tt.expectedLengths[0])
-			}
-			if !floatEqual(tangent2.Len(), tt.expectedLengths[1], 1e-6) {
-				t.Errorf("Tangent2 length = %v, want %v", tangent2.Len(), tt.expectedLengths[1])
-			}
-
-			// Les tangents doivent être perpendiculaires à la normale
-			if math.Abs(tangent1.Dot(tt.normal)) > 1e-6 {
-				t.Errorf("Tangent1 not perpendicular to normal: dot = %v", tangent1.Dot(tt.normal))
-			}
-			if math.Abs(tangent2.Dot(tt.normal)) > 1e-6 {
-				t.Errorf("Tangent2 not perpendicular to normal: dot = %v", tangent2.Dot(tt.normal))
-			}
-
-			// Les deux tangents doivent être perpendiculaires entre elles
-			if math.Abs(tangent1.Dot(tangent2)) > 1e-6 {
-				t.Errorf("Tangents not perpendicular to each other: dot = %v", tangent1.Dot(tangent2))
-			}
-
-			// Le produit vectoriel normal x tangent1 doit donner tangent2 (ou son opposé)
-			cross := tt.normal.Cross(tangent1)
-			if !vec3Equal(cross, tangent2, 1e-6) && !vec3Equal(cross, tangent2.Mul(-1), 1e-6) {
-				t.Errorf("Cross product not equal to tangent2: cross=%v, tangent2=%v", cross, tangent2)
-			}
-		})
+	for _, contact := range contacts {
+		local := transform.Rotation.Conjugate().Rotate(contact.Position.Add(mgl64.Vec3{0, contact.Separation / 2, 0}).Sub(transform.Position))
+		if math.Abs(local.Y()+0.02) > 1e-9 {
+			t.Errorf("the corner %v is not on the bottom face", local)
+		}
 	}
 }

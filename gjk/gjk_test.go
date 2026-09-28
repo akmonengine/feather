@@ -391,115 +391,7 @@ func TestGJK_ExtremePrecision(t *testing.T) {
 	})
 }
 
-// Degenerate simplex cases
-func TestGJK_DegenerateSimplex(t *testing.T) {
-	t.Run("colinear points in tetrahedron", func(t *testing.T) {
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{0, 0, 0},
-				{1, 0, 0},
-				{2, 0, 0},
-				{3, 0, 0},
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		// This should be reduced to a line and eventually return false
-		result := tetrahedron(&simplex, &direction)
-		if result {
-			t.Error("Expected tetrahedron with colinear points to not contain origin (origin not on any segment)")
-		}
-	})
-
-	t.Run("identical points in simplex", func(t *testing.T) {
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{0, 0, 0},
-				{0, 0, 0},
-				{1, 0, 0},
-				{0, 1, 0},
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		// This should be handled gracefully and not cause panic
-		result := tetrahedron(&simplex, &direction)
-		if result {
-			t.Error("Expected tetrahedron with identical points to not contain origin")
-		}
-	})
-
-	t.Run("zero-length edge in line", func(t *testing.T) {
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{1e-15, 0, 0},
-				{1e-15, 1e-15, 0},
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		// This should be handled as a degenerate line
-		result := line(&simplex, &direction)
-		if !result {
-			t.Error("Expected degenerate line with near-identical points to contain origin")
-		}
-	})
-}
-
 // Tetrahedron face normal orientation
-
-func TestGJK_TetrahedronFaceNormal(t *testing.T) {
-	t.Run("origin nearly on face (distance < 1e-12)", func(t *testing.T) {
-		// Move origin extremely close to the face (ABC) but outside
-		// The face ABC is the triangle with points A, B, C
-		// The normal should point away from D (0,0,0)
-		// Origin is at (0,0,0) which is point D, so we need to move the tetrahedron
-		// so origin is near face ABC but not inside
-
-		// Create a tetrahedron with face ABC at z=1e-12 and origin at (0,0,0)
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{1, 1, -1e-12}, // D
-				{1, 0, 1e-12},  // C
-				{0, 1, 1e-12},  // B
-				{0, 0, 1e-12},  // A
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := tetrahedron(&simplex, &direction)
-		if result {
-			t.Error("Expected origin outside tetrahedron near face to not contain origin")
-		}
-	})
-
-	t.Run("face normal with near-zero magnitude", func(t *testing.T) {
-		// Create a tetrahedron where one face has a normal with near-zero magnitude
-		// This can happen when three points are nearly colinear
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{0, 0, 0},
-				{1, 0, 0},
-				{1, 1e-15, 0},
-				{0, 0, 1},
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		// This should be handled gracefully and not cause division by zero
-		result := tetrahedron(&simplex, &direction)
-		if result {
-			t.Error("Expected tetrahedron with near-zero face normal to not contain origin")
-		}
-	})
-}
 
 // GJK with zero-volume shapes
 func TestGJK_ZeroVolumeShapes(t *testing.T) {
@@ -552,267 +444,6 @@ func Inf() float64 {
 	return math.Inf(1)
 }
 
-// Simplex helper function tests
-func TestLine(t *testing.T) {
-	t.Run("origin near line (normal case)", func(t *testing.T) {
-		// Normal case: origin is near the line but not on it
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{-1, 1, 0}, // B (old point)
-				{1, 1, 0},  // A (most recent point)
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		result := line(&simplex, &direction)
-
-		if result {
-			t.Error("Line not passing through origin should not detect collision")
-		}
-		// Origin is in direction of B, so both points should be kept
-		if simplex.Count != 2 {
-			t.Errorf("Expected simplex length 2, got %d", simplex.Count)
-		}
-	})
-
-	t.Run("origin ON line segment (degenerate)", func(t *testing.T) {
-		// Special case: origin is exactly on the line segment AB
-		// This is a degenerate case that indicates collision
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{-1, 0, 0}, // B (old point)
-				{1, 0, 0},  // A (most recent point)
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		result := line(&simplex, &direction)
-
-		if !result {
-			t.Error("Line passing through origin should detect collision")
-		}
-	})
-
-	t.Run("origin on line segment", func(t *testing.T) {
-		// Test that origin is detected as on segment when t is between 0 and 1
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{2, 0, 0}, // B
-				{0, 0, 0}, // A
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		// Origin is at (0,0,0) which is exactly point A (t=0)
-		// Correctly identifies this as Voronoi region A
-		// and reduces to point A, returning false (no collision in this case)
-		result := line(&simplex, &direction)
-		if result {
-			t.Error("Expected no collision when origin is exactly at point A (Voronoi region A)")
-		}
-	})
-
-	t.Run("origin on line segment middle", func(t *testing.T) {
-		// Test that origin is detected as on segment when t is between 0 and 1
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{2, 0, 0}, // B
-				{0, 0, 0}, // A
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		// Move simplex so origin is in the middle of segment AB
-		simplex.Points[1] = mgl64.Vec3{1, 0, 0}  // A
-		simplex.Points[0] = mgl64.Vec3{-1, 0, 0} // B
-		// Origin (0,0,0) is exactly in the middle (t=0.5)
-		result := line(&simplex, &direction)
-		if !result {
-			t.Error("Expected collision when origin is in the middle of segment (t=0.5)")
-		}
-	})
-
-	t.Run("origin on infinite line but not on segment", func(t *testing.T) {
-		// Test that origin on infinite line but outside segment returns false
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{1, 0, 0}, // B
-				{2, 0, 0}, // A
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{0, 1, 0}
-
-		// Origin (0,0,0) is on the infinite line but not on segment [A,B]
-		// Segment is from (2,0,0) to (1,0,0), origin is at (0,0,0) which is outside
-		result := line(&simplex, &direction)
-		if result {
-			t.Error("Expected no collision when origin is on infinite line but not on segment")
-		}
-	})
-
-	t.Run("origin behind point A", func(t *testing.T) {
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{3, 0, 0}, // B
-				{1, 0, 0}, // A
-				{0, 0, 0},
-				{0, 0, 0},
-			},
-			Count: 2,
-		}
-		direction := mgl64.Vec3{-1, 0, 0}
-		result := line(&simplex, &direction)
-		if result {
-			t.Error("Line should not contain origin")
-		}
-		// When origin is behind point A, simplex should be reduced to point A only
-		if simplex.Count != 1 {
-			t.Errorf("Expected simplex to be reduced to 1 point, got %d", simplex.Count)
-		}
-		// Direction should point from A toward origin
-		if direction.Dot(mgl64.Vec3{-1, 0, 0}) != 1.0 {
-			t.Errorf("Expected direction to be (-1,0,0), got %v", direction)
-		}
-	})
-}
-
-func TestTriangle(t *testing.T) {
-	t.Run("origin above triangle", func(t *testing.T) {
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{1, 0, 0},   // C (oldest)
-				{0, 1, 0},   // B
-				{0, 0, 0.5}, // A (most recent)
-				{0, 0, 0},
-			},
-			Count: 3,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := triangle(&simplex, &direction)
-
-		if result {
-			t.Error("Triangle should never contain origin in 3D")
-		}
-		// Simplex should remain a triangle (3 points)
-		if simplex.Count != 3 {
-			t.Errorf("Expected simplex to remain triangle (3 points), got %d", simplex.Count)
-		}
-	})
-
-	t.Run("origin in AB edge region", func(t *testing.T) {
-		// Create a proper triangle (not degenerate)
-		// Triangle vertices: A=(2,0,0), B=(0,2,0), C=(3,3,0)
-		// Origin should be in the Voronoi region of edge AB
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{3, 3, 0}, // C (oldest)
-				{0, 2, 0}, // B
-				{2, 0, 0}, // A (most recent)
-				{0, 0, 0},
-			},
-			Count: 3,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := triangle(&simplex, &direction)
-
-		if result {
-			t.Error("Triangle should never contain origin in 3D")
-		}
-		// Origin is in AB region, so simplex should be reduced to edge AB (2 points)
-		if simplex.Count != 2 {
-			t.Errorf("Expected simplex reduced to edge (2 points), got %d", simplex.Count)
-		}
-	})
-
-	t.Run("origin in AC edge region", func(t *testing.T) {
-		// Create a proper triangle where origin is in AC edge region
-		// Triangle vertices: A=(2,0,0), B=(3,3,0), C=(0,2,0)
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{0, 2, 0}, // C (oldest)
-				{3, 3, 0}, // B
-				{2, 0, 0}, // A (most recent)
-				{0, 0, 0},
-			},
-			Count: 3,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := triangle(&simplex, &direction)
-
-		if result {
-			t.Error("Triangle should never contain origin in 3D")
-		}
-		// Origin is in AC region, so simplex should be reduced to edge AC (2 points)
-		if simplex.Count != 2 {
-			t.Errorf("Expected simplex reduced to edge (2 points), got %d", simplex.Count)
-		}
-	})
-}
-
-func TestTetrahedron(t *testing.T) {
-	t.Run("origin inside tetrahedron", func(t *testing.T) {
-		// Create a tetrahedron that actually contains the origin
-		// Using a regular tetrahedron centered near origin
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{-1, -1, -1}, // D (oldest)
-				{1, 1, -1},   // C
-				{1, -1, 1},   // B
-				{-1, 1, 1},   // A (most recent)
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := tetrahedron(&simplex, &direction)
-
-		if !result {
-			t.Error("Expected tetrahedron to contain origin")
-		}
-	})
-
-	t.Run("origin outside ABC face", func(t *testing.T) {
-		// Tetrahedron with origin clearly outside
-		simplex := Simplex{
-			Points: [4]mgl64.Vec3{
-				{5, 5, 5}, // D (oldest)
-				{6, 5, 5}, // C
-				{5, 6, 5}, // B
-				{5, 5, 6}, // A (most recent)
-			},
-			Count: 4,
-		}
-		direction := mgl64.Vec3{0, 0, 1}
-
-		result := tetrahedron(&simplex, &direction)
-
-		if result {
-			t.Error("Expected origin to be outside tetrahedron")
-		}
-		if simplex.Count > 3 {
-			t.Errorf("Expected simplex reduced to triangle (3 points), got %d", simplex.Count)
-		}
-	})
-}
-
 // Benchmark tests
 
 func BenchmarkGJK_Spheres_Intersecting(b *testing.B) {
@@ -856,5 +487,81 @@ func BenchmarkGJK_MixedShapes(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		GJK(box, sphere, simplex)
+	}
+}
+
+// With a margin, body A is inflated: shapes closer than the margin overlap, farther ones
+// do not.
+func TestGJKMargin(t *testing.T) {
+	a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
+	b := createBoxBody(mgl64.Vec3{0, 2.01, 0}, mgl64.Vec3{1, 1, 1})
+	simplex := &Simplex{}
+	if GJKMargin(a, b, 0, simplex) {
+		t.Error("boxes 1 cm apart overlap without margin")
+	}
+	simplex.Reset()
+	if !GJKMargin(a, b, 0.02, simplex) {
+		t.Error("boxes 1 cm apart do not overlap with a 2 cm margin")
+	}
+	if simplex.Count != 4 {
+		t.Errorf("simplex has %d points, want a tetrahedron for EPA", simplex.Count)
+	}
+	simplex.Reset()
+	if GJKMargin(a, b, 0.005, simplex) {
+		t.Error("boxes 1 cm apart overlap with a 5 mm margin")
+	}
+}
+
+// Every vertex of the final simplex remembers its support points: W = A - B, A on body A
+// (inflated), B on body B.
+func TestGJKSimplexKeepsSupports(t *testing.T) {
+	a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1)
+	b := createBoxBody(mgl64.Vec3{0.5, 1.2, 0.3}, mgl64.Vec3{0.5, 0.5, 0.5})
+	simplex := &Simplex{}
+	if !GJK(a, b, simplex) {
+		t.Fatal("no overlap")
+	}
+	for i := 0; i < simplex.Count; i++ {
+		v := simplex.Vertex(i)
+		if v.W.Sub(v.A.Sub(v.B)).Len() > 1e-12 {
+			t.Errorf("vertex %d: W %v != A - B %v", i, v.W, v.A.Sub(v.B))
+		}
+		if math.Abs(v.A.Len()-1) > 1e-9 {
+			t.Errorf("vertex %d: A %v is not on the sphere", i, v.A)
+		}
+	}
+}
+
+// Shapes exactly touching (the origin on the Minkowski boundary) are an overlap, and the
+// simplex is grown into a tetrahedron so EPA can start.
+func TestGJKTouchingFillsTetrahedron(t *testing.T) {
+	a := createBoxBody(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1})
+	b := createBoxBody(mgl64.Vec3{2, 0, 0}, mgl64.Vec3{1, 1, 1})
+	simplex := &Simplex{}
+	if !GJK(a, b, simplex) {
+		t.Fatal("touching boxes not reported")
+	}
+	if simplex.Count != 4 {
+		t.Errorf("simplex has %d points, want 4", simplex.Count)
+	}
+	// the step of the world doesn't allocate: filling the tetrahedron neither
+	proxyA, proxyB := NewProxy(a), NewProxy(b)
+	if allocs := testing.AllocsPerRun(10, func() {
+		simplex.Reset()
+		GJKProxies(&proxyA, &proxyB, 0, simplex)
+	}); allocs > 0 {
+		t.Errorf("%.1f allocations to fill the tetrahedron, want 0", allocs)
+	}
+}
+
+// A direction of zero length gives a finite support point (the sphere used to return NaN).
+func TestSupportZeroDirection(t *testing.T) {
+	a := createSphereBody(mgl64.Vec3{0, 0, 0}, 1)
+	b := createSphereBody(mgl64.Vec3{0, 0, 0}, 1)
+	v := Support(a, b, mgl64.Vec3{}, 0.1)
+	for _, x := range v.W {
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			t.Fatalf("support %v is not finite", v)
+		}
 	}
 }

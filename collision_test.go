@@ -1,13 +1,12 @@
 package feather
 
 import (
+	"math"
 	"math/rand"
-	"os"
-	"runtime/pprof"
-	"runtime/trace"
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/constraint"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -42,11 +41,10 @@ func createPlane(normal mgl64.Vec3, distance float64) *actor.RigidBody {
 // TestBroadPhaseNoBodies tests broad phase with no bodies
 func TestBroadPhaseNoBodies(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	if len(pairs) != 0 {
 		t.Errorf("BroadPhase with no bodies returned %d pairs, want 0", len(pairs))
@@ -55,12 +53,11 @@ func TestBroadPhaseNoBodies(t *testing.T) {
 
 func TestBroadPhaseSingleBody(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	if len(pairs) != 0 {
 		t.Errorf("BroadPhase with single body returned %d pairs, want 0", len(pairs))
@@ -69,18 +66,15 @@ func TestBroadPhaseSingleBody(t *testing.T) {
 
 func TestBroadPhaseTwoBodiesOverlapping(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
 	world.AddBody(createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != 1 {
 		t.Errorf("BroadPhase with overlapping bodies returned %d pairs, want 1", len(pairs))
@@ -92,18 +86,15 @@ func TestBroadPhaseTwoBodiesOverlapping(t *testing.T) {
 
 func TestBroadPhaseTwoBodiesNotOverlapping(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
 	world.AddBody(createBox(mgl64.Vec3{10.0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != 0 {
 		t.Errorf("BroadPhase with non-overlapping bodies returned %d pairs, want 0", len(pairs))
@@ -112,18 +103,15 @@ func TestBroadPhaseTwoBodiesNotOverlapping(t *testing.T) {
 
 func TestBroadPhaseTwoStaticBodies(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic))
 	world.AddBody(createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic))
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	// Static-static collisions should be skipped
 	if len(contactPairs) != 0 {
@@ -133,18 +121,15 @@ func TestBroadPhaseTwoStaticBodies(t *testing.T) {
 
 func TestBroadPhaseStaticDynamicOverlapping(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeStatic))
 	world.AddBody(createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 	if len(contactPairs) != 1 {
 		t.Errorf("BroadPhase with static-dynamic overlapping returned %d pairs, want 1", len(contactPairs))
 	}
@@ -152,9 +137,8 @@ func TestBroadPhaseStaticDynamicOverlapping(t *testing.T) {
 
 func TestBroadPhaseMultipleBodies(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	// Create bodies
@@ -168,14 +152,12 @@ func TestBroadPhaseMultipleBodies(t *testing.T) {
 	world.AddBody(body2)
 	world.AddBody(body3)
 
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	// Expected pairs: (0,1), (1,2)
 	expectedPairs := 2
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != expectedPairs {
 		t.Errorf("BroadPhase returned %d pairs, want %d", len(contactPairs), expectedPairs)
@@ -213,20 +195,17 @@ func TestBroadPhaseMultipleBodies(t *testing.T) {
 
 func TestBroadPhaseSpheresOverlapping(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	world.AddBody(createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic))
 	world.AddBody(createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic))
 
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != 1 {
 		t.Errorf("BroadPhase with overlapping spheres returned %d pairs, want 1", len(contactPairs))
@@ -238,20 +217,17 @@ func TestBroadPhaseSpheresOverlapping(t *testing.T) {
 
 func TestBroadPhaseSpheresNotOverlapping(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	world.AddBody(createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic))
 	world.AddBody(createSphere(mgl64.Vec3{3, 0, 0}, 1.0, actor.BodyTypeDynamic))
 
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != 0 {
 		t.Errorf("BroadPhase with non-overlapping spheres returned %d pairs, want 0", len(contactPairs))
@@ -263,20 +239,17 @@ func TestBroadPhaseSpheresNotOverlapping(t *testing.T) {
 
 func TestBroadPhaseMixedShapes(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	world.AddBody(createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
 	world.AddBody(createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic))
 
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) != 1 {
 		t.Errorf("BroadPhase with box-sphere overlapping returned %d pairs, want 1", len(contactPairs))
@@ -288,20 +261,17 @@ func TestBroadPhaseMixedShapes(t *testing.T) {
 
 func TestBroadPhaseWithPlane(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	world.AddBody(createPlane(mgl64.Vec3{0, 1, 0}, 0)) // Ground plane at y=0
 	world.AddBody(createBox(mgl64.Vec3{0, 0.5, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
 
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	// The box should overlap with the plane's AABB
 	if len(contactPairs) != 1 {
@@ -311,8 +281,7 @@ func TestBroadPhaseWithPlane(t *testing.T) {
 
 // TestNarrowPhaseNoPairs tests narrow phase with no pairs
 func TestNarrowPhaseNoPairs(t *testing.T) {
-	pairs := make(chan Pair)
-	close(pairs) // Close immediately to signal no more pairs
+	pairs := []Pair{}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -327,9 +296,7 @@ func TestNarrowPhaseOverlappingBoxes(t *testing.T) {
 	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 	bodyB := createBox(mgl64.Vec3{1.5, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -345,9 +312,7 @@ func TestNarrowPhaseNonOverlappingBoxes(t *testing.T) {
 	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 	bodyB := createBox(mgl64.Vec3{10, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -363,9 +328,7 @@ func TestNarrowPhaseOverlappingSpheres(t *testing.T) {
 	bodyA := createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic)
 	bodyB := createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -381,9 +344,7 @@ func TestNarrowPhaseNonOverlappingSpheres(t *testing.T) {
 	bodyA := createSphere(mgl64.Vec3{0, 0, 0}, 1.0, actor.BodyTypeDynamic)
 	bodyB := createSphere(mgl64.Vec3{5, 0, 0}, 1.0, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -399,9 +360,7 @@ func TestNarrowPhaseBoxSphere(t *testing.T) {
 	bodyA := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 	bodyB := createSphere(mgl64.Vec3{1.5, 0, 0}, 1.0, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -417,9 +376,7 @@ func TestNarrowPhaseSphereOnPlane(t *testing.T) {
 	bodyA := createPlane(mgl64.Vec3{0, 1, 0}, 0)
 	bodyB := createSphere(mgl64.Vec3{0, 0.5, 0}, 1.0, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -435,9 +392,7 @@ func TestNarrowPhaseBoxOnPlane(t *testing.T) {
 	bodyA := createPlane(mgl64.Vec3{0, 1, 0}, 0)
 	bodyB := createBox(mgl64.Vec3{0, 0.5, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 1)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB}
-	close(pairs)
+	pairs := []Pair{Pair{BodyA: bodyA, BodyB: bodyB}}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -455,10 +410,10 @@ func TestNarrowPhaseMultiplePairs(t *testing.T) {
 	bodyC := createSphere(mgl64.Vec3{3, 0, 0}, 1.0, actor.BodyTypeDynamic)
 	bodyD := createSphere(mgl64.Vec3{4, 0, 0}, 1.0, actor.BodyTypeDynamic)
 
-	pairs := make(chan Pair, 2)
-	pairs <- Pair{BodyA: bodyA, BodyB: bodyB} // Should collide
-	pairs <- Pair{BodyA: bodyC, BodyB: bodyD} // Should collide
-	close(pairs)
+	pairs := []Pair{
+		{BodyA: bodyA, BodyB: bodyB}, // Should collide
+		{BodyA: bodyC, BodyB: bodyD}, // Should collide
+	}
 
 	contacts := NarrowPhase(pairs, 8)
 
@@ -493,9 +448,8 @@ func TestCollisionPairStruct(t *testing.T) {
 
 func TestIntegrationBroadAndNarrowPhase(t *testing.T) {
 	world := World{
-		Bodies:      []*actor.RigidBody{},
-		SpatialGrid: NewSpatialGrid(1.0, 1024),
-		Workers:     8,
+		Bodies:  []*actor.RigidBody{},
+		Workers: 8,
 	}
 
 	body0 := createBox(mgl64.Vec3{0, 0, 0}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
@@ -507,25 +461,16 @@ func TestIntegrationBroadAndNarrowPhase(t *testing.T) {
 	world.AddBody(body2)
 
 	// Broad phase
-	pairs := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	var contactPairs []Pair
-	for p := range pairs {
-		contactPairs = append(contactPairs, p)
-	}
+	contactPairs = append(contactPairs, pairs...)
 
 	if len(contactPairs) == 0 {
 		t.Fatal("BroadPhase returned no pairs, expected at least 1")
 	}
 
-	// Narrow phase - convert slice to channel
-	pairChan := make(chan Pair, len(contactPairs))
-	for _, pair := range contactPairs {
-		pairChan <- pair
-	}
-	close(pairChan)
-
-	contacts := NarrowPhase(pairChan, 8)
+	contacts := NarrowPhase(contactPairs, 8)
 
 	if len(contacts) == 0 {
 		t.Error("NarrowPhase returned no contacts, expected at least 1")
@@ -549,9 +494,8 @@ func BenchmarkLargeBroadPhase2(b *testing.B) {
 	const rowSize = 100.0
 
 	world := World{
-		Gravity:     mgl64.Vec3{},
-		Substeps:    20,
-		SpatialGrid: NewSpatialGrid(6.0, 4096),
+		Gravity:  mgl64.Vec3{},
+		Substeps: 20,
 	}
 
 	r := rand.New(rand.NewSource(0))
@@ -566,225 +510,69 @@ func BenchmarkLargeBroadPhase2(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pair := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
+		pair := BroadPhase(world.Bodies, world.Workers)
 
-		for p := range pair {
+		for _, p := range pair {
 			p.BodyA.IsSleeping = true
 		}
 	}
 }
 
-// BenchmarkLargeGJK2-16    	    1010	   1174808 ns/op	  133546 B/op	    2362 allocs/op
-// BenchmarkLargeGJK2-16    	   32847	     40166 ns/op	   16228 B/op	      53 allocs/op
-func BenchmarkLargeGJK2(b *testing.B) {
+// largeOverlappingWorld is 1000 unit boxes on a 0.9 m grid: every neighbour overlaps.
+func largeOverlappingWorld(workers int) *World {
 	const cubesCount = 1000
-	const rowSize = 100.0
+	const rowSize = 100
 
-	world := World{
-		Substeps:    10,
-		SpatialGrid: NewSpatialGrid(6.0, 4096),
+	world := &World{
+		Substeps: 20,
+		Workers:  workers,
+		Events:   NewEvents(),
 	}
 	for i := 0; i < cubesCount; i++ {
-		row := i / rowSize
-		col := i % rowSize
-		x := 0.0
-		y := float64(row) * 0.9
-		z := float64(col) * 0.9
-
-		world.AddBody(createBox(mgl64.Vec3{x, y, z}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
+		row, col := i/rowSize, i%rowSize
+		world.AddBody(createBox(mgl64.Vec3{0, float64(row) * 0.9, float64(col) * 0.9}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
 	}
+	return world
+}
 
-	f, _ := os.Create("trace.out")
-	fcpu, _ := os.Create(`cpu.prof`)
-	fheap, _ := os.Create(`heap.prof`)
-	defer func() {
-		_ = f.Close()
-		_ = fcpu.Close()
-		_ = fheap.Close()
-	}()
-	_ = pprof.StartCPUProfile(fcpu)
-	_ = pprof.WriteHeapProfile(fheap)
-	_ = trace.Start(f)
+// BenchmarkLargeNarrowPhase measures GJK/EPA and manifold generation on ~4000 overlapping
+// box pairs. Profile with go test -bench LargeNarrowPhase -cpuprofile cpu.prof.
+func BenchmarkLargeNarrowPhase(b *testing.B) {
+	world := largeOverlappingWorld(8)
+	pairs := BroadPhase(world.Bodies, world.Workers)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		pair := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
-		b.StartTimer()
-
-		collisionPair := GJK(pair, 8)
-		cp := <-collisionPair
-		cp.BodyA.IsSleeping = false
+		NarrowPhase(pairs, world.Workers)
 	}
-
-	b.StopTimer()
-	trace.Stop()
-	pprof.StopCPUProfile()
 }
 
-// BenchmarkLargeEPA2-16    	      68	  16822520 ns/op	41372250 B/op	  385439 allocs/op
-// BenchmarkLargeEPA2-16    	      60	  17793428 ns/op	16812076 B/op	  269212 allocs/op
-// BenchmarkLargeEPA2-16    	      67	  16210373 ns/op	13802236 B/op	  186096 allocs/op
-// BenchmarkLargeEPA2-16    	      74	  15506020 ns/op	 7415237 B/op	  113062 allocs/op
-// BenchmarkLargeEPA2-16    	      68	  16088034 ns/op	 9779191 B/op	  144406 allocs/op
-// BenchmarkLargeEPA2-16    	      88	  12838612 ns/op	 4697867 B/op	   81534 allocs/op
-// BenchmarkLargeEPA2-16    	      94	  12424054 ns/op	 3703345 B/op	   71191 allocs/op
-// BenchmarkLargeEPA2-16    	     100	  10844368 ns/op	 2250015 B/op	   20845 allocs/op
-// BenchmarkLargeEPA2-16    	     100	  11876997 ns/op	 2033844 B/op	   20867 allocs/op
-func BenchmarkLargeEPA2(b *testing.B) {
-	const cubesCount = 1000
-	const rowSize = 100.0
-
-	world := World{
-		SpatialGrid: NewSpatialGrid(6.0, 4096),
-		Workers:     8,
-	}
-	for i := 0; i < cubesCount; i++ {
-		row := i / rowSize
-		col := i % rowSize
-		x := 0.0
-		y := float64(row) * 0.9
-		z := float64(col) * 0.9
-
-		world.AddBody(createBox(mgl64.Vec3{x, y, z}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic))
-	}
-
-	f, _ := os.Create("trace.out")
-	fcpu, _ := os.Create(`cpu.prof`)
-	fheap, _ := os.Create(`heap.prof`)
-	defer func() {
-		_ = f.Close()
-		_ = fcpu.Close()
-		_ = fheap.Close()
-	}()
-	_ = pprof.StartCPUProfile(fcpu)
-	_ = pprof.WriteHeapProfile(fheap)
-	_ = trace.Start(f)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		pair := BroadPhase(world.SpatialGrid, world.Bodies, world.Workers)
-		collisionPair := GJK(pair, world.Workers)
-		b.StartTimer()
-
-		c := EPA(collisionPair, world.Workers)
-
-		for cp := range c {
-			cp.Normal.Add(mgl64.Vec3{1, 1, 1})
-		}
-	}
-
-	b.StopTimer()
-	trace.Stop()
-	pprof.StopCPUProfile()
-}
-
-//// BenchmarkLargeFullProcess2-16    	     283	   4050792 ns/op	 6838094 B/op	   44201 allocs/op
-//// BenchmarkLargeFullProcess2-16    	     292	   3824172 ns/op	 2055274 B/op	   33626 allocs/op
-//// BenchmarkLargeFullProcess2-16    	     322	   3651005 ns/op	 1804978 B/op	   27433 allocs/op
-//// BenchmarkLargeFullProcess2-16    	     387	   3478882 ns/op	 1243375 B/op	   20867 allocs/op
-//// BenchmarkLargeFullProcess2-16    	     421	   2963511 ns/op	 1023337 B/op	   18366 allocs/op
-//// BenchmarkLargeFullProcess2-16    	     447	   2738878 ns/op	  204897 B/op	    1599 allocs/op
-//func BenchmarkLargeFullProcess2(b *testing.B) {
-//	const cubesCount = 1000
-//	const rowSize = 100.0
-//
-//	bodies := make([]*actor.RigidBody, cubesCount)
-//	rand.Seed(0)
-//	for i := 0; i < cubesCount; i++ {
-//		x := 0.0
-//		y := rand.Float64() * rowSize
-//		z := rand.Float64() * rowSize
-//
-//		bodies[i] = createBox(mgl64.Vec3{x, y, z}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
-//	}
-//
-//	//f, _ := os.Create("trace.out")
-//	//fcpu, _ := os.Create(`cpu.prof`)
-//	//fheap, _ := os.Create(`heap.prof`)
-//	//defer f.Close()
-//	//defer fcpu.Close()
-//	//defer fheap.Close()
-//	//pprof.StartCPUProfile(fcpu)
-//	//pprof.WriteHeapProfile(fheap)
-//	//trace.Start(f)
-//
-//	b.ReportAllocs()
-//	b.ResetTimer()
-//	for i := 0; i < b.N; i++ {
-//		b.StopTimer()
-//		pair := BroadPhase(bodies)
-//		b.StartTimer()
-//		c := NarrowPhase(pair)
-//		//c := EPA(collisionPair)
-//
-//		for _, cp := range c {
-//			cp.Normal.Add(mgl64.Vec3{1, 1, 1})
-//		}
-//	}
-//	//
-//	//b.StopTimer()
-//	//trace.Stop()
-//	//pprof.StopCPUProfile()
-//}
-
-// BenchmarkLargeWorldStep-16    	      31	  33618889 ns/op	12125978 B/op	  125992 allocs/op
-// BenchmarkLargeWorldStep-16    	      18	  60079141 ns/op	 7362741 B/op	  111143 allocs/op
-// BenchmarkLargeWorldStep-16    	      18	  59910275 ns/op	 5765873 B/op	   77687 allocs/op
-// BenchmarkLargeWorldStep-16    	      20	  50151706 ns/op	 4242036 B/op	   60310 allocs/op
-// BenchmarkLargeWorldStep-16    	      19	  56083404 ns/op	 3350388 B/op	   51131 allocs/op
-// BenchmarkLargeWorldStep-16    	      18	  58991949 ns/op	 2254283 B/op	   41523 allocs/op
-// BenchmarkLargeWorldStep-16    	      24	  42948575 ns/op	 1690602 B/op	   35338 allocs/op
-// BenchmarkLargeWorldStep-16    	      72	  14198539 ns/op	  906586 B/op	   15005 allocs/op
-// BenchmarkLargeWorldStep-16    	      88	  11727200 ns/op	  944759 B/op	   12895 allocs/op
-// BenchmarkLargeWorldStep-16    	     110	   9633886 ns/op	  434964 B/op	    3836 allocs/op
-// BenchmarkLargeWorldStep-16    	     116	  10779597 ns/op	  413915 B/op	    3692 allocs/op
-// BenchmarkLargeWorldStep-16    	      97	  11073711 ns/op	  446703 B/op	    3952 allocs/op
+// BenchmarkLargeWorldStep measures a whole step of 1000 overlapping boxes, 20 sub-steps.
 func BenchmarkLargeWorldStep(b *testing.B) {
-	const cubesCount = 1000
-	const rowSize = 100.0
-
-	world := World{
-		Gravity:     mgl64.Vec3{},
-		Substeps:    20,
-		SpatialGrid: NewSpatialGrid(6.0, 4096),
-		Workers:     8,
-	}
-	bodies := make([]*actor.RigidBody, cubesCount)
-
-	for i := 0; i < cubesCount; i++ {
-		row := i / rowSize
-		col := i % rowSize
-		x := 0.0
-		y := float64(row) * 0.9
-		z := float64(col) * 0.9
-
-		bodies[i] = createBox(mgl64.Vec3{x, y, z}, mgl64.Vec3{1, 1, 1}, actor.BodyTypeDynamic)
-		world.AddBody(bodies[i])
-	}
-
-	f, _ := os.Create("trace.out")
-	fcpu, _ := os.Create(`cpu.prof`)
-	fheap, _ := os.Create(`heap.prof`)
-	defer func() {
-		_ = f.Close()
-		_ = fcpu.Close()
-		_ = fheap.Close()
-	}()
-	_ = pprof.StartCPUProfile(fcpu)
-	_ = pprof.WriteHeapProfile(fheap)
-	_ = trace.Start(f)
+	world := largeOverlappingWorld(8)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		world.Step(1.0 / 60.0)
 	}
+}
 
-	b.StopTimer()
-	trace.Stop()
-	pprof.StopCPUProfile()
+// Against a plane, the contact keeps the deepest point of the shape, whatever its rotation
+func TestPlaneContactKeepsDeepestPoint(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	plane := createPlane(mgl64.Vec3{0, 1, 0}, 0)
+	for i := 0; i < 500; i++ {
+		rotation := mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{r.Float64() - 0.5, r.Float64() - 0.5, r.Float64() - 0.5}.Normalize())
+		box := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0, 0.25, 0}, Rotation: rotation}, &actor.Box{HalfExtents: mgl64.Vec3{0.2, 0.15, 0.25}}, actor.BodyTypeDynamic, 1)
+		var m constraint.Manifold
+		if !Collide(plane, box, 0.4, &m) {
+			t.Fatal("no contact")
+		}
+		lowest := box.Transform.ToWorld(box.Shape.Support(rotation.Conjugate().Rotate(mgl64.Vec3{0, -1, 0}))).Y()
+		if math.Abs(m.MinSeparation()-lowest) > 1e-9 {
+			t.Fatalf("rotation %v: deepest point %.4f, the contact has %.4f", rotation, lowest, m.MinSeparation())
+		}
+	}
 }
