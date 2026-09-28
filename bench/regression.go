@@ -18,6 +18,7 @@ import (
 
 	"github.com/akmonengine/feather"
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/bench/scenes"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -49,13 +50,19 @@ const (
 
 	// phaseShare: the phases under 5 % of the step are too short to be compared
 	phaseShare = 0.05
+
+	// minComparedStepMs: under 0.1 ms per step, the noise of the timer dominates: the speed is not compared
+	minComparedStepMs = 0.1
 )
 
 // qualityTolerances: how much worse a quality metric may get, by unit
 var qualityTolerances = map[string]float64{
-	"mm": 0.5,  // a depth, a drift: 0.5 mm, a tenth of LinearSlop
-	"%":  0.1,  // an energy gain, in % of the energy
-	"":   1e-9, // a count
+	"mm":  0.5,    // a depth, a drift: 0.5 mm, a tenth of LinearSlop
+	"m":   0.0005, // the same, in m
+	"%":   0.1,    // an energy gain, in % of the energy
+	"m/s": 0.1,    // a speed
+	"s":   0.02,   // a time: one step
+	"":    1e-9,   // a count
 }
 
 // metric: a quality measure of a scene
@@ -127,13 +134,28 @@ func profilePhases(p feather.Profile) map[string]time.Duration {
 
 // ========== SCENES ==========
 
-var regressionScenes = []regressionScene{
+var regressionScenes = append([]regressionScene{
 	{"slope pile", slopePile},
 	{"terrain piles", terrainPiles},
 	{"pyramid", pyramidDrift},
 	{"pile of 500", pile500},
 	{"joint chain", jointChain},
 	{"rain on terrain", rainOnTerrain},
+}, solverScenes()...)
+
+// solverScenes: the scenes of Solver2D (bench/scenes), at their small size (the full size is for -scenes)
+func solverScenes() []regressionScene {
+	var result []regressionScene
+	for _, scene := range scenes.All {
+		result = append(result, regressionScene{"solver2d " + scene.Name, func() map[string]metric {
+			quality := map[string]metric{}
+			for name, m := range scene.Run(scenes.Small, play) {
+				quality[name] = metric{m.Value, m.Unit}
+			}
+			return quality
+		}})
+	}
+	return result
 }
 
 // mixedShape: a box, a sphere or a capsule, of 20 to 40 cm
@@ -464,10 +486,6 @@ func measureScene(scene regressionScene) sceneResult {
 	return result
 }
 
-func milliseconds(d time.Duration) float64 {
-	return float64(d.Nanoseconds()) / 1e6
-}
-
 // machine: the CPU, for the speed
 func machine() string {
 	model := "unknown CPU"
@@ -547,7 +565,7 @@ func compare(reference, current baseline) bool {
 				fmt.Printf("better     %s: %s %.3f %s, the reference is %.3f\n", scene.name, name, after.Value, before.Unit, before.Value)
 			}
 		}
-		if !sameMachine {
+		if !sameMachine || want.StepMs < minComparedStepMs {
 			continue
 		}
 		if got.StepMs > want.StepMs*(1+stepTolerance) {
@@ -564,13 +582,4 @@ func compare(reference, current baseline) bool {
 		fmt.Println("no regression")
 	}
 	return ok
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }

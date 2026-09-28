@@ -286,9 +286,11 @@ func simplexSize(simplex *Simplex) float64 {
 func fillTetrahedron(a, b *Proxy, margin float64, simplex *Simplex) bool {
 	axes := [6]mgl64.Vec3{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
 
+	var candidates [len(axes)]mgl64.Vec3
 	for simplex.Count < 4 {
 		added := false
-		for _, axis := range candidateDirections(simplex, axes) {
+		count := candidateDirections(simplex, &axes, &candidates)
+		for _, axis := range candidates[:count] {
 			v := SupportProxies(a, b, axis, margin)
 			if isNewVertex(simplex, v.W) {
 				simplex.Points[simplex.Count], simplex.A[simplex.Count], simplex.B[simplex.Count] = v.W, v.A, v.B
@@ -304,24 +306,27 @@ func fillTetrahedron(a, b *Proxy, margin float64, simplex *Simplex) bool {
 	return true
 }
 
-// candidateDirections to add a dimension to the simplex:
-// the axes for a point, perpendicular directions for a segment, both normals for a triangle
-func candidateDirections(simplex *Simplex, axes [6]mgl64.Vec3) []mgl64.Vec3 {
+// candidateDirections to add a dimension to the simplex, written in out (their count is returned, nothing is
+// allocated): the axes for a point, perpendicular directions for a segment, both normals for a triangle
+func candidateDirections(simplex *Simplex, axes, out *[6]mgl64.Vec3) int {
 	switch simplex.Count {
 	case 1:
-		return axes[:]
+		*out = *axes
+		return len(axes)
 	case 2:
 		edge := simplex.Points[1].Sub(simplex.Points[0])
-		var out []mgl64.Vec3
+		count := 0
 		for _, axis := range axes {
 			if d := edge.Cross(axis); d.LenSqr() > 0 {
-				out = append(out, d)
+				out[count] = d
+				count++
 			}
 		}
-		return out
+		return count
 	default:
 		n := simplex.Points[1].Sub(simplex.Points[0]).Cross(simplex.Points[2].Sub(simplex.Points[0]))
-		return []mgl64.Vec3{n, n.Mul(-1)}
+		out[0], out[1] = n, n.Mul(-1)
+		return 2
 	}
 }
 

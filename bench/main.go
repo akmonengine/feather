@@ -5,6 +5,7 @@
 //	go run -tags v020 -modfile=go.v020.mod . [-only ...]      # v0.2.0 (XPBD), for comparison
 //	go run . -check                                           # the regressions against baseline.json (regression.go)
 //	go run . -update                                          # write baseline.json, after a wanted change
+//	go run . -scenes ; go run . -compare                      # the scenes of Solver2D (reference.go)
 //
 // Every scene runs at AkmonEngine's rate: 50 Hz, 12 sub-steps, one worker.
 package main
@@ -236,7 +237,16 @@ func main() {
 	part := flag.String("only", "", "sim, epa or speed (default: all)")
 	check := flag.Bool("check", false, "compare to the reference baseline.json, exit 1 on a regression")
 	update := flag.Bool("update", false, "write the reference baseline.json")
+	referenceScenes := flag.Bool("scenes", false, "run the scenes of Solver2D (bench/scenes) at their full size")
+	compare := flag.Bool("compare", false, "print the scenes of the working tree and of v0.2.0 side by side")
 	flag.Parse()
+	if *referenceScenes || *compare {
+		ok := *referenceScenes && runScenes() || *compare && compareScenes()
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
 	if *check || *update {
 		if !regressions(*update) {
 			os.Exit(1)

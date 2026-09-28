@@ -544,6 +544,14 @@ func TestGJKTouchingFillsTetrahedron(t *testing.T) {
 	if simplex.Count != 4 {
 		t.Errorf("simplex has %d points, want 4", simplex.Count)
 	}
+	// the step of the world doesn't allocate: filling the tetrahedron neither
+	proxyA, proxyB := NewProxy(a), NewProxy(b)
+	if allocs := testing.AllocsPerRun(10, func() {
+		simplex.Reset()
+		GJKProxies(&proxyA, &proxyB, 0, simplex)
+	}); allocs > 0 {
+		t.Errorf("%.1f allocations to fill the tetrahedron, want 0", allocs)
+	}
 }
 
 // A direction of zero length gives a finite support point (the sphere used to return NaN).

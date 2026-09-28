@@ -290,8 +290,8 @@ func (w *World) lap(phase *time.Duration, mark time.Time) time.Time {
 }
 
 // detectCollision: the AABBs are enlarged by the distance the bodies can travel during the step, so that the contacts
-// exist before the bodies touch (speculative contacts: the speculative CCD of PhysX, the "Continuous Speculative" mode
-// of Unity)
+// with the static bodies exist before the bodies touch (speculative contacts: the speculative CCD of PhysX, the
+// "Continuous Speculative" mode of Unity)
 func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manifold {
 	if cap(w.aabbs) < len(w.Bodies) {
 		w.aabbs = make([]actor.AABB, len(w.Bodies))
@@ -386,7 +386,14 @@ func (w *World) collide(i int) {
 	}
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
-		margin = SpeculativeDistance + relativeSpeed(pair.BodyA, pair.BodyB)*w.dt
+		// against a static body, the contact exists before the body touches it, from its speed (the speculative CCD of
+		// PhysX): it doesn't sink into the ground. Between 2 dynamic bodies, only within SpeculativeDistance (as in
+		// Box2D v3): a fast impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one
+		// substep would throw the lighter body and turn both
+		margin = SpeculativeDistance
+		if pair.BodyA.BodyType == actor.BodyTypeStatic || pair.BodyB.BodyType == actor.BodyTypeStatic {
+			margin += relativeSpeed(pair.BodyA, pair.BodyB) * w.dt
+		}
 
 		// pair cache: the contacts of the previous step, if the bodies barely moved relative to each other
 		if r, ok := w.contactsIndex[makePairKey(pair.BodyA, pair.BodyB)]; ok && w.previous[r.first].BodyA == pair.BodyA && !w.isChanged(pair) {
@@ -438,7 +445,8 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 }
 
 // warmStart: a contact point takes the impulses of the closest point of the previous step
-// (in the local space of body A), among the manifolds of the same pair
+// (in the local space of body A), among the manifolds of the same pair. The contact takes the friction, twist & rolling
+// impulses of the previous contact of its first matched point
 func (w *World) warmStart(manifolds []constraint.Manifold) {
 	for i := range manifolds {
 		manifold := &manifolds[i]
@@ -448,6 +456,7 @@ func (w *World) warmStart(manifolds []constraint.Manifold) {
 		}
 
 		used := [MaxManifoldsPerPair][constraint.MaxContactPoints]bool{}
+		source := -1
 		for j := 0; j < manifold.Count; j++ {
 			local := manifold.Points[j].LocalAnchorA
 			closestManifold, closest, closestDistance := -1, -1, contactMatchDistance*contactMatchDistance
@@ -468,8 +477,16 @@ func (w *World) warmStart(manifolds []constraint.Manifold) {
 				used[closestManifold][closest] = true
 				point := &w.previous[r.first+closestManifold].Points[closest]
 				manifold.Points[j].NormalImpulse = point.NormalImpulse
-				manifold.Points[j].TangentImpulse = point.TangentImpulse
+				if source < 0 {
+					source = closestManifold
+				}
 			}
+		}
+		// the impulses of the whole contact come from the previous contact of its first point
+		if source >= 0 {
+			previous := &w.previous[r.first+source]
+			manifold.FrictionImpulse, manifold.TwistImpulse = previous.FrictionImpulse, previous.TwistImpulse
+			manifold.RollingImpulse = previous.RollingImpulse
 		}
 	}
 }

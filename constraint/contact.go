@@ -14,9 +14,8 @@ type ContactPoint struct {
 	// Separation < 0 when the bodies overlap, > 0 for a speculative contact (not touching yet)
 	Separation float64
 
-	// Impulses applied by the solver during the last step (N·s), to warm start the next step
-	NormalImpulse  float64
-	TangentImpulse mgl64.Vec3
+	// NormalImpulse applied by the solver during the last step (N·s), to warm start the next step
+	NormalImpulse float64
 
 	// LocalAnchorA is the point on the surface of A, in the local space of A, LocalAnchorB the point on the
 	// surface of B, in the local space of B. They find the same point in the next step (warm starting),
@@ -32,6 +31,11 @@ type Manifold struct {
 	Normal mgl64.Vec3
 	Points [MaxContactPoints]ContactPoint
 	Count  int
+
+	// Impulses of the friction applied by the solver during the last step, to warm start the next step: along the
+	// tangents at the friction center of the points (N·s), and around the normal (N·m·s)
+	FrictionImpulse mgl64.Vec3
+	TwistImpulse    float64
 
 	// RollingImpulse applied by the solver during the last step (N·m·s), to warm start the next step
 	RollingImpulse mgl64.Vec3

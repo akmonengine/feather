@@ -77,8 +77,9 @@ func TestStepDoesNotAllocate(t *testing.T) {
 	}
 	for _, workers := range []int{1, 8} {
 		w := benchScene(500, workers)
-		// the bodies are still falling and colliding
-		simulate(w, 0.2, nil)
+		// the pile has landed (its buffers have grown: the collision events, the polytopes of EPA), all its bodies
+		// still collide
+		simulate(w, 0.4, nil)
 		allocs := testing.AllocsPerRun(10, func() {
 			w.Step(sceneDt)
 		})

@@ -129,6 +129,45 @@ func TestJointChain(t *testing.T) {
 	}
 }
 
+// A chain of 10 links carrying a ball 100 times heavier, released horizontal: while it swings, no joint opens by more
+// than 1 % of a link. Solved one by one, the spring of each joint acts on the mass of a link, and the ball stretches the
+// chain (articulation.go)
+func TestHeavyChainDoesNotStretch(t *testing.T) {
+	const links, halfHeight, radius, ratio = 10, 0.2, 0.05, 100
+	w := newScene(1)
+	top := mgl64.Vec3{0, 6, 0}
+	previous := anchorBody(w, top)
+	lying := mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1})
+	var joints []*BallJoint
+	for i := 0; i < links; i++ {
+		joint := top.Add(mgl64.Vec3{float64(i) * 2 * halfHeight, 0, 0})
+		link := addBody(w, joint.Add(mgl64.Vec3{halfHeight, 0, 0}), lying, &actor.Capsule{HalfHeight: halfHeight, Radius: radius}, actor.BodyTypeDynamic, 0.5, 0)
+		ball := NewBallJoint(previous, link, joint, mgl64.Vec3{1, 0, 0})
+		w.AddJoint(ball)
+		joints = append(joints, ball)
+		previous = link
+	}
+	end := top.Add(mgl64.Vec3{float64(links) * 2 * halfHeight, 0, 0})
+	linkMass := previous.Material.GetMass()
+	const ballRadius = 0.2
+	density := ratio * linkMass / (4.0 / 3 * math.Pi * ballRadius * ballRadius * ballRadius)
+	ball := actor.NewRigidBody(actor.Transform{Position: end.Add(mgl64.Vec3{ballRadius, 0, 0}), Rotation: mgl64.QuatIdent()}, &actor.Sphere{Radius: ballRadius}, actor.BodyTypeDynamic, density)
+	w.AddBody(ball)
+	w.AddJoint(NewBallJoint(previous, ball, end, mgl64.Vec3{1, 0, 0}))
+	joints = append(joints, w.Joints[len(w.Joints)-1].(*BallJoint))
+
+	worstGap := 0.0
+	simulate(w, 4, func() {
+		for _, j := range joints {
+			worstGap = math.Max(worstGap, jointGap(&j.JointBase))
+		}
+	})
+	t.Logf("ball %.1f kg, link %.2f kg: worst gap %.3f mm", ball.Material.GetMass(), linkMass, worstGap*1000)
+	if worstGap > 0.01*2*halfHeight {
+		t.Errorf("a joint opened by %.2f mm, more than 1 %% of a link (%.1f mm)", worstGap*1000, 0.01*2*halfHeight*1000)
+	}
+}
+
 // A door on a hinge: it only turns around its axis, and stays within its limits, even pushed hard
 func TestJointHingeLimits(t *testing.T) {
 	w := newScene(1)

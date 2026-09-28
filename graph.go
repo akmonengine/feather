@@ -32,7 +32,9 @@ type constraintGraph struct {
 	overflow []int
 }
 
-// color assigns each constraint to the first color where both of its dynamic bodies are free
+// color assigns each constraint to the first color where both of its dynamic bodies are free. A contact with a static
+// body never takes the color 0 (as in Box2D v3): it is solved after the contacts between dynamic bodies, the ground has
+// the last word. Solved first, a body pressed by a heavier one would leave the step moving into the ground
 func (g *constraintGraph) color(constraints []contactConstraint, bodiesCount int) {
 	words := (bodiesCount + 63) / 64
 	for i := range g.colors {
@@ -49,7 +51,11 @@ func (g *constraintGraph) color(constraints []contactConstraint, bodiesCount int
 	for i := range constraints {
 		indexA, indexB := constraints[i].indexA, constraints[i].indexB
 		colored := false
-		for k := range g.colors {
+		first := 0
+		if indexA < 0 || indexB < 0 {
+			first = 1
+		}
+		for k := first; k < len(g.colors); k++ {
 			color := &g.colors[k]
 			if isUsed(color.bodies, indexA) || isUsed(color.bodies, indexB) {
 				continue

@@ -177,18 +177,22 @@ func TestSphereInV(t *testing.T) {
 	}
 }
 
-// A box falls on a corner on another box resting on the ground: the dynamic bodies don't overlap more than the
-// tolerance of the detection
+// A box falls on a corner on another box resting on the ground. Between 2 dynamic bodies the contact is speculative
+// only within SpeculativeDistance (as in Box2D): the box, landing at v, enters the other box by v dt - SpeculativeDistance
+// at most during the step, then the spring of the contact pushes it out
 func TestBoxLandsOnBox(t *testing.T) {
 	w := newScene(1)
 	addGround(w, 0.6)
 	lower := addBody(w, mgl64.Vec3{0, cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
 	upper := addBody(w, mgl64.Vec3{0.05, 1.5, 0.08}, cornerDown(), cube(), actor.BodyTypeDynamic, 0.6, 0)
 	upper.AngularVelocity = mgl64.Vec3{0, 5, 0}
+	// the lowest corner falls from 1.5 - √3 half sizes to the top of the lower box
+	fall := 1.5 - math.Sqrt(3)*cubeHalf - 2*cubeHalf
+	bound := math.Sqrt(2*sceneGravity*fall)*sceneDt - SpeculativeDistance
 	worst := 0.0
 	simulate(w, 2, func() { worst = math.Max(worst, boxOverlap(lower, upper)) })
-	t.Logf("%.2f mm", worst*1000)
-	if worst > landingDepth {
+	t.Logf("%.2f mm (at most %.2f mm)", worst*1000, bound*1000)
+	if worst > bound {
 		t.Errorf("the boxes overlap by %.2f mm", worst*1000)
 	}
 }

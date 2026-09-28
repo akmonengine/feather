@@ -44,6 +44,10 @@ end
 ````
 
 - The tolerance is 1e-7 m: it is the error on the penetration depth.
+- **Ties**: the faces less deep than the closest one by less than 1 µm are as deep (a cube overlapping 2 others by the
+  same amount). They all converge, then EPA takes the first in a fixed order in the local space of A, not the one the
+  rounding found first: a scene moved by 1 µm or 100 km keeps the same normals, and the same motion. The triangles of a
+  same feature (normals within 1°: a face, a rounded surface) are not tied, the closest is kept.
 - The witness points come from the barycentric coordinates of the origin projected on the closest face.
 - Tested against exact solutions: SAT for box-box, closest point for sphere-box (see `epa/epa_test.go`).
 
@@ -56,7 +60,8 @@ From the normal of EPA, each body gives the feature facing the other body (a fac
 
 The deepest point has the separation of EPA, the other points are higher along the normal.
 The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most
-area.
+area. A point replaces the best one only if it is clearly better, deeper by 1 µm or a score higher by 1/0.95 (the pecking
+order of Box3D): the choice between points as good doesn't depend on the rounding.
 A box touches a plane (or the face of a triangle) with its supporting face, the face the most opposed to the normal
 (as the incident face of Jolt): the corners behind it are never candidates. The contacts are reduced the same way.
 
@@ -77,7 +82,7 @@ for numSubsteps do
     WarmStart();             // apply the accumulated impulses
     Push();                  // soft constraint
     IntegratePositions();
-    Relax();                 // rigid constraint + friction
+    Relax();                 // rigid constraint, then friction
 end
 Restitution();
 ````
@@ -115,11 +120,33 @@ Push:
     λ_total = max(λ_total + λ, 0)
 ````
 `Relax` solves the same constraint rigid (`gamma = 0`, bias only for the speculative contacts): the spring adds energy.
-The joints use the same soft rows.
+The joints use the same soft rows. The contacts with a static body are twice as stiff, with half the damping ratio (as
+Box3D).
+The friction is solved in `Relax` only, after the normals (as Box3D): solved in `Push` before the normals, it pushed the
+light bodies out from under a heavy one.
+
+### Block solver
+The points of a contact are solved together, exactly: their accumulated impulses are the solution of the linear
+complementarity problem `w = (K + D) λ + r`, `λ ≥ 0`, `w ≥ 0`, `λ w = 0`, found by enumerating the sets of active
+points, all of them first (the block solver of Box2D v2, for 4 points). `K` is the mass matrix of the points, `D` their
+softness (`gamma K_ii`, the fixed point of the soft row), `r = vn + bias - K λ_total`.
+Solved one after the other (Gauss-Seidel, as PhysX, Jolt & Box3D), the first point takes more than its share and turns
+the body: a box landing flat on another starts to spin, and lands back on a corner (Box3D: 30 cm of drift).
+4 rigid points on a face give 3 independent rows only: the share of the load between the points is not defined. A
+proximal term `ε W (λ - λ₀)` (`W` the diagonal of `K`, `ε = 1e-3`) chooses the share closest to the impulses the rows
+start from (the proximal point method: Rockafellar 1976; the proximal formulations of contact: Alart & Curnier 1991,
+Acary & Brogliato 2008). Repeated at each pass, its bias vanishes. A term towards 0 (the solution of minimum norm) moved
+the load between the points at each substep (30 % of it), and a house of cards fell.
 
 ### Friction
-Solved in `Relax`, along 2 tangents, with Coulomb's law: the tangent impulse stays in a disc of radius `µ * λ_normal`.
-µ is the static friction when the contact point slides slower than 1 cm/s, the dynamic friction otherwise.
+Solved in `Relax`, after the normals, at the friction center of the points of the contact (as Box3D, Jolt, and the
+friction patches of PhysX), not at each point:
+- along both tangents, with their 2x2 mass matrix: the impulse stays in a disk of radius `µ Σ λ_normal`;
+- around the normal (the twist): up to `µ Σ (lever arm × λ_normal)`, the lever arm of a point being its distance to the
+  center. A single point holds no twist.
+
+The center is the average of the points, weighted by their separation (as Box3D: 1 up to the speculative distance, 0 at
+twice). µ is the static friction when the center slides slower than 1 cm/s, the dynamic friction otherwise.
 
 ### Restitution
 Applied once after the substeps, for the contacts hitting faster than 1 m/s. The bounce impulse goes towards the
@@ -143,11 +170,14 @@ The solver is a Gauss-Seidel: each contact uses the velocities left by the previ
 the contacts are colored (Box2D v3, `constraint_graph.c`): each contact takes the first color where both of its dynamic
 bodies are free (the static bodies don't count). The contacts of a color don't share any body, the workers solve them
 at the same time. The contacts without a free color (16 colors) are solved first, on a single goroutine.
+A contact with a static body never takes the color 0 (as Box2D v3): it is solved after the contacts between dynamic
+bodies, the ground has the last word. Solved first, a light body pressed by a heavy one leaves the step moving into
+the ground.
 
 ### Default values
 | Constant | Value |
 |----------|-------|
-| `DefaultContactHertz` | 60 Hz (x2 against static bodies, capped to 1/8 of the substeps rate) |
+| `DefaultContactHertz` | 30 Hz, as Box2D v3.1 (x2 against static bodies, capped to 1/8 of the substeps rate) |
 | `ContactDampingRatio` | 10 |
 | `ContactSpeed` | 3 m/s |
 | `RestitutionThreshold` | 1 m/s |
@@ -158,6 +188,21 @@ at the same time. The contacts without a free color (16 colors) are solved first
 ## Joints
 The joints are solved like the contacts (as in Box2D v3): warm starting, soft constraints in `Push` (60 Hz, damping ratio 2
 by default), rigid constraints in `Relax`. They are solved before the contacts, on a single goroutine.
+
+### Articulations
+The point constraints (the anchors kept together) of the joints linking dynamic bodies are solved together, exactly, by
+tree of joints: `K Δλ = -(ċ + bias)`, `K = J M⁻¹ Jᵀ` the mass matrix of all their anchors, factored from the leaves to the
+root (block `LDLᵀ`, the linear time dynamics of Baraff, "Linear-Time Dynamics using Lagrange Multipliers", SIGGRAPH
+1996). A joint is eliminated after the joints below it: a chain gives no fill, a body with `d` children a clique of `d`
+blocks. The soft spring acts on the whole system, `Δλ = -(K⁻¹ (ċ + bias) + γ λ) / (1 + γ)`.
+Solved one by one, the spring of a joint acts on the mass of its own bodies: a ball 670 times heavier than a link
+stretched each joint by 7 cm (a chain of 20 m by 1.4 m). Solved together, 0.1 mm (`TestHeavyChainDoesNotStretch`).
+- A chain taut between 2 fixed points has a redundant row: the proximal term of the contacts keeps `K` invertible.
+- The joints of a net (a loop between dynamic bodies) are solved one by one, as the other rows of the joints (the axes
+  of the hinges, the limits, the motors, the springs): the tree exact against the joints closing the loops solved alone
+  converges slowly (a net of 60 x 60 opened by 357 mm instead of 320).
+- A link turning by half a radian in a substep (the tip of a whip, 125 rad/s) opens its joint by `r (ω h)² / 2` for a few
+  steps: the constraints are linear in the velocities.
 
 Each joint has a frame on each body. The X axis of the frames is the axis of the hinge, and the twist axis of the ball
 joint (as in PhysX).
@@ -198,9 +243,11 @@ a manifold of 4 points. A body touches the terrain with 8 patches at most (`MaxM
 gets one patch per slope. The patches of the deepest contacts are kept, the others are dropped (like Jolt).
 
 ## Continuous collision
-**Speculative contacts**: the contacts are created up to `SpeculativeDistance` + the relative speed of the bodies * dt
-(the speculative CCD of PhysX, the "Continuous Speculative" mode of Unity): the solver stops the bodies before they
-touch. Their known limits: a contact can be found by a body which will not touch it (a ghost contact), and a body
+**Speculative contacts**: against a static body, the contacts are created up to `SpeculativeDistance` + the relative
+speed of the bodies * dt (the speculative CCD of PhysX, the "Continuous Speculative" mode of Unity): the solver stops the
+bodies before they touch. Between 2 dynamic bodies, only up to `SpeculativeDistance` (as Box2D v3): a fast impact is
+absorbed by the spring of the contact over a few substeps. A rigid stop in one substep throws the light body of a
+sandwich (a heavy body falling on a light one resting on the ground) and turns both bodies. Their known limits: a contact can be found by a body which will not touch it (a ghost contact), and a body
 accelerated by the solver during the step can go further than its margin.
 
 **Time of impact** (as in Box2D v3): after the solver, a body which moved more than half of its smallest extent is moved

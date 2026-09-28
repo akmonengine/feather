@@ -18,10 +18,10 @@ const (
 	// plus the distance the bodies can travel during the step
 	SpeculativeDistance = 4 * LinearSlop
 
-	// DefaultContactHertz is the stiffness of the contacts between dynamic bodies.
-	// Contacts with a static body are twice as stiff.
+	// DefaultContactHertz is the stiffness of the contacts between dynamic bodies, as in Box2D v3.1.
+	// Contacts with a static body are twice as stiff, with half the damping ratio (as Box3D).
 	// Higher values = less overlap under load, lower values = softer contacts
-	DefaultContactHertz = 60.0
+	DefaultContactHertz = 30.0
 
 	// ContactDampingRatio of the contacts: > 1 means no oscillation
 	ContactDampingRatio = 10.0
@@ -45,6 +45,12 @@ const (
 	// turnAnchorsCos: the anchors of a body turn if it turned more than 0.01 rad since the beginning of the step,
 	// cos(0.01 / 2). Under it, the error of a lever arm of 50 cm is 0.5 mm
 	turnAnchorsCos = 0.99998750002604166
+
+	// minFrictionWeight: the weight of a point far from touching in the friction center (Box3D)
+	minFrictionWeight = 1e-10
+
+	// minFrictionDeterminant: under it, the tangents can't turn the bodies apart (no mass): no friction
+	minFrictionDeterminant = 1e-30
 
 	// the contact hertz can't exceed 1/8 of the sub-steps rate, otherwise it becomes unstable
 	hertzPerSubstepRate = 0.125
@@ -126,12 +132,10 @@ type contactPoint struct {
 	coreB              mgl64.Vec3
 	baseSeparation     float64
 	normal             jacobian
-	tangents           [2]jacobian
 	normalImpulse      float64
-	tangentImpulse     [2]float64
 	totalNormalImpulse float64 // the normal impulse of the step: the impulse which stopped the point, for the restitution
 	normalVelocity     float64 // before the solver, for the restitution
-	friction           float64
+	leverArm           float64 // distance to the friction center: the twist friction it can hold
 }
 
 type contactConstraint struct {
@@ -149,6 +153,17 @@ type contactConstraint struct {
 	radiusA float64
 	radiusB float64
 
+	// friction of the contact, at the friction center of its points (as Box3D, Jolt, the friction patch of PhysX): along
+	// both tangents, and the twist around the normal. The centers without the radius turn with the bodies (turnAnchors)
+	friction        float64
+	centerCoreA     mgl64.Vec3
+	centerCoreB     mgl64.Vec3
+	frictionRows    [2]jacobian
+	frictionMass    [3]float64 // the inverse of the 2x2 mass matrix of both tangents: xx, xy, yy
+	frictionImpulse [2]float64
+	twistMass       float64
+	twistImpulse    float64
+
 	// rolling resistance, around both tangents
 	rollingResistance float64
 	rollingMass       [2]float64
@@ -161,9 +176,11 @@ type solver struct {
 	states      []bodyState
 	constraints []contactConstraint
 	joints      []Joint
-	graph       constraintGraph
-	pool        *workerPool
-	jobs        solverJobs
+	// articulations: the trees of joints, solved together
+	articulations articulations
+	graph         constraintGraph
+	pool          *workerPool
+	jobs          solverJobs
 
 	// parameters of the current stage, for the jobs
 	manifolds       []constraint.Manifold
@@ -258,7 +275,7 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	// ========== 2. Contact constraints ==========
 	hertz := math.Min(contactHertz, hertzPerSubstepRate*s.invH)
 	s.contactSpring = newSpring(hertz, ContactDampingRatio, s.h)
-	s.staticSpring = newSpring(2*hertz, ContactDampingRatio, s.h)
+	s.staticSpring = newSpring(2*hertz, 0.5*ContactDampingRatio, s.h)
 
 	s.manifolds = manifolds
 	if cap(s.constraints) < len(manifolds) {
@@ -272,6 +289,7 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	for _, joint := range s.joints {
 		joint.prepare(s)
 	}
+	s.buildArticulations()
 
 	// ========== 4. Graph coloring ==========
 	s.graph.color(s.constraints, len(s.states))
@@ -331,21 +349,67 @@ func (s *solver) prepareConstraint(i int) {
 		cp.coreB = cp.rB.Add(half).Add(c.normal.Mul(radiusB))
 		cp.baseSeparation = point.Separation - cp.coreB.Sub(cp.coreA).Dot(c.normal)
 		cp.normal = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.normal)
-		cp.tangents[0] = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.tangents[0])
-		cp.tangents[1] = makeJacobian(stateA, stateB, cp.rA, cp.rB, c.tangents[1])
 
 		// Warm starting: the impulses of the previous step
 		cp.normalImpulse = point.NormalImpulse
-		cp.tangentImpulse[0] = point.TangentImpulse.Dot(c.tangents[0])
-		cp.tangentImpulse[1] = point.TangentImpulse.Dot(c.tangents[1])
+		cp.normalVelocity = relativeVelocity(stateA, stateB, cp.rA, cp.rB).Dot(c.normal)
+	}
+	c.prepareFriction(stateA, stateB, staticFriction, dynamicFriction)
+}
 
-		relativeVel := relativeVelocity(stateA, stateB, cp.rA, cp.rB)
-		cp.normalVelocity = relativeVel.Dot(c.normal)
-		tangentSpeed := relativeVel.Sub(c.normal.Mul(cp.normalVelocity)).Len()
-		cp.friction = dynamicFriction
-		if tangentSpeed < StaticFrictionSpeed {
-			cp.friction = staticFriction
-		}
+// prepareFriction: the friction center is the average of the points, weighted by their separation as in Box3D (a
+// speculative point far from touching barely counts: 1 up to SpeculativeDistance, 0 at twice). The friction is the
+// static one if the center slides slower than StaticFrictionSpeed
+func (c *contactConstraint) prepareFriction(stateA, stateB *bodyState, staticFriction, dynamicFriction float64) {
+	manifold := c.manifold
+	var centerA, centerB mgl64.Vec3
+	total := 0.0
+	for j := 0; j < c.pointsCount; j++ {
+		cp := &c.points[j]
+		weight := math.Min(math.Max(2-manifold.Points[j].Separation/SpeculativeDistance, minFrictionWeight), 1)
+		centerA = centerA.Add(cp.coreA.Mul(weight))
+		centerB = centerB.Add(cp.coreB.Mul(weight))
+		total += weight
+	}
+	c.centerCoreA, c.centerCoreB = centerA.Mul(1/total), centerB.Mul(1/total)
+	rA, rB := c.frictionArms(c.centerCoreA, c.centerCoreB)
+	for j := 0; j < c.pointsCount; j++ {
+		c.points[j].leverArm = c.points[j].rA.Sub(rA).Len()
+	}
+	c.makeFrictionRows(stateA, stateB, rA, rB)
+
+	c.frictionImpulse = [2]float64{manifold.FrictionImpulse.Dot(c.tangents[0]), manifold.FrictionImpulse.Dot(c.tangents[1])}
+	c.twistImpulse = manifold.TwistImpulse
+	relativeVel := relativeVelocity(stateA, stateB, rA, rB)
+	c.friction = dynamicFriction
+	if relativeVel.Sub(c.normal.Mul(relativeVel.Dot(c.normal))).Len() < StaticFrictionSpeed {
+		c.friction = staticFriction
+	}
+}
+
+// frictionArms: the lever arms of the friction center, from its cores (the radius of the rounded shapes along the normal)
+func (c *contactConstraint) frictionArms(coreA, coreB mgl64.Vec3) (mgl64.Vec3, mgl64.Vec3) {
+	return coreA.Add(c.normal.Mul(c.radiusA)), coreB.Sub(c.normal.Mul(c.radiusB))
+}
+
+// makeFrictionRows: both tangents at the friction center, their 2x2 mass matrix (coupled by the rotation), and the
+// mass of the twist around the normal
+func (c *contactConstraint) makeFrictionRows(stateA, stateB *bodyState, rA, rB mgl64.Vec3) {
+	for k := range c.frictionRows {
+		c.frictionRows[k] = makeJacobian(stateA, stateB, rA, rB, c.tangents[k])
+	}
+	t0, t1 := &c.frictionRows[0], &c.frictionRows[1]
+	linear := stateA.invMass + stateB.invMass
+	kxx := linear + t0.angularA.Dot(t0.impulseA) + t0.angularB.Dot(t0.impulseB)
+	kyy := linear + t1.angularA.Dot(t1.impulseA) + t1.angularB.Dot(t1.impulseB)
+	kxy := t0.angularA.Dot(t1.impulseA) + t0.angularB.Dot(t1.impulseB)
+	c.frictionMass = [3]float64{}
+	if det := kxx*kyy - kxy*kxy; det > minFrictionDeterminant {
+		c.frictionMass = [3]float64{kyy / det, -kxy / det, kxx / det}
+	}
+	c.twistMass = 0
+	if k := c.normal.Dot(stateA.inverseInertia.Mul3x1(c.normal)) + c.normal.Dot(stateB.inverseInertia.Mul3x1(c.normal)); k > 0 {
+		c.twistMass = 1 / k
 	}
 }
 
@@ -447,21 +511,23 @@ func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
 	for j := 0; j < c.pointsCount; j++ {
 		cp := &c.points[j]
 		if turnA {
-			rA := stateA.deltaMatrix.Mul3x1(cp.coreA).Add(c.normal.Mul(c.radiusA))
-			cp.normal.turnA(stateA, rA, c.normal)
-			cp.tangents[0].turnA(stateA, rA, c.tangents[0])
-			cp.tangents[1].turnA(stateA, rA, c.tangents[1])
+			cp.normal.turnA(stateA, stateA.deltaMatrix.Mul3x1(cp.coreA).Add(c.normal.Mul(c.radiusA)), c.normal)
 		}
 		if turnB {
-			rB := stateB.deltaMatrix.Mul3x1(cp.coreB).Sub(c.normal.Mul(c.radiusB))
-			cp.normal.turnB(stateB, rB, c.normal)
-			cp.tangents[0].turnB(stateB, rB, c.tangents[0])
-			cp.tangents[1].turnB(stateB, rB, c.tangents[1])
+			cp.normal.turnB(stateB, stateB.deltaMatrix.Mul3x1(cp.coreB).Sub(c.normal.Mul(c.radiusB)), c.normal)
 		}
 		cp.normal.updateMass(stateA, stateB)
-		cp.tangents[0].updateMass(stateA, stateB)
-		cp.tangents[1].updateMass(stateA, stateB)
 	}
+	// the friction center turns with its bodies
+	coreA, coreB := c.centerCoreA, c.centerCoreB
+	if turnA {
+		coreA = stateA.deltaMatrix.Mul3x1(coreA)
+	}
+	if turnB {
+		coreB = stateB.deltaMatrix.Mul3x1(coreB)
+	}
+	rA, rB := c.frictionArms(coreA, coreB)
+	c.makeFrictionRows(stateA, stateB, rA, rB)
 	if c.rollingResistance > 0 {
 		c.prepareRolling(stateA, stateB)
 	}
@@ -597,24 +663,29 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 		cp := &c.points[j]
 		cp.totalNormalImpulse += cp.normalImpulse
 		cp.normal.apply(stateA, stateB, c.normal, cp.normalImpulse)
-		cp.tangents[0].apply(stateA, stateB, c.tangents[0], cp.tangentImpulse[0])
-		cp.tangents[1].apply(stateA, stateB, c.tangents[1], cp.tangentImpulse[1])
 	}
+	c.frictionRows[0].apply(stateA, stateB, c.tangents[0], c.frictionImpulse[0])
+	c.frictionRows[1].apply(stateA, stateB, c.tangents[1], c.frictionImpulse[1])
+	c.applyTwist(stateA, stateB, c.twistImpulse)
 	if c.rollingResistance > 0 {
 		c.applyRolling(stateA, stateB, c.rollingImpulse)
 	}
 }
 
-// push solves the contacts with their spring, to push the overlap out. No friction here.
+// push solves the contacts with their spring, to push the overlap out. No friction (as Box3D): solved there, before
+// the normals, it pushed the light bodies out from under a heavy one (at 4 substeps, 2 cubes 1 m out from under a slab
+// 400 times heavier)
 func (s *solver) push() {
 	for _, joint := range s.joints {
 		joint.solve(s, true)
 	}
+	s.solveArticulations(true)
 	s.solveConstraints(s.jobs.push)
 }
 
 func (s *solver) pushConstraint(c *contactConstraint) {
-	s.solveNormals(c, s.state(c.indexA), s.state(c.indexB), true)
+	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
+	s.solveNormals(c, stateA, stateB, true)
 }
 
 // relax solves the contacts again as rigid constraints (pushing the overlap out adds energy), then the friction
@@ -622,6 +693,7 @@ func (s *solver) relax() {
 	for _, joint := range s.joints {
 		joint.solve(s, false)
 	}
+	s.solveArticulations(false)
 	s.solveConstraints(s.jobs.relax)
 }
 
@@ -636,21 +708,147 @@ func (s *solver) relaxConstraint(c *contactConstraint) {
 // ========== NORMAL ==========
 // solveNormals: the points of the contact must not overlap. A speculative point (separation > 0) can get closer by its
 // separation during the substep, not further. An overlapping point is pushed out by the spring of the contact (soft,
-// at ContactSpeed at most), or only stopped (rigid)
+// at ContactSpeed at most), or only stopped (rigid).
+// The points of a contact are solved together, exactly (block Gauss-Seidel: the block solver of Box2D v2, for 4 points).
+// Solved one after the other, the first point takes more than its share and turns the body: a box landing flat starts
+// to tip, and the rounding decides which way
 func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, soft bool) {
-	for j := 0; j < c.pointsCount; j++ {
-		cp := &c.points[j]
+	n := c.pointsCount
+	var block normalBlock
+	block.count = n
+	for i := 0; i < n; i++ {
+		cp := &c.points[i]
 		separation := currentSeparation(stateA, stateB, cp, c.normal)
-		row, bias := rigid, 0.0
+		bias, gamma := 0.0, 0.0
 		if separation > 0 {
 			bias = separation * s.invH
 		} else if soft {
-			row = c.spring
-			bias = math.Max(row.biasRate*separation, -ContactSpeed)
+			bias = math.Max(c.spring.biasRate*separation, -ContactSpeed)
+			gamma = c.spring.gamma
 		}
-		velocity := cp.normal.velocity(stateA, stateB, c.normal)
-		cp.addNormalImpulse(stateA, stateB, c.normal, row.impulse(cp.normal.mass, velocity, bias, cp.normalImpulse))
+		for j := 0; j <= i; j++ {
+			k := stateA.invMass + stateB.invMass + cp.normal.angularA.Dot(c.points[j].normal.impulseA) +
+				cp.normal.angularB.Dot(c.points[j].normal.impulseB)
+			block.matrix[i][j], block.matrix[j][i] = k, k
+		}
+		// the softness of the row: the fixed point of its own impulse is v + b + γ K_ii λ = 0
+		block.softness[i] = gamma * block.matrix[i][i]
+		block.previous[i] = cp.normalImpulse
+		block.offset[i] = cp.normal.velocity(stateA, stateB, c.normal) + bias
 	}
+	impulses := block.solve()
+	for i := 0; i < n; i++ {
+		cp := &c.points[i]
+		cp.addNormalImpulse(stateA, stateB, c.normal, impulses[i]-cp.normalImpulse)
+	}
+}
+
+// normalBlock: the normal rows of a contact. Their accumulated impulses λ are the solution of the linear
+// complementarity problem w = A λ + r, λ ≥ 0, w ≥ 0, λ w = 0, with A = K + D:
+//   - K the mass matrix of the rows (the relative velocity of the point i given by a unit impulse at the point j)
+//   - D the softness of the rows
+//   - r = v + b - K λ₀, from the velocities v and the biases b with the impulses λ₀ of the rows
+type normalBlock struct {
+	count    int
+	matrix   [constraint.MaxContactPoints][constraint.MaxContactPoints]float64
+	softness [constraint.MaxContactPoints]float64
+	previous [constraint.MaxContactPoints]float64
+	offset   [constraint.MaxContactPoints]float64
+}
+
+const (
+	// blockRegularization: 4 rigid points on a face give 3 independent rows only (a translation, 2 rotations): K is
+	// singular, the share of the load between the points is not defined. A proximal term ε W (λ - λ₀) chooses the share
+	// closest to the impulses the rows start from (the proximal point method: Rockafellar 1976; the proximal
+	// formulations of contact of Alart & Curnier 1991, Acary & Brogliato 2008). Repeated at each pass, its bias
+	// vanishes. ε = 1e-3 keeps A well conditioned (~1000, the bound of the block solver of Box2D v2)
+	blockRegularization = 1e-3
+
+	// blockTolerance: an impulse (N·s) or a relative velocity (m/s) within the rounding of 0 is 0
+	blockTolerance = 1e-12
+)
+
+// solve the problem by enumerating the sets of active points, all of them first (Murty's total enumeration, as the
+// block solver of Box2D v2). A is positive definite: the solution is unique, the first set found is the only one
+func (b *normalBlock) solve() [constraint.MaxContactPoints]float64 {
+	n := b.count
+	var a [constraint.MaxContactPoints][constraint.MaxContactPoints]float64
+	var r [constraint.MaxContactPoints]float64
+	for i := 0; i < n; i++ {
+		r[i] = b.offset[i]
+		for j := 0; j < n; j++ {
+			a[i][j] = b.matrix[i][j]
+			r[i] -= b.matrix[i][j] * b.previous[j]
+		}
+		// the proximal term, towards the impulses λ₀ the rows start from
+		a[i][i] += b.softness[i] + blockRegularization*b.matrix[i][i]
+		r[i] -= blockRegularization * b.matrix[i][i] * b.previous[i]
+	}
+
+	for set := (1 << n) - 1; set > 0; set-- {
+		if lambda, ok := solveActive(&a, &r, n, set); ok {
+			return lambda
+		}
+	}
+	// no point pushes
+	return [constraint.MaxContactPoints]float64{}
+}
+
+// solveActive solves the rows of the set (a bit per point) with the others at 0, and checks the solution: the active
+// impulses push, the inactive points don't get closer
+func solveActive(a *[constraint.MaxContactPoints][constraint.MaxContactPoints]float64, r *[constraint.MaxContactPoints]float64, n, set int) ([constraint.MaxContactPoints]float64, bool) {
+	var index [constraint.MaxContactPoints]int
+	m := 0
+	for i := 0; i < n; i++ {
+		if set&(1<<i) != 0 {
+			index[m] = i
+			m++
+		}
+	}
+	// Gaussian elimination of the active rows (A is positive definite: no pivoting)
+	var sub [constraint.MaxContactPoints][constraint.MaxContactPoints + 1]float64
+	for i := 0; i < m; i++ {
+		for j := 0; j < m; j++ {
+			sub[i][j] = a[index[i]][index[j]]
+		}
+		sub[i][m] = -r[index[i]]
+	}
+	for col := 0; col < m; col++ {
+		if sub[col][col] <= 0 {
+			return [constraint.MaxContactPoints]float64{}, false
+		}
+		for row := col + 1; row < m; row++ {
+			f := sub[row][col] / sub[col][col]
+			for k := col; k <= m; k++ {
+				sub[row][k] -= f * sub[col][k]
+			}
+		}
+	}
+	var lambda [constraint.MaxContactPoints]float64
+	for i := m - 1; i >= 0; i-- {
+		sum := sub[i][m]
+		for j := i + 1; j < m; j++ {
+			sum -= sub[i][j] * lambda[index[j]]
+		}
+		value := sum / sub[i][i]
+		if value < -blockTolerance {
+			return lambda, false
+		}
+		lambda[index[i]] = math.Max(value, 0)
+	}
+	for i := 0; i < n; i++ {
+		if set&(1<<i) != 0 {
+			continue
+		}
+		w := r[i]
+		for j := 0; j < n; j++ {
+			w += a[i][j] * lambda[j]
+		}
+		if w < -blockTolerance {
+			return lambda, false
+		}
+	}
+	return lambda, true
 }
 
 // addNormalImpulse: the accumulated impulse of a contact stays positive (it pushes, never pulls).
@@ -686,19 +884,40 @@ func (c *contactConstraint) solveRolling(stateA, stateB *bodyState) {
 }
 
 // ========== FRICTION ==========
-// solveFriction: Coulomb's law, the friction impulse is at most µ * the normal impulse (a disk in the tangent plane)
+// solveFriction: Coulomb's law at the friction center (as Box3D & Jolt). The twist around the normal is held up to
+// µ Σ (lever arm × normal impulse) of the points, then the tangent impulse stays in a disk of radius µ Σ normal impulse
 func (c *contactConstraint) solveFriction(stateA, stateB *bodyState) {
+	normalImpulse, twistLimit := 0.0, 0.0
 	for j := 0; j < c.pointsCount; j++ {
-		cp := &c.points[j]
-		previous := cp.tangentImpulse
-		impulse := [2]float64{
-			previous[0] - cp.tangents[0].mass*cp.tangents[0].velocity(stateA, stateB, c.tangents[0]),
-			previous[1] - cp.tangents[1].mass*cp.tangents[1].velocity(stateA, stateB, c.tangents[1]),
-		}
-		clampDisk(&impulse, cp.friction*cp.normalImpulse)
-		cp.tangentImpulse = impulse
-		cp.tangents[0].apply(stateA, stateB, c.tangents[0], impulse[0]-previous[0])
-		cp.tangents[1].apply(stateA, stateB, c.tangents[1], impulse[1]-previous[1])
+		normalImpulse += c.points[j].normalImpulse
+		twistLimit += c.points[j].leverArm * c.points[j].normalImpulse
+	}
+
+	// twist
+	twistSpeed := c.normal.Dot(stateB.angularVelocity.Sub(stateA.angularVelocity))
+	previousTwist := c.twistImpulse
+	c.twistImpulse = math.Max(-c.friction*twistLimit, math.Min(c.friction*twistLimit, previousTwist-c.twistMass*twistSpeed))
+	c.applyTwist(stateA, stateB, c.twistImpulse-previousTwist)
+
+	// both tangents, together
+	v0 := c.frictionRows[0].velocity(stateA, stateB, c.tangents[0])
+	v1 := c.frictionRows[1].velocity(stateA, stateB, c.tangents[1])
+	m := c.frictionMass
+	previous := c.frictionImpulse
+	impulse := [2]float64{previous[0] - (m[0]*v0 + m[1]*v1), previous[1] - (m[1]*v0 + m[2]*v1)}
+	clampDisk(&impulse, c.friction*normalImpulse)
+	c.frictionImpulse = impulse
+	c.frictionRows[0].apply(stateA, stateB, c.tangents[0], impulse[0]-previous[0])
+	c.frictionRows[1].apply(stateA, stateB, c.tangents[1], impulse[1]-previous[1])
+}
+
+// applyTwist: the angular impulse around the normal, -λ on A, +λ on B
+func (c *contactConstraint) applyTwist(stateA, stateB *bodyState, lambda float64) {
+	if stateA.body != nil {
+		stateA.angularVelocity = stateA.angularVelocity.Sub(stateA.inverseInertia.Mul3x1(c.normal.Mul(lambda)))
+	}
+	if stateB.body != nil {
+		stateB.angularVelocity = stateB.angularVelocity.Add(stateB.inverseInertia.Mul3x1(c.normal.Mul(lambda)))
 	}
 }
 
@@ -756,8 +975,9 @@ func (s *solver) storeImpulsesConstraint(i int) {
 		point := &c.manifold.Points[j]
 		cp := &c.points[j]
 		point.NormalImpulse = cp.normalImpulse
-		point.TangentImpulse = c.tangents[0].Mul(cp.tangentImpulse[0]).Add(c.tangents[1].Mul(cp.tangentImpulse[1]))
 	}
+	c.manifold.FrictionImpulse = c.tangents[0].Mul(c.frictionImpulse[0]).Add(c.tangents[1].Mul(c.frictionImpulse[1]))
+	c.manifold.TwistImpulse = c.twistImpulse
 }
 
 // finalize writes the new transform and velocities into the bodies

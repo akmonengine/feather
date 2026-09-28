@@ -25,7 +25,8 @@ The mass and inertia come from the density and the volume of the shape.
 | Lead | 11340 |
 
 ### Friction
-`StaticFriction` is used while the contact sticks, `DynamicFriction` while it slides (above 1 cm/s).
+`StaticFriction` is used while the contact sticks, `DynamicFriction` while it slides (above 1 cm/s). The friction of
+a contact acts at the center of its points, along the surface and around the normal (a box turning on the ground).
 The friction of a contact is the geometric mean of both bodies: `sqrt(µA * µB)`.
 Note: a body with a friction of 0 removes the friction of all its contacts, including with the ground.
 
@@ -122,14 +123,19 @@ world.Step(1.0 / 60.0) // fixed timestep
 - Usually 4 substeps for simple scenes, 8 to 12 for stacks and heavy bodies.
 
 ### Contact stiffness
-`World.ContactHertz` (60 Hz by default) is the stiffness of the contacts. The contacts with a static body are twice as stiff.
+`World.ContactHertz` (30 Hz by default, as Box2D v3.1) is the stiffness of the contacts. The contacts with a static body
+are twice as stiff.
 - Higher values = less overlap under load (stacks), but it is capped at 1/8 of the substeps rate: `substeps / dt / 8`.
 - Lower values = softer contacts.
 
-With 12 substeps at 50 Hz, a stack of 10 boxes of 50 cm sinks by ~5 mm.
+With 12 substeps at 50 Hz, a stack of 10 boxes of 50 cm sinks by ~23 mm (Box2D v3.1: 30 mm): a contact sinks by
+(load / mass) g / (2π hertz)² under its load. A stiffer world sinks less, but a heavy body landing on a light one bounces
+more.
 
 ### Fast bodies
-The contacts are created before the bodies touch (speculative contacts), from the distance the bodies can travel during the step.
+The contacts with a static body are created before the body touches it (speculative contacts), from the distance it can
+travel during the step. Between 2 dynamic bodies, from 2 cm only: a fast body can enter another one during a step, the
+spring of the contact pushes it out.
 A fast body is also moved back to its first impact with a static body (continuous collision). Set `IsBullet` on a small
 fast body (a projectile) to stop it on the dynamic bodies too.
 A ball at 40 m/s does not go through a 4 cm wall at 50 Hz.

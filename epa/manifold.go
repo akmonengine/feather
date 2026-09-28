@@ -26,6 +26,13 @@ const (
 	// faceTieTolerance: if both faces are aligned, the face of A is the reference (the choice must not change between 2 steps)
 	faceTieTolerance = 1e-3
 
+	// reduceDepthTolerance (m): the deepest point of a contact changes only for a point deeper by this. The points of a
+	// flat contact are as deep, to the rounding (as EPATieTolerance)
+	reduceDepthTolerance = EPATieTolerance
+
+	// reduceBias: a point replaces the best one only if its score is higher by 1/reduceBias (Box3D)
+	reduceBias = 0.95
+
 	// epsilonDistance of the Sutherland-Hodgman clipping
 	epsilonDistance = 1e-9
 
@@ -272,7 +279,10 @@ func clipAgainstPlane(in *polygon, point, normal mgl64.Vec3, out *polygon) {
 	}
 }
 
-// Reduce adds 4 points to m: the deepest, the furthest from it, then the points adding the most area to the contact polygon
+// Reduce adds 4 points to m: the deepest, the furthest from it, then the points adding the most area to the contact polygon.
+// A candidate replaces the best one only if it is clearly better: deeper by reduceDepthTolerance, or a score higher by
+// 1/reduceBias (the pecking order of Box3D, b3ReduceManifoldPoints). Candidates as good keep their order: the choice
+// doesn't flicker from a step to the next, nor depends on the rounding
 func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.Manifold) {
 	if len(points) <= constraint.MaxContactPoints {
 		for _, p := range points {
@@ -284,7 +294,7 @@ func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 	chosen := [constraint.MaxContactPoints]int{}
 	deepest := 0
 	for i, p := range points {
-		if p.Separation < points[deepest].Separation {
+		if p.Separation < points[deepest].Separation-reduceDepthTolerance {
 			deepest = i
 		}
 	}
@@ -293,7 +303,7 @@ func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 	farthest, best := -1, -1.0
 	for i, p := range points {
 		d := planar(p.Position.Sub(points[deepest].Position), normal).LenSqr()
-		if d > best {
+		if reduceBias*d > best {
 			farthest, best = i, d
 		}
 	}
@@ -302,7 +312,7 @@ func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 	third, best := -1, -1.0
 	for i, p := range points {
 		area := math.Abs(signedArea(points[deepest].Position, points[farthest].Position, p.Position, normal))
-		if area > best {
+		if reduceBias*area > best {
 			third, best = i, area
 		}
 	}
@@ -315,7 +325,7 @@ func Reduce(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.M
 		for e := 0; e < 3; e++ {
 			// area added outside the edge e
 			added := -orientation * signedArea(points[triangle[e]].Position, points[triangle[(e+1)%3]].Position, p.Position, normal)
-			if added > best {
+			if reduceBias*added > best {
 				fourth, best = i, added
 			}
 		}

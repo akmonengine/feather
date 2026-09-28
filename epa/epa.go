@@ -30,7 +30,18 @@ const (
 	// EPAConvergenceTolerance (m): EPA stops when the new support point improves the distance by less than this value.
 	// It is the error on the penetration depth
 	EPAConvergenceTolerance = 1e-7
+
+	// EPATieTolerance (m): the faces of the Minkowski difference less deep than the closest one by less than this are
+	// as deep. EPA takes the first of them in a fixed order in the local space of A, not the one the rounding found
+	// first: moved by 1 µm, a scene keeps the same normals (Box3D keeps its choices with a pecking order, the bias of
+	// 0.95 of its manifolds, and a cache of the features). The rounding is ~1e-11 m far from the origin: 1 µm keeps
+	// the depth exact to 1 µm
+	EPATieTolerance = 1e-6
 )
+
+// tieOrder: the direction, in the local space of A, which orders the normals as deep. Its components are different and
+// not zero, so that no 2 axes of a box (nor their opposites) have the same rank
+var tieOrder = mgl64.Vec3{1, math.Sqrt2, math.Sqrt(3)}.Normalize()
 
 var ErrNoConvergence = errors.New("epa: no convergence")
 
@@ -49,6 +60,8 @@ type face struct {
 	v        [3]int // counter-clockwise, seen from outside
 	normal   mgl64.Vec3
 	distance float64
+	// converged: the face is on the surface of the Minkowski difference
+	converged bool
 }
 
 type edge struct{ a, b int }
@@ -96,21 +109,89 @@ func EPAProxies(a, b *gjk.Proxy, simplex *gjk.Simplex, margin float64) (Result, 
 		}
 	}
 
+	// the closest face converges, then the faces as deep as it (EPATieTolerance): the deepest normals are all known
 	for iteration := 0; iteration < EPAMaxIterations; iteration++ {
-		closest := p.closestFace()
-		f := p.faces[closest]
+		closest := p.faces[p.closestFace()]
+		target := p.unconvergedTie(closest.distance)
+		if target < 0 {
+			return p.result(p.faces[p.firstTie(closest.distance, a)]), nil
+		}
 
+		f := p.faces[target]
 		v := gjk.SupportProxies(a, b, f.normal, margin)
 		if v.W.Dot(f.normal)-f.distance < EPAConvergenceTolerance {
-			return p.result(f), nil
+			p.faces[target].converged = true
+			continue
 		}
 
 		if !p.expand(v) {
-			return p.result(f), nil
+			return p.result(closest), nil
 		}
 	}
 
 	return p.result(p.faces[p.closestFace()]), nil
+}
+
+// unconvergedTie: a face as deep as the closest one (EPATieTolerance) not on the surface yet, the closest first; -1 if
+// all are on the surface
+func (p *polytope) unconvergedTie(closest float64) int {
+	best := -1
+	for i := range p.faces {
+		f := &p.faces[i]
+		if f.converged || f.distance > closest+EPATieTolerance {
+			continue
+		}
+		if best < 0 || f.distance < p.faces[best].distance {
+			best = i
+		}
+	}
+	return best
+}
+
+// firstTie: among the faces as deep as the closest one, the first feature in the order of tieOrder (local space of A).
+// The triangles of a same feature (normals within sameFeatureCos: a face of a box, or a rounded surface) are not tied:
+// the closest one is kept, and among the triangles of a flat face, the one containing the projection of the origin
+func (p *polytope) firstTie(closest float64, a *gjk.Proxy) int {
+	best := -1
+	for i := range p.faces {
+		f := &p.faces[i]
+		if f.distance > closest+EPATieTolerance {
+			continue
+		}
+		if best < 0 {
+			best = i
+			continue
+		}
+		b := &p.faces[best]
+		if f.normal.Dot(b.normal) > sameFeatureCos {
+			if f.distance < b.distance-sameDistance ||
+				(math.Abs(f.distance-b.distance) <= sameDistance && p.containsProjection(f) && !p.containsProjection(b)) {
+				best = i
+			}
+			continue
+		}
+		if a.Inverse.Mul3x1(f.normal).Dot(tieOrder) > a.Inverse.Mul3x1(b.normal).Dot(tieOrder) {
+			best = i
+		}
+	}
+	return best
+}
+
+const (
+	// sameFeatureCos: 2 triangles of the polytope with normals closer than 1° belong to the same feature. On a rounded
+	// shape of 10 cm, the triangles within EPATieTolerance of the closest one are within 0.3° of it
+	sameFeatureCos = 0.99984769515639123916
+	// sameDistance (m): 2 triangles of a flat face are at the same distance, to the rounding
+	sameDistance = 1e-12
+)
+
+// containsProjection: the projection of the origin on the face is inside its triangle
+func (p *polytope) containsProjection(f *face) bool {
+	a, b, c := p.vertices[f.v[0]].W, p.vertices[f.v[1]].W, p.vertices[f.v[2]].W
+	point := f.normal.Mul(f.distance)
+	n := b.Sub(a).Cross(c.Sub(a))
+	return b.Sub(a).Cross(point.Sub(a)).Dot(n) >= 0 && c.Sub(b).Cross(point.Sub(b)).Dot(n) >= 0 &&
+		a.Sub(c).Cross(point.Sub(c)).Dot(n) >= 0
 }
 
 // addFace returns false if the triangle is degenerate

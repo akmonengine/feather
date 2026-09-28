@@ -14,8 +14,10 @@ import (
 // Random scenes, each from a fixed seed, checked at every step against the laws every step must keep:
 //   - finite positions, velocities & rotations, unit quaternions
 //   - 1 and 8 workers give the same bits
-//   - no body deeper than LinearSlop in a plane. In a terrain, the depth is only logged: the face contact of a triangle
-//     comes from the corners above it, a corner just beside it can stay a few mm deep (#819, see ARCHITECTURE.md)
+//   - no body stays deeper than LinearSlop in a plane: a hit can push it deeper (the contacts are springs, as in Box2D
+//     & Box3D: ~3 % of the random piles), then it gets out, less deep at each step. In a terrain, the depth is only
+//     logged: the face contact of a triangle comes from the corners above it, a corner just beside it can stay a few
+//     mm deep (#819, see ARCHITECTURE.md)
 //   - a closed system never gains energy, with a restitution up to 0.5 (over it, a body spinning fast can bounce
 //     higher than it fell, see ARCHITECTURE.md)
 //   - in free flight, the momentum & the angular momentum are kept (the angular momentum during the steps without
@@ -147,6 +149,11 @@ type mechanics struct {
 	// It is a first order method (Catto, GDC 2015): each sub-step changes the angular momentum I ω of a body by
 	// less than |I ω| (|ω| h)²
 	gyroscopicError float64
+	// jointCouple: the change of the angular momentum allowed by the joints during a step. A soft joint pulls its 2
+	// anchors, apart by its gap, with opposite impulses: a couple of gap × impulse at each sub-step
+	jointCouple float64
+	// depths of the bodies in the planes
+	depths []float64
 }
 
 func measure(w *World) mechanics {
@@ -169,7 +176,32 @@ func measure(w *World) mechanics {
 		turn := body.AngularVelocity.Len() * h
 		m.gyroscopicError += spin.Len() * float64(w.Substeps) * turn * turn
 	}
+	m.depths = planeDepths(w)
+	for _, joint := range w.Joints {
+		j := joint.base()
+		gap := j.BodyA.Transform.ToWorld(j.LocalFrameA.Position).Sub(j.BodyB.Transform.ToWorld(j.LocalFrameB.Position)).Len()
+		m.jointCouple += float64(w.Substeps) * gap * j.linearImpulse.Len()
+	}
 	return m
+}
+
+// planeDepths: the depth of each dynamic body in the static bodies which are not terrains (0 for the others)
+func planeDepths(w *World) []float64 {
+	depths := make([]float64, len(w.Bodies))
+	for _, surface := range w.Bodies {
+		if surface.BodyType != actor.BodyTypeStatic {
+			continue
+		}
+		if _, terrain := surface.Shape.(*actor.Heightfield); terrain {
+			continue
+		}
+		for i, body := range w.Bodies {
+			if body.BodyType == actor.BodyTypeDynamic {
+				depths[i] = math.Max(depths[i], surfaceDepth(surface, body))
+			}
+		}
+	}
+	return depths
 }
 
 // checkInvariants of the world after a step, against its state at the start of the scene (start) and of the step
@@ -189,19 +221,10 @@ func checkInvariants(w, twin *World, kind sceneKind, start, before mechanics) er
 		}
 	}
 
-	for _, surface := range w.Bodies {
-		if surface.BodyType != actor.BodyTypeStatic {
-			continue
-		}
-		if _, terrain := surface.Shape.(*actor.Heightfield); terrain {
-			continue
-		}
-		for i, body := range w.Bodies {
-			if body.BodyType == actor.BodyTypeDynamic {
-				if depth := surfaceDepth(surface, body); depth > LinearSlop {
-					return fmt.Errorf("body %d (%T) is %.2f mm in the ground", i, body.Shape, depth*1000)
-				}
-			}
+	for i, depth := range planeDepths(w) {
+		if depth > LinearSlop && before.depths[i] > LinearSlop && depth >= before.depths[i] {
+			return fmt.Errorf("body %d (%T) stays %.2f mm in the ground (%.2f mm the step before)", i, w.Bodies[i].Shape,
+				depth*1000, before.depths[i]*1000)
 		}
 	}
 
@@ -215,8 +238,8 @@ func checkInvariants(w, twin *World, kind sceneKind, start, before mechanics) er
 		if drift := now.momentum.Sub(start.momentum).Len(); drift > momentumTolerance*start.momentumScale {
 			return fmt.Errorf("the momentum changed by %.3g kg·m/s (of %.3f)", drift, start.momentumScale)
 		}
-		// the gyroscopic error before or after the step, whichever is larger
-		allowed := math.Max(before.gyroscopicError, now.gyroscopicError)
+		// the gyroscopic error and the couple of the joints, before or after the step, whichever is larger
+		allowed := math.Max(before.gyroscopicError, now.gyroscopicError) + math.Max(before.jointCouple, now.jointCouple)
 		if drift := now.angularMomentum.Sub(before.angularMomentum).Len(); len(w.Contacts()) == 0 && drift > allowed {
 			return fmt.Errorf("the angular momentum changed by %.4f kg·m²/s during the step (%.4f allowed)", drift, allowed)
 		}

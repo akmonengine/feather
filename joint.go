@@ -54,6 +54,8 @@ type JointBase struct {
 	spring         spring
 
 	linearImpulse mgl64.Vec3
+	// inArticulation: the point constraint is solved with the other joints of its tree (articulation.go)
+	inArticulation bool
 }
 
 func (j *JointBase) base() *JointBase { return j }
@@ -89,6 +91,9 @@ func (j *JointBase) currentFrames(stateA, stateB *bodyState) (mgl64.Quat, mgl64.
 // The anchors of both bodies stay at the same place (3 rows)
 
 func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias bool) {
+	if j.inArticulation {
+		return
+	}
 	rA, rB := j.currentAnchors(stateA, stateB)
 	cdot := stateB.velocity.Add(stateB.angularVelocity.Cross(rB)).Sub(stateA.velocity.Add(stateA.angularVelocity.Cross(rA)))
 

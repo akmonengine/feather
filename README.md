@@ -51,7 +51,7 @@ while simulating do
             ω ← ω + h*I⁻¹(τ_ext - ω × Iω);
         end
         WarmStart(contacts);        // apply the impulses of the previous substep
-        Push(contacts);             // soft constraint: remove the overlap
+        Push(contacts);             // friction, then soft constraint: remove the overlap
         for n bodies do
             x ← x + h*v;
             q ← q + h/2 * ω*q;
@@ -65,7 +65,7 @@ end
 ````
 
 - The contacts are computed only once per step: during the substeps, the separation of each contact point is updated from the motion of both bodies.
-- The soft constraint is a spring + damper, set with a frequency (`World.ContactHertz`, 60 Hz by default) and a damping ratio.
+- The soft constraint is a spring + damper, set with a frequency (`World.ContactHertz`, 30 Hz by default, as Box2D v3.1) and a damping ratio.
 - Contacts exist before the bodies touch (speculative contacts), so fast bodies don't go through thin walls.
 - Friction follows Coulomb's law: static friction when the contact sticks, dynamic friction when it slides.
 - The simulation is deterministic: same result bit for bit, whatever the number of `Workers`.
@@ -129,12 +129,16 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
 - **Invariants** (`invariants_test.go`): 60 random scenes checked at every step: finite values, unit quaternions,
   1 and 8 workers giving the same bits, no body in a plane, no energy gained, momentum & angular momentum kept in
   free flight.
-- **Regressions** (`bench/`): 6 scenes (piles, pyramid, joint chain, rain on a terrain) against a committed reference:
+- **Scenes of Solver2D** (`bench/scenes`): the samples of Erin Catto's Solver2D in 3D, each checked, and compared to
+  Box2D v3.1 on the same scenes (the reference: Feather must do at least as well; the known gaps are followed by #821).
+- **Regressions** (`bench/`): 6 scenes (piles, pyramid, joint chain, rain on a terrain) and the scenes of Solver2D against a committed reference:
   fingerprint, quality and speed per phase (`World.Profile`).
 ````
 go test ./...
 cd bench && go run . -check     # exit 1 on a regression
 cd bench && go run . -update    # after a wanted change
+cd bench && go test ./...       # the scenes of Solver2D
+cd bench && go run . -scenes    # the scenes at full size (-compare: with v0.2.0)
 ````
 
 ## Sources
@@ -149,6 +153,7 @@ cd bench && go run . -update    # after a wanted change
 - https://github.com/jrouwe/JoltPhysics (active edges, contact patches, body pair cache)
 - W. J. Stronge, Impact Mechanics (2000): Poisson's hypothesis for the restitution
 - Brian Mirtich, Impulse-based Dynamic Simulation of Rigid Body Systems (1996): conservative advancement
+- Solver2D, the samples of the reference scenes: https://github.com/erincatto/solver2d (MIT)
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
