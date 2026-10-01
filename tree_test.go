@@ -171,6 +171,36 @@ func TestTreePairsAsBruteForce(t *testing.T) {
 	}
 }
 
+// A body removed right after a step it left its enlarged AABB in (the tree keeps it to find its pairs at the next step)
+// is forgotten: the next step finds the pairs of the bodies left, the removed body being the last one of the World or
+// one in the middle
+func TestTreeForgetsARemovedBodyWhichMoved(t *testing.T) {
+	for _, last := range []bool{true, false} {
+		w := newScene(1)
+		addGround(w, 0.6)
+		addBody(w, mgl64.Vec3{0, cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+		fast := addBody(w, mgl64.Vec3{3, 5, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+		fast.Velocity = mgl64.Vec3{30, 0, 0}
+		if !last {
+			addBody(w, mgl64.Vec3{-3, cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+		}
+		w.Step(sceneDt)
+		if !slices.Contains(w.tree.moved, 2) {
+			t.Fatalf("last %v: the fast body didn't leave its enlarged AABB (moved: %v): the scene tests nothing", last, w.tree.moved)
+		}
+		w.RemoveBody(fast)
+		if slices.Contains(w.tree.moved, 2) {
+			t.Errorf("last %v: the tree still has to find the pairs of the removed body (moved: %v)", last, w.tree.moved)
+		}
+		w.Step(sceneDt)
+		pool := w.workerPool()
+		pool.begin(1)
+		got := w.tree.findPairs(w.Bodies, w.aabbs, pool)
+		pool.end()
+		samePairs(t, got, bruteForcePairs(w.Bodies, w.aabbs), "after the removal")
+	}
+}
+
 // A body which changes of type (static to dynamic) moves between the trees
 func TestTreeBodyChangesType(t *testing.T) {
 	w := newScene(1)
