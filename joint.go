@@ -107,15 +107,14 @@ func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias boo
 	}
 
 	// K = (mA + mB) I - [rA]x IA [rA]x - [rB]x IB [rB]x
-	m := stateA.invMass + stateB.invMass
-	identity := mgl64.Mat3{1 * m, 0 * m, 0 * m, 0 * m, 1 * m, 0 * m, 0 * m, 0 * m, 1 * m}
+	linear := linearMassMatrix(stateA, stateB)
 	termA, termB := skewTerm(&stateA.inverseInertia, rA, rA), skewTerm(&stateB.inverseInertia, rB, rB)
-	k := actor.Sub3(&identity, &termA)
+	k := actor.Sub3(&linear, &termA)
 	k = actor.Sub3(&k, &termB)
-	if math.Abs(actor.Det3(&k)) < 1e-30 {
+	inverse, ok := massInverse(stateA, stateB, &k)
+	if !ok {
 		return
 	}
-	inverse := actor.Inv3(&k)
 	impulse := row.impulse3(&inverse, cdot, bias, j.linearImpulse)
 	j.linearImpulse = j.linearImpulse.Add(impulse)
 	applyLinear(stateA, stateB, rA, rB, impulse)
@@ -124,14 +123,14 @@ func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias boo
 // applyLinear: -impulse at rA on A, +impulse at rB on B
 func applyLinear(stateA, stateB *bodyState, rA, rB, impulse mgl64.Vec3) {
 	if stateA.body != nil {
-		v, w, m := &stateA.velocity, &stateA.angularVelocity, stateA.invMass
-		v[0], v[1], v[2] = v[0]-impulse[0]*m, v[1]-impulse[1]*m, v[2]-impulse[2]*m
+		v, w, m := &stateA.velocity, &stateA.angularVelocity, &stateA.invMassAxes
+		v[0], v[1], v[2] = v[0]-impulse[0]*m[0], v[1]-impulse[1]*m[1], v[2]-impulse[2]*m[2]
 		torque := actor.MulMat3(&stateA.inverseInertia, rA.Cross(impulse))
 		w[0], w[1], w[2] = w[0]-torque[0], w[1]-torque[1], w[2]-torque[2]
 	}
 	if stateB.body != nil {
-		v, w, m := &stateB.velocity, &stateB.angularVelocity, stateB.invMass
-		v[0], v[1], v[2] = v[0]+impulse[0]*m, v[1]+impulse[1]*m, v[2]+impulse[2]*m
+		v, w, m := &stateB.velocity, &stateB.angularVelocity, &stateB.invMassAxes
+		v[0], v[1], v[2] = v[0]+impulse[0]*m[0], v[1]+impulse[1]*m[1], v[2]+impulse[2]*m[2]
 		torque := actor.MulMat3(&stateB.inverseInertia, rB.Cross(impulse))
 		w[0], w[1], w[2] = w[0]+torque[0], w[1]+torque[1], w[2]+torque[2]
 	}
@@ -339,7 +338,7 @@ func (j *DistanceJoint) warmStart(s *solver) {
 func solveLinearAxis(stateA, stateB *bodyState, rA, rB, axis mgl64.Vec3, bias float64, row spring, accumulated, low, high float64) float64 {
 	cdot := axis.Dot(relativeVelocity(stateA, stateB, rA, rB))
 	rnA, rnB := rA.Cross(axis), rB.Cross(axis)
-	k := stateA.invMass + stateB.invMass + rnA.Dot(actor.MulMat3(&stateA.inverseInertia, rnA)) + rnB.Dot(actor.MulMat3(&stateB.inverseInertia, rnB))
+	k := linearMass(stateA, stateB, axis) + rnA.Dot(actor.MulMat3(&stateA.inverseInertia, rnA)) + rnB.Dot(actor.MulMat3(&stateB.inverseInertia, rnB))
 	if k <= 0 {
 		return accumulated
 	}
@@ -442,8 +441,7 @@ func (j *BallJoint) solve(s *solver, useBias bool) {
 		c := rotationError(frameB, actor.MulQuat(&frameA, &j.DriveTarget))
 		cdot := stateB.angularVelocity.Sub(stateA.angularVelocity)
 		k := actor.Add3(&stateA.inverseInertia, &stateB.inverseInertia)
-		if math.Abs(actor.Det3(&k)) > 1e-30 {
-			inverse := actor.Inv3(&k)
+		if inverse, ok := massInverse(stateA, stateB, &k); ok {
 			impulse := j.driveRow.impulse3(&inverse, cdot, c.Mul(j.driveRow.biasRate), j.driveImpulse)
 			j.driveImpulse = j.driveImpulse.Add(impulse)
 			applyAngular(stateA, stateB, impulse)
@@ -572,17 +570,21 @@ func (j *HingeJoint) solve(s *solver, useBias bool) {
 		relative := stateB.angularVelocity.Sub(stateA.angularVelocity)
 		k := actor.Add3(&stateA.inverseInertia, &stateB.inverseInertia)
 		k11, k12, k22 := u1.Dot(actor.MulMat3(&k, u1)), u1.Dot(actor.MulMat3(&k, u2)), u2.Dot(actor.MulMat3(&k, u2))
+		bias1, bias2, row := 0.0, 0.0, rigid
+		if useBias {
+			row = j.spring
+			bias1, bias2 = row.biasRate*u1.Dot(axisError), row.biasRate*u2.Dot(axisError)
+		}
+		b1, b2 := u1.Dot(relative)+bias1, u2.Dot(relative)+bias2
+		// solve the 2x2 system
 		det := k11*k22 - k12*k12
-		if det > 1e-30 {
-			bias1, bias2, row := 0.0, 0.0, rigid
-			if useBias {
-				row = j.spring
-				bias1, bias2 = row.biasRate*u1.Dot(axisError), row.biasRate*u2.Dot(axisError)
-			}
-			b1, b2 := u1.Dot(relative)+bias1, u2.Dot(relative)+bias2
-			// solve the 2x2 system
-			l1 := (k22*b1 - k12*b2) / det
-			l2 := (k11*b2 - k12*b1) / det
+		l1, l2, ok := (k22*b1-k12*b2)/det, (k11*b2-k12*b1)/det, det > 1e-30
+		if stateA.isLocked() || stateB.isLocked() {
+			var inverse [3]float64
+			inverse, ok = lockedInverse2(k11, k12, k22)
+			l1, l2 = inverse[0]*b1+inverse[1]*b2, inverse[1]*b1+inverse[2]*b2
+		}
+		if ok {
 			accumulated1, accumulated2 := j.angularImpulse.Dot(u1), j.angularImpulse.Dot(u2)
 			// λ = -(K⁻¹ (v + b) + gamma * accumulated) / (1 + gamma), on both axes
 			scale := -1 / (1 + row.gamma)
@@ -631,8 +633,7 @@ func (j *FixedJoint) solve(s *solver, useBias bool) {
 		bias = rotationError(frameB, frameA).Mul(row.biasRate)
 	}
 	k := actor.Add3(&stateA.inverseInertia, &stateB.inverseInertia)
-	if math.Abs(actor.Det3(&k)) > 1e-30 {
-		inverse := actor.Inv3(&k)
+	if inverse, ok := massInverse(stateA, stateB, &k); ok {
 		impulse := row.impulse3(&inverse, cdot, bias, j.angularImpulse)
 		j.angularImpulse = j.angularImpulse.Add(impulse)
 		applyAngular(stateA, stateB, impulse)

@@ -146,6 +146,7 @@ var regressionScenes = append([]regressionScene{
 	{"joint chain", jointChain},
 	{"rain on terrain", rainOnTerrain},
 	{"spinning tops", spinningTops},
+	{"locked bodies", lockedBodies},
 }, append(queryScenes, solverScenes()...)...)
 
 // solverScenes: the scenes of Solver2D (bench/scenes), at their small size (the full size is for -scenes)
@@ -394,6 +395,77 @@ func spinningTops() map[string]metric {
 		"last spin":       {lastSpin, "s"},
 		"awake":           {float64(awake), ""},
 		"worst top drift": {drift * 1000, "mm"},
+	}
+}
+
+// lockedBodies: a pile in 2D (90 bodies which can't move along Z, nor turn around X and Y), 10 characters (upright
+// capsules which only turn around Y) hit by balls, and a chain locked in its plane, hanging from a body which has all its
+// axes locked
+func lockedBodies() map[string]metric {
+	const links, length = 12, 0.3
+	w := world(1)
+	ground(w, 0.6)
+	r := rand.New(rand.NewSource(5))
+	var flat, upright, chain []*actor.RigidBody
+	for i := 0; i < 90; i++ {
+		position := mgl64.Vec3{float64(i%9)*0.7 + 0.2*r.Float64(), 0.5 + float64(i/9)*0.7, 0}
+		b := body(w, tr(position, mgl64.QuatRotate(r.Float64()*6, mgl64.Vec3{0, 0, 1})), mixedShape(r, i), actor.BodyTypeDynamic, 0.6, 0)
+		b.LinearLock, b.AngularLock = actor.AxisZ, actor.AxisX|actor.AxisY
+		flat = append(flat, b)
+	}
+	for i := 0; i < 10; i++ {
+		x := float64(i) * 1.2
+		b := body(w, tr(mgl64.Vec3{x, 0.9, 4}, mgl64.QuatIdent()), &actor.Capsule{HalfHeight: 0.6, Radius: 0.3}, actor.BodyTypeDynamic, 0.6, 0)
+		b.AngularLock = actor.AxisX | actor.AxisZ
+		upright = append(upright, b)
+		ball := body(w, tr(mgl64.Vec3{x + 0.1, 1.5, 7 + 0.3*float64(i)}, mgl64.QuatIdent()), &actor.Sphere{Radius: 0.2}, actor.BodyTypeDynamic, 0.6, 0)
+		ball.Velocity = mgl64.Vec3{0, 2, -12}
+	}
+	previous := body(w, tr(mgl64.Vec3{0, 6, 9}, mgl64.QuatIdent()), &actor.Box{HalfExtents: mgl64.Vec3{0.1, 0.1, 0.1}}, actor.BodyTypeDynamic, 0.5, 0)
+	previous.LinearLock, previous.AngularLock = actor.AllAxes, actor.AllAxes
+	turned := mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1})
+	for i := 0; i < links; i++ {
+		center := mgl64.Vec3{-(float64(i) + 0.5) * length, 6, 9}
+		link := body(w, tr(center, turned), &actor.Capsule{HalfHeight: length/2 - 0.05, Radius: 0.05}, actor.BodyTypeDynamic, 0.5, 0)
+		link.LinearLock, link.AngularLock = actor.AxisZ, actor.AxisX|actor.AxisY
+		w.AddJoint(feather.NewBallJoint(previous, link, center.Add(mgl64.Vec3{length / 2, 0, 0}), mgl64.Vec3{1, 0, 0}))
+		chain = append(chain, link)
+		previous = link
+	}
+
+	start := positions(w)
+	drift, lean, stretch := 0.0, 0.0, 0.0
+	play(w, 4, func() {
+		for i, b := range w.Bodies {
+			for k := 0; k < 3; k++ {
+				if b.LinearLock.Has(k) {
+					drift = math.Max(drift, math.Abs(b.Transform.Position[k]-start[i][k]))
+				}
+			}
+		}
+		for _, b := range upright {
+			lean = math.Max(lean, angle(mgl64.QuatBetweenVectors(mgl64.Vec3{0, 1, 0}, b.Transform.Rotation.Rotate(mgl64.Vec3{0, 1, 0}))))
+		}
+		for i := 0; i+1 < len(chain); i++ {
+			end := chain[i].Transform.ToWorld(mgl64.Vec3{0, length / 2, 0})
+			next := chain[i+1].Transform.ToWorld(mgl64.Vec3{0, -length / 2, 0})
+			stretch = math.Max(stretch, end.Sub(next).Len())
+		}
+	})
+	pushed := 0.0
+	for i, b := range upright {
+		pushed = math.Max(pushed, b.Transform.Position.Sub(mgl64.Vec3{float64(i) * 1.2, 0.9, 4}).Len())
+	}
+	turn := 0.0
+	for _, b := range flat {
+		turn = math.Max(turn, math.Hypot(b.Transform.Rotation.V[0], b.Transform.Rotation.V[1]))
+	}
+	return map[string]metric{
+		"worst locked drift":   {drift * 1000, "mm"},
+		"worst lean":           {lean, ""},
+		"worst turn off plane": {turn, ""},
+		"worst stretch":        {stretch * 1000, "mm"},
+		"least push":           {-pushed, "m"},
 	}
 }
 

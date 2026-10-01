@@ -130,6 +130,10 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 
 	if fraction < 1 {
 		body.Transform = motion.at(fraction)
+		if body.AngularLock == actor.AllAxes {
+			// it didn't turn: the interpolation of 2 equal rotations is not the rotation bit for bit
+			body.Transform.Rotation = motion.end.Rotation
+		}
 	}
 	body.UpdateAABB()
 }

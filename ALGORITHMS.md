@@ -324,6 +324,113 @@ round and spinning fast can turn its point away before the end of the step, and 
 ([GDC 2015](https://box2d.org/files/ErinCatto_NumericalMethods_GDC2015.pdf)). Dropping it removes the tumbling
 of long bodies, integrating it explicitly makes them gain energy.
 
+### Axis locks
+A body is locked along (translation) and around (rotation) world axes: `LinearLock` & `AngularLock`, 3 bits each.
+
+**Mechanism.** The body has no inverse mass along a locked axis, and no inverse inertia around it, in the solver and in
+the integration. It is the choice of Jolt (`EAllowedDOFs`, `Body/AllowedDOFs.h:10-21`, v5.3.0: "Body can move in world
+space X axis"...), against the 2 other ways:
+- Box3D and Box2D keep the masses and clear the velocities when the positions are integrated ("Motion locks - these
+  can be viewed as a constraint that come last", `box3d/src/solver.c:192-198`, commit 9f998c8; `box2d/src/solver.c:134-137`,
+  commit 956ce4e, after v3.1). Only a body with its 3 rotations locked loses its inertia (`box3d/src/body.c:1048-1054`).
+  The solver computes its impulses for a body which still has its whole mass along the locked axis.
+- PhysX clears the velocities too, before the solver (`DyRigidBodyToSolverBody.cpp:72-98`, 5.6.0) and when it
+  integrates (`DyBodyCoreIntegrator.h:86-123`; TGS: `DyTGSDynamics.cpp:195-221` and `:1405-1420`), and keeps the
+  inertia on purpose: "technically, we can zero the inertia columns and produce stiffer constraints. However, this can
+  cause numerical issues with the joint solver" (`DyRigidBodyToSolverBody.cpp:81-83`).
+
+Feather takes the stiffer constraints, and handles the joints (below).
+
+**Translation.** The state of a body carries its inverse mass by axis, null along a locked axis (`invMassAxes`). An
+impulse `λ d` changes the velocity by `λ M⁻¹ d`, component by component: a locked component never changes. Jolt does it
+by clearing the locked components after each change (`LockTranslation`, `MotionProperties.h:163-166`, in
+`AddLinearVelocityStep`, `:195-196`, and in `Body::AddPositionStep`, `Body.h:342`), and keeps the whole inverse mass in
+the effective mass of its rows (`AxisConstraintPart.h:114` and `:127`): its rows are solved for a body lighter than it
+is along a locked axis, the iterations make up for it. Feather uses the mass the row really moves,
+`d·(MA⁻¹ + MB⁻¹)·d` (`linearMass`), as Rapier (v0.22.0: `effective_inv_mass` is a vector, null along the locked axes,
+`rigid_body_components.rs:408-424`, projected on the direction of the row, `one_body_constraint.rs:135-136`), and `tx·M⁻¹·ty` between both tangents of the friction (`crossMass`): a rigid row is
+exact after one pass (`TestLockedNormalRowIsExact`, `TestLockedNormalBlockIsExact`, `TestLockedJointRowsAreExact`), and
+a bounce on a locked body gives back its approach velocity (`TestLockedBounceIsExact`).
+
+**Rotation.** The inverse inertia in world space of a locked body is the inverse of the free block of its inertia
+(F the free axes, L the locked ones, `K = R I⁻¹local Rᵀ` the inverse inertia of the free body):
+````
+I⁻¹locked = (I_FF)⁻¹ = K_FF - K_FL K_LL⁻¹ K_LF   on the free axes, null rows and columns around the locked ones
+````
+It is the rigid body dynamics of the textbooks: a body held by bearings turns with the inertia of its free axes, the
+bearings give the torque which keeps the others still. For a single free axis `n`, it is the moment of inertia around
+a fixed axis, `1 / (n·I·n)`. The matrix is written as the Schur complement of `K_LL` in K (`Axes.LockInverseInertia`):
+for a body whose axes of inertia are the ones of the world, `K_FL` is null and the result is `K_FF` bit for bit.
+
+**It is not what the other engines do**, and the gap is on purpose. They all keep `K_FF`, the free block of the
+*inverse*, which is the answer of a free body whose locked velocities are cleared afterwards:
+- Jolt masks the rows and the columns of the inverse (`MotionProperties::GetInverseInertiaForRotation`: "We need to
+  mask out both the rows and columns of DOFs that are not allowed", `MotionProperties.inl:69-81`;
+  `MultiplyWorldSpaceInverseInertiaByVector`, `:86-100`);
+- Rapier masks the rows and the columns of the square root of the inverse (`effective_world_inv_inertia_sqrt`,
+  `rigid_body_components.rs:432-450`, v0.22.0);
+- PhysX and Box3D keep the whole inverse inertia and clear the locked components of the angular velocity (above): the
+  answer on the free axes is `K_FF` too.
+
+`K_FF` is exact when `K_FL` is null (an upright capsule, a box not leaning, a sphere), and too large otherwise: the
+body is lighter than it is. Measured with a torque of 1 N·m during 1 s around Y, rotations locked around X and Z,
+against `1 / (n·I·n)`: a box of 20 x 100 x 40 cm leaning by 0.5 rad turns 1.7 times too fast, by 45° 2 times; a rod of
+2 m leaning by 10° 8 times, by 80° 33 times, by 45° more than 100 times. With the exact inertia they are all at 1
+(`TestLockedBodyTurnsAsAroundAFixedAxis`). It costs 1 division and a few products per locked body which turns, and it
+never makes the body lighter than the masked matrix does. Unity doesn't have the gap by construction: its rotation
+locks follow the axes of inertia of the body ("position constraints are applied in World space, and rotation
+constraints are applied in the inertia space", `Rigidbody.constraints`), where `K_FL` is null.
+
+The locks are in world space and the inertia turns with the body: Jolt computes the matrix again from the rotation of
+the body each time it needs it. Feather turns the inertia of a body during the step (`integratePosition`,
+`I⁻¹ = ΔR I⁻¹start ΔRᵀ`): the inertia kept from the start of the step is the free one, and the turned matrix is locked
+again at each substep. Turning the locked matrix would be wrong: a body locked around X turning around Y would get
+back an inertia around X (`TestLockedInertiaFollowsTheBody`).
+
+**What doesn't go through the inverse mass** is cleared along the locked axes after the velocities are integrated: the
+gravity (as `LockTranslation` in `MotionProperties::ApplyForceTorqueAndDragInternal`, `MotionProperties.inl:137`), the
+gyroscopic torque (PhysX: the torque, then the lock flags, `DyRigidBodyToSolverBody.cpp:55-98`) and a velocity written
+by the game. A body which turns around a single world axis gets no gyroscopic torque at all: the torque has no
+component along its angular velocity, the locks hold it whole (`TestLockedSpinIsKept`).
+
+**Joints.** With locks, both bodies of a joint may not answer along a direction: a body which only turns around Y held
+by a fixed joint (the 3 rotations solved together: `K = IA⁻¹ + IB⁻¹` has 2 null rows), a body which can't move pinned
+to the world off its center (`K = -[r]× I⁻¹ [r]×`, null along `r`). K is singular: Jolt gives up the whole block
+(`PointConstraintPart.h:124-125`, `RotationEulerConstraintPart.h:146-147`: `if (!mEffectiveMass.SetInversed3x3(...))
+Deactivate()`), which is the "numerical issue" PhysX avoids. Feather solves the rows which answer: K is symmetric,
+positive semidefinite, it is eliminated row by row without pivoting, and a row whose pivot is under 10⁻⁶ of the
+stiffest row is left out, its impulse stays null (`lockedInverse`, a generalized inverse: `K G K = K`). With its 3 rows,
+it is the inverse of K. The same for the diagonal blocks of an articulation: a chain of bodies locked in a plane is
+still solved as a tree (`TestLockedChainHoldsInItsPlane`).
+
+**Friction, 2 rows.** For the 2 rows of a hinge and both tangents of the friction (`lockedInverse2`), a block with a
+single row which answers is of rank 1, `K = k u uᵀ`, and `u` is any direction between both rows: a plate which only
+turns around Y, rubbing on a ball off its axis, answers along the circle around its axis, not along a tangent of the
+contact. Its inverse is the one of least norm (the pseudo-inverse of Moore-Penrose), `K⁺ = u uᵀ / k = K / tr(K)²`: the
+impulse is along `u`. Keeping one row (the other generalized inverses) adds an impulse along the direction the locks
+absorb: it moves nothing, but it counts in the friction cone, and the body rubs less than Coulomb says, down to not at
+all when `u` is nearly the second tangent (`TestLockedPlateRubsOffItsAxes`: the plate stops after the same 0.78 s
+wherever the ball is). A box which can't turn nor move along X still rubs along Z (`TestLockedBoxRubsAlongItsFreeAxis`).
+
+**All the axes locked.** The body stays dynamic: it never moves, carries the bodies resting on it, sleeps and wakes up
+(`TestFullyLockedBodyStaysDynamic`). It is the behaviour of Unity (`RigidbodyConstraints.FreezeAll`), of PhysX and of
+Box3D; Jolt forbids it ("No degrees of freedom are allowed. Note that this is not valid and will crash. Use a static
+body instead", `AllowedDOFs.h:12`; the assertion of `MotionProperties::SetMassProperties`, `MotionProperties.cpp:60`).
+One limit: it is not a static body for the continuous collision. A fast body which is not a bullet is only stopped by
+the static bodies (`stopAtImpact`): a ball of 5 cm at 80 m/s goes through a wall of 4 cm with all its axes locked, and
+stops on the same static wall. A wall is a static body; otherwise the fast body is a bullet (`IsBullet`).
+
+**Setting the locks.** `RigidBody.SetLocks` clears the velocities along the new locked axes (`b3Body_SetMotionLocks`,
+`box3d/src/body.c:2379-2408`), returns at once without change (`:2362-2365`), and wakes the body up.
+
+**Continuous collision.** A fast body moved back to its first impact is placed between its start and its end: a
+locked coordinate is the same at both, it is kept. The rotation of a body locked around its 3 axes is kept as it is
+(the interpolation of 2 equal rotations is not the rotation bit for bit); a body locked around some axes only still
+turns, it gets the rotation of its impact (`TestContinuousTurnsAPartlyLockedBody`).
+
+**Without lock**, the arithmetic is the one of a body which has no lock at all: `linearMass` returns the sum of both
+inverse masses, the inverse of K is `Inv3`. The fingerprints of the bench are the same bit for bit.
+
 ### Parallel solver
 The solver is a Gauss-Seidel: each constraint uses the velocities left by the previous one. To solve in parallel,
 the contacts and the joints are colored (Box2D v3, `constraint_graph.c`): each takes the first color where both of its

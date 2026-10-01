@@ -119,6 +119,11 @@ lifted, on the goroutine of `Step`: they can run queries, and see the end of the
 See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dynamic bodies (`bodyState`):
 the static and sleeping bodies share a state with no mass.
 
+The axis locks (`actor.Axes`, `RigidBody.LinearLock` & `AngularLock`) live in the state too: its inverse mass by axis
+is null along the locked axes, its inverse inertia in world space is the one of the body held around them (`lock.go`, see
+[ALGORITHMS.md](ALGORITHMS.md#axis-locks)). The contacts and the joints read them as the mass of the body: nothing
+else knows about the locks, apart from the integration (gravity, gyroscopic torque) and the continuous collision.
+
 ## Threading & determinism
 - From 256 bodies, a step runs on `Workers` goroutines. The workers are created once and sleep between the steps.
   `World.Close()` stops them (they are also stopped when the World is garbage collected).
@@ -149,7 +154,7 @@ Four levels, from the most precise to the widest:
    (stacks, high mass ratios, overlap recovery, house of cards, chains, far from the origin...), small in the tests,
    full in the bench (`go run . -scenes`, `go run . -compare` side by side with v0.2.0). Each scene holds (a derived
    criterion) and, where Box2D has the scene, does at least as well as Box2D v3.1.
-4. **Regressions** (`bench/regression.go`): 6 chaotic scenes, spinning tops, 2 scenes of queries
+4. **Regressions** (`bench/regression.go`): 6 chaotic scenes, spinning tops, locked bodies, 2 scenes of queries
    (`bench/queries.go`: rays, sweeps and overlaps among 1000 bodies and on a terrain of 1025 x 1025 samples; their
    fingerprint is the hash of their results, their phases are their batches of 10000 queries) and the scenes of
    Solver2D, compared to `bench/baseline.json`:
@@ -197,5 +202,7 @@ restitution, continuous collision, islands), without allocation.
   the pile is asleep.
 - A sweep doesn't turn the shape, gives its first hit only, and no depth when the shape starts in a body. The back
   side of a heightfield is never hit.
+- A fast body which is not a bullet goes through a dynamic body with all its axes locked: the continuous collision of
+  the other bodies only looks at the static ones.
 - The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
   not the other pairs: 2 fast dynamic bodies rely on their speculative contacts (2 cm) and on the spring of the contact.

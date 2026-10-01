@@ -100,6 +100,12 @@ type RigidBody struct {
 	Layer Layers
 	Mask  Layers
 
+	// LinearLock: the world axes a dynamic body can't move along. AngularLock: the world axes it can't turn around.
+	// Along a locked axis the body has no inverse mass (or inverse inertia): neither the gravity, the forces, the
+	// impulses, the contacts nor the joints move it. Set them before the first step, then by SetLocks
+	LinearLock  Axes
+	AngularLock Axes
+
 	// Collision shape
 	Shape ShapeInterface // The collision shape
 	aabb  AABB
@@ -178,6 +184,25 @@ func (rb *RigidBody) InverseMass() float64 {
 	return 1 / rb.Material.mass
 }
 
+// InverseMassAxes: the inverse mass along each world axis, null along a locked axis
+func (rb *RigidBody) InverseMassAxes() mgl64.Vec3 {
+	inverseMass := rb.InverseMass()
+	return rb.LinearLock.LockVector(mgl64.Vec3{inverseMass, inverseMass, inverseMass})
+}
+
+// SetLocks changes the locked axes of a dynamic body: its velocities along the locked axes are cleared, and it wakes
+// up (a body freed in the air must fall). A static body never moves: it has no lock
+func (rb *RigidBody) SetLocks(linear, angular Axes) {
+	linear, angular = linear&AllAxes, angular&AllAxes
+	if rb.BodyType == BodyTypeStatic || (linear == rb.LinearLock && angular == rb.AngularLock) {
+		return
+	}
+	rb.LinearLock, rb.AngularLock = linear, angular
+	rb.Velocity = linear.LockVector(rb.Velocity)
+	rb.AngularVelocity = angular.LockVector(rb.AngularVelocity)
+	rb.WakeUp()
+}
+
 func (rb *RigidBody) Sleep() {
 	rb.IsSleeping = true
 	rb.SleepTimer = 0.0
@@ -219,7 +244,7 @@ func (rb *RigidBody) AddForceAtPoint(force mgl64.Vec3, point mgl64.Vec3) {
 func (rb *RigidBody) AddImpulse(impulse mgl64.Vec3) {
 	if rb.BodyType != BodyTypeStatic {
 		rb.WakeUp()
-		rb.Velocity = rb.Velocity.Add(impulse.Mul(rb.InverseMass()))
+		rb.Velocity = rb.LinearLock.LockVector(rb.Velocity.Add(impulse.Mul(rb.InverseMass())))
 	}
 }
 
@@ -258,8 +283,19 @@ func (rb *RigidBody) GetInertiaWorld() mgl64.Mat3 {
 	return R.Mul3(rb.InertiaLocal).Mul3(R.Transpose())
 }
 
-// Inverse inertia in world space: R * inertiaLocal^-1 * R^T
+// Inverse inertia in world space: R * inertiaLocal^-1 * R^T, of the body held around its locked axes (the inverse of
+// the free block of its inertia, see Axes.LockInverseInertia). The locks are in world space, the matrix is locked again
+// each time the body turns
 func (rb *RigidBody) GetInverseInertiaWorld() mgl64.Mat3 {
+	inverseInertia := rb.GetFreeInverseInertiaWorld()
+	if rb.AngularLock != NoAxes {
+		rb.AngularLock.LockInverseInertia(&inverseInertia)
+	}
+	return inverseInertia
+}
+
+// GetFreeInverseInertiaWorld: the inverse inertia in world space of the body without its locks
+func (rb *RigidBody) GetFreeInverseInertiaWorld() mgl64.Mat3 {
 	if rb.BodyType == BodyTypeStatic {
 		return mgl64.Mat3{}
 	}

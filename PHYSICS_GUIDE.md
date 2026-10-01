@@ -114,6 +114,44 @@ world.AddJoint(slider)
 - Its drives bring B to `DriveTargetPosition` and `DriveTargetRotation` (in the frame A).
 - The limits are soft: a huge force bends them a little (under 0.5° for 5 g at the end of an arm).
 
+### Axis locks
+A dynamic body can be locked along the world axes (`LinearLock`: it doesn't move along them) and around them
+(`AngularLock`: it doesn't turn around them). It is the `constraints` of a `Rigidbody` in Unity (Freeze Position,
+Freeze Rotation).
+
+```go
+body.LinearLock, body.AngularLock = actor.AxisX, actor.NoAxes   // before the first step
+body.SetLocks(actor.NoAxes, actor.AxisX|actor.AxisZ)            // later: it clears the locked velocities & wakes the body up
+```
+
+| Recipe | `LinearLock` | `AngularLock` |
+|--------|--------------|---------------|
+| A character which stays upright | `NoAxes` | `AxisX \| AxisZ` |
+| A crate which never tips over | `NoAxes` | `AllAxes` |
+| A game in 2D, in the plane XY | `AxisZ` | `AxisX \| AxisY` |
+| A lift, a platform on a vertical rail | `AxisX \| AxisZ` | `AllAxes` |
+
+- The axes are the ones of the world, whatever the rotation of the body. A body locked around X and Z, created leaning,
+  keeps its lean and turns around the vertical.
+- A locked axis is kept bit for bit: neither the gravity, `AddForce`, `AddTorque`, the impulses, the contacts, the joints
+  nor the continuous collision move it. A velocity written along a locked axis is cleared by the next step.
+- The body has no mass along a locked axis: what hits it along this axis hits a wall. Along its free axes it keeps its
+  mass, its friction and its bounce.
+- `SetLocks` wakes the body up: a body freed in the air falls. Writing the fields of a sleeping body doesn't.
+- A body with all its axes locked stays dynamic: it never moves, carries what rests on it, sleeps and wakes up, and
+  collides with the static bodies (events). A static body costs less: prefer it for what never moves.
+- A fast body which is not a bullet goes through a body with all its axes locked: its continuous collision only looks
+  at the static bodies. A thin wall is a static body, or what is thrown at it is a bullet (`IsBullet`).
+- A static body has no lock: `SetLocks` does nothing on it.
+- A joint which needs a locked axis can't be satisfied: its other rows are still solved (a body which only turns around
+  Y, held by a fixed joint, doesn't turn), the impossible ones are left out. Nothing explodes.
+- To move a locked body along its locked axis, write its `Transform` (then `UpdateAABB`), as for any body.
+- The rotation locks are in world space, as Jolt and PhysX; Unity locks the rotation in the inertia space of the body.
+  It is the same thing for a body whose inertia axes are the ones of the world (an upright capsule, a box not leaning).
+- A leaning body locked around some axes turns as on an axle: with its moment of inertia around its free axes (a rod
+  leaning by 45° which only turns around Y is as heavy to spin as it looks). Jolt, Rapier, PhysX and Box3D make it
+  lighter than it is; see the [algorithms](ALGORITHMS.md#axis-locks).
+
 ### Collision filtering
 Who collides with whom is decided by 3 things, tested in the broad phase before any contact is computed.
 
@@ -340,4 +378,5 @@ Call `World.Close()` when the world is not used anymore, to stop its workers.
 | Stacks sink | Increase `ContactHertz` or `Substeps` |
 | Stacks wobble | Increase `Substeps` |
 | No bounce | Restitution on both bodies, impact faster than 1 m/s |
-| A body does not move | It may be asleep: call `WakeUp` |
+| A body does not move | It may be asleep: call `WakeUp`. It may be locked along this axis: `LinearLock`, `AngularLock` |
+| A character falls over | Lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |

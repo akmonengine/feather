@@ -228,6 +228,10 @@ func (s *solver) solveArticulations(useBias bool) {
 	// ========== factor: A = L D Lᵀ, from the leaves ==========
 	for i := 0; i < n; i++ {
 		inverse := actor.Inv3(&a.diag[i])
+		if s.locked {
+			// the bodies of the joint may not answer along a direction
+			inverse, _ = lockedInverse(&a.diag[i])
+		}
 		a.inverse[i] = inverse
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			// update the later blocks with -A_ki D⁻¹ A_li
@@ -298,10 +302,10 @@ func (s *solver) coupling(x, y *JointBase, rAx, rBx, rAy, rBy mgl64.Vec3) mgl64.
 	var block mgl64.Mat3
 	add := func(body int, signX float64, rX mgl64.Vec3, signY float64, rY mgl64.Vec3) {
 		state := s.state(body)
-		m := state.invMass
-		identity := mgl64.Mat3{1 * m, 0 * m, 0 * m, 0 * m, 1 * m, 0 * m, 0 * m, 0 * m, 1 * m}
+		m := &state.invMassAxes
+		linear := mgl64.Mat3{m[0], 0, 0, 0, m[1], 0, 0, 0, m[2]}
 		angular := skewTerm(&state.inverseInertia, rX, rY)
-		term := actor.Sub3(&identity, &angular)
+		term := actor.Sub3(&linear, &angular)
 		sign := signX * signY
 		for c := range term {
 			block[c] += term[c] * sign
