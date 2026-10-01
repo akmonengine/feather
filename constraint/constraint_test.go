@@ -75,3 +75,27 @@ func TestComputeRestitution(t *testing.T) {
 		})
 	}
 }
+
+// The combined resistance: the largest of both materials, times the largest radius (as the rolling resistance)
+func TestComputeSpinningResistance(t *testing.T) {
+	cases := []struct {
+		a, b, radiusA, radiusB, want float64
+	}{
+		{0, 0, 0.1, 0.2, 0},
+		{0.05, 0, 0.1, 0, 0.005},
+		{0, 0.05, 0.1, 0, 0.005},
+		{0.05, 0.2, 0.1, 0.3, 0.06},
+		{0.2, 0.05, 0.3, 0.1, 0.06},
+		{0.05, 0.05, 0, 0, 0},
+	}
+	for _, c := range cases {
+		got := ComputeSpinningResistance(actor.Material{SpinningResistance: c.a}, actor.Material{SpinningResistance: c.b}, c.radiusA, c.radiusB)
+		if math.Abs(got-c.want) > 1e-15 {
+			t.Errorf("resistances %v & %v, radii %v & %v: %v, want %v", c.a, c.b, c.radiusA, c.radiusB, got, c.want)
+		}
+	}
+	// the rolling resistance is not the spinning one
+	if got := ComputeSpinningResistance(actor.Material{RollingResistance: 1}, actor.Material{RollingResistance: 1}, 1, 1); got != 0 {
+		t.Errorf("the rolling resistance gave a spinning resistance of %v", got)
+	}
+}
