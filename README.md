@@ -123,7 +123,7 @@ per step on 1 worker, ~0.8 ms on 8 workers; 2000 bodies awake, 6.5 ms and 2 ms.
 
 ### Constraints
 - Contact: generated when a collision is detected between two rigid bodies, up to 4 points (manifold), with friction,
-  rolling resistance and restitution.
+  rolling & spinning resistance and restitution.
 - Distance: fixed length, a range [min, max] (a rope), or a spring. Usage: ropes, chains, springs
 - Ball (ball and socket): the anchors stay together, with an optional elliptic cone for the swing and a range for the twist,
   and an optional drive towards a target rotation. Usage: ragdolls, physical bones, tails
@@ -156,7 +156,7 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
   free flight.
 - **Scenes of Solver2D** (`bench/scenes`): the samples of Erin Catto's Solver2D in 3D, each checked, and compared to
   Box2D v3.1 on the same scenes (the reference: Feather must do at least as well; the known gaps are followed by #821).
-- **Regressions** (`bench/`): 6 scenes (piles, pyramid, joint chain, rain on a terrain) and the scenes of Solver2D against a committed reference:
+- **Regressions** (`bench/`): 7 scenes (piles, pyramid, joint chain, rain on a terrain, spinning tops) and the scenes of Solver2D against a committed reference:
   fingerprint, quality and speed per phase (`World.Profile`).
 ````
 go test ./...
@@ -184,6 +184,9 @@ cd bench && go run . -scenes    # the scenes at full size (-compare: with v0.2.0
   https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyCollision.html#collision-filtering),
   Unreal "Query Only" (https://dev.epicgames.com/documentation/en-us/unreal-engine/collision-response-reference-in-unreal-engine),
   Unity `Physics.IgnoreCollision` (https://docs.unity3d.com/ScriptReference/Physics.IgnoreCollision.html)
+- Spinning resistance: Bullet 3.25 (`btCollisionObject::setSpinningFriction`, `setupTorsionalFrictionConstraint`;
+  https://github.com/bulletphysics/bullet3), PhysX 5.6 (`PxShape::setTorsionalPatchRadius`), Box3D & Box2D v3.1 (the
+  rolling resistance)
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
@@ -192,6 +195,7 @@ Feather is written from the publications and the documentation of these projects
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
   the contact patches, the body pair cache
+- [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance)
 
 ## Contributing Guidelines
 

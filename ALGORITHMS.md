@@ -241,6 +241,67 @@ friction patches of PhysX), not at each point:
 The center is the average of the points, weighted by their separation (as Box3D: 1 up to the speculative distance, 0 at
 twice). µ is the static friction when the center slides slower than 1 cm/s, the dynamic friction otherwise.
 
+### Rolling & spinning resistance
+A sphere or a capsule touches by a single point: no lever arm, the friction holds neither its rolling nor its spin
+around the normal. Two angular rows are added to the contact, solved in `Relax` after the normals and before the
+friction, each warm started from its own impulse (`Manifold.RollingImpulse`, a vector along the tangents, and
+`Manifold.SpinningImpulse`, a scalar around the normal: the same pair as `FrictionImpulse` & `TwistImpulse`), each
+bounded by a length times the normal impulse of the contact:
+- **rolling** (`solveRolling`), around both tangents: `|λ| ≤ RollingResistance * radius * Σ λ_normal`, the rolling
+  resistance of Box2D v3 (`src/contact.c:497-502`, `src/contact_solver.c:361-367`, v3.1.0);
+- **spinning** (`solveSpinning`), around the normal, after the rolling: `|λ| ≤ SpinningResistance * radius * Σ λ_normal`,
+  with the mass of the twist `1 / (n · (IA⁻¹ + IB⁻¹) n)`.
+
+`radius` is the largest radius of both shapes (0 for a box), the resistance the largest of both materials. The bounds
+don't read the friction µ of the bodies: a ball without friction (µ = 0) brakes its spin at the same rate (12.26 rad/s²
+measured, the case below). The largest radius wins, as in Box2D: a ball of radius 10 cm spinning on a static ball of
+radius 1 m takes the radius of 1 m, and brakes 10 times faster than on a plane (122.7 rad/s² measured, 12.3 on the
+plane), where the contact patch of Hertz follows the smallest radius. The rolling resistance has the same bias.
+
+The spinning row is the spinning friction of Bullet (3.25): a row around the normal without linear part
+(`btSequentialImpulseConstraintSolver.cpp:619-680`, `setupTorsionalFrictionConstraint`), bounded by its coefficient
+times the normal impulse (`:1679-1687`), the coefficient set by `btCollisionObject::setSpinningFriction`
+(`btCollisionObject.h:89`, `:339`). Feather differs from Bullet on these points:
+- the coefficient of Bullet is a length (a torque over a force); Feather gives it as a ratio of the radius, as the
+  rolling resistance of Box2D, so that a material fits balls of all sizes;
+- Bullet combines `spinningA * µB + spinningB * µA` (`btManifoldResult.cpp:43-45`); Feather takes the largest, as its
+  rolling resistance;
+- Bullet adds a row per contact point, and only when the rolling friction is also set
+  (`btSequentialImpulseConstraintSolver.cpp:1058-1061`); Feather has one row per contact, bounded by the normal impulse
+  of all its points, whatever the rolling resistance;
+- Bullet starts the row from 0 at each step (`:641`, the contact writes back its normal and both tangents only,
+  `:1765-1775`) and caps its bound to the coefficient itself (`:1683-1684`); Feather warm starts it, without this cap.
+
+The other engines: Box3D resists around the 3 axes with its rolling resistance (a vector impulse with the mass
+`(IA⁻¹ + IB⁻¹)⁻¹`, `src/contact_solver.c:139`, `:625-639`, commit 9f998c8), its twist friction comes from the lever arms
+(`:612-619`); PhysX has a torsional patch radius per shape, for a single anchor and its TGS solver only, the bound
+`max(minRadius, sqrt(penetration * radius))` times the friction impulse (`PxShape.h:471-487`,
+`DyTGSContactPrep.cpp:779-810`, 5.6.1, tag `107.3-physx-5.6.1`: both files are the same at 5.6.0); Jolt (v5.3.0, `ContactConstraintManager.cpp`) and Box2D v3 (2D) have none.
+
+The length stands for the width of the contact. A patch of radius `a` under a load `N` spread uniformly
+(`p = N / (π a²)`), sliding with a friction `µ`, holds the torque
+````
+τ = ∫₀ᵃ µ p r 2πr dr = 2/3 µ a N
+````
+(`3π/16 µ a N` with the pressure of Hertz, `p = 3N / (2π a²) * sqrt(1 - r²/a²)`), so
+`SpinningResistance = 2/3 µ a / radius`.
+
+A ball resting on the ground (`Σ λ_normal = m g h` per substep, `I = 2/5 m r²`) loses `Δω = c r m g h / I` per substep
+while it spins: it slows down at
+````
+α = c r m g / (2/5 m r²) = c r g / (2/5 r²) = 5/2 c g / r
+````
+12.26 rad/s² for `c = 0.05`, `r = 0.1 m` (`TestSpinningResistanceStopsTheTop`: 12.33 rad/s² measured, stopped from
+20 rad/s after 1.63 s, asleep 0.5 s later). The 0.07 rad/s² more come from the twist friction: the single point of a
+ball counts half its overlap as a lever arm, and brakes the spin by 0.068 rad/s² without any resistance. Under the
+bound, the row holds the ball still: an applied torque smaller than `c r m g` doesn't turn it
+(`TestSpinningResistanceHoldsATorque`). A capsule standing on its cap brakes at `c r m g / I`, `I` its inertia around
+its axis (`TestSpinningResistanceStopsAStandingCapsule`).
+
+The order of the rows is fixed by `TestRelaxSolvesTheSpinningAfterTheRolling`: for a ball the rolling and the spinning
+rows don't see each other, for a tilted capsule they do (an impulse around a tangent changes the spin around the
+normal).
+
 ### Restitution
 Applied once after the substeps, for the contacts hitting faster than 1 m/s, once their compression is over (the
 point doesn't approach anymore). The bounce impulse goes towards the velocity `-e * vn_impact` (Newton), and is at most

@@ -32,14 +32,16 @@ import (
 //   - its fingerprint, a hash of the bits of the positions & rotations at the end: it must be identical on the same
 //     architecture (GOARCH). A change of behaviour, even tiny, changes it: -update after a wanted change
 //   - its quality metrics, each with its tolerance (qualityTolerances): only a worse value is a regression
-//   - its speed: the time of a step and of its phases (feather.Profile), the best of speedRuns runs. Only compared on
-//     the machine of the reference: a step slower by more than stepTolerance, or a phase taking more than 5 % of the
-//     step and slower by more than phaseTolerance, is a regression
+//   - its speed: the time of a step and of its phases (feather.Profile), each the best of speedRuns runs, every run at
+//     another depth of the stack (stack.go: the time of a phase depends on it). Only compared on the machine of the
+//     reference: a step slower by more than stepTolerance, or a phase taking more than 5 % of the step and slower by
+//     more than phaseTolerance, is a regression
 
 const (
 	baselineFile = "baseline.json"
 
-	// speedRuns: the speed of a scene is its best run
+	// speedRuns: the speed of a step and of each phase is its best run. Each run starts at another depth of the stack,
+	// pageSize/speedRuns apart (stack.go)
 	speedRuns = 3
 
 	// stepTolerance: a step may be 20 % slower (the noise of a shared machine)
@@ -141,6 +143,7 @@ var regressionScenes = append([]regressionScene{
 	{"pile of 500", pile500},
 	{"joint chain", jointChain},
 	{"rain on terrain", rainOnTerrain},
+	{"spinning tops", spinningTops},
 }, solverScenes()...)
 
 // solverScenes: the scenes of Solver2D (bench/scenes), at their small size (the full size is for -scenes)
@@ -328,6 +331,70 @@ func rainOnTerrain() map[string]metric {
 	}
 }
 
+// spinningTops: 144 balls & capsules thrown spinning on the ground, with a spinning & a rolling resistance: the balls
+// and the capsules standing on a cap are tops braking in place, the capsules lying turn on their side, the tilted ones
+// fall and roll (the rolling & the spinning rows of a tilted capsule see each other). All stop and fall asleep
+func spinningTops() map[string]metric {
+	const (
+		side, spacing = 12, 1.5
+		radius        = 0.12
+		halfHeight    = 0.25
+		spin          = 12.0
+	)
+	w := world(1)
+	ground(w, 0.6)
+	for i := 0; i < side*side; i++ {
+		position := mgl64.Vec3{float64(i%side) * spacing, radius, float64(i/side) * spacing}
+		rotation := mgl64.QuatIdent()
+		var shape actor.ShapeInterface = &actor.Capsule{HalfHeight: halfHeight, Radius: radius}
+		angular := mgl64.Vec3{0, spin, 0}
+		switch i % 4 {
+		case 0:
+			shape = &actor.Sphere{Radius: radius}
+		case 1: // standing on its cap
+			position[1] = halfHeight + radius
+		case 2: // lying
+			rotation = mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1})
+		case 3: // tilted by 30°, on its cap: it falls
+			rotation = mgl64.QuatRotate(math.Pi/6, mgl64.Vec3{0, 0, 1})
+			position[1] = halfHeight*math.Cos(math.Pi/6) + radius
+			angular = mgl64.Vec3{1, spin, -2}
+		}
+		b := body(w, tr(position, rotation), shape, actor.BodyTypeDynamic, 0.6, 0)
+		b.Material.SpinningResistance, b.Material.RollingResistance = 0.05, 0.1
+		// one top out of two the other way
+		if (i/4)%2 == 1 {
+			angular = angular.Mul(-1)
+		}
+		b.AngularVelocity = angular
+	}
+	start := positions(w)
+	elapsed, lastSpin := 0.0, 0.0
+	play(w, 3, func() {
+		elapsed += dt
+		for _, b := range w.Bodies[1:] {
+			if b.AngularVelocity.Len() >= actor.DefaultSleepSpeed {
+				lastSpin = elapsed
+			}
+		}
+	})
+	awake, drift := 0, 0.0
+	for i, b := range w.Bodies[1:] {
+		if !b.IsSleeping {
+			awake++
+		}
+		// the tops: the balls and the standing capsules
+		if i%4 < 2 {
+			drift = math.Max(drift, b.Transform.Position.Sub(start[i+1]).Len())
+		}
+	}
+	return map[string]metric{
+		"last spin":       {lastSpin, "s"},
+		"awake":           {float64(awake), ""},
+		"worst top drift": {drift * 1000, "mm"},
+	}
+}
+
 // hills: random hills in a bowl, 48x48 samples every 0.5 m (the terrain of the tests)
 func hills(w *feather.World, seed int64) *actor.RigidBody {
 	const samples = 48
@@ -452,12 +519,14 @@ func closestOnTriangle(p mgl64.Vec3, triangle [3]mgl64.Vec3) mgl64.Vec3 {
 // ========== RUN & COMPARE ==========
 
 // measureScene runs the scene speedRuns times: the quality & the fingerprint of the first run (all runs give the same
-// bits), the speed of the best run
-func measureScene(scene regressionScene) sceneResult {
+// bits), the speed of the step and of each phase from its best run. The runs start at stackOffset in the page of the
+// stack, then a third of a page further each: a phase slow at a depth of the stack is not at the next one (stack.go)
+func measureScene(scene regressionScene, stackOffset int) sceneResult {
 	var result sceneResult
 	for attempt := 0; attempt < speedRuns; attempt++ {
 		recording = &recorder{measuring: attempt == 0, phases: map[string]time.Duration{}}
-		quality := scene.run()
+		var quality map[string]metric
+		atStackOffset(stackOffset+attempt*pageSize/speedRuns, func() { quality = scene.run() })
 		if attempt == 0 {
 			hash := fnv.New64a()
 			for _, w := range recording.worlds {
@@ -472,11 +541,15 @@ func measureScene(scene regressionScene) sceneResult {
 			result.Quality = quality
 		}
 		stepMs := milliseconds(recording.step) / float64(recording.steps)
-		if attempt == 0 || stepMs < result.StepMs {
+		if attempt == 0 {
 			result.StepMs = stepMs
 			result.PhasesMs = map[string]float64{}
-			for name, phase := range recording.phases {
-				result.PhasesMs[name] = milliseconds(phase) / float64(recording.steps)
+		}
+		result.StepMs = min(result.StepMs, stepMs)
+		for name, phase := range recording.phases {
+			phaseMs := milliseconds(phase) / float64(recording.steps)
+			if best, found := result.PhasesMs[name]; !found || phaseMs < best {
+				result.PhasesMs[name] = phaseMs
 			}
 		}
 		for _, w := range recording.worlds {
@@ -502,11 +575,12 @@ func machine() string {
 	return fmt.Sprintf("%s, %d CPUs", model, runtime.NumCPU())
 }
 
-// regressions runs the scenes, then writes the reference (update) or compares to it. Returns false on a regression
-func regressions(update bool) bool {
+// regressions runs the scenes, then writes the reference (update) or compares to it. Returns false on a regression.
+// stackOffset moves the stack of the scenes in its page (-stack): the speed must not depend on it
+func regressions(update bool, stackOffset int) bool {
 	current := baseline{Arch: runtime.GOOS + "/" + runtime.GOARCH, Machine: machine(), Scenes: map[string]sceneResult{}}
 	for _, scene := range regressionScenes {
-		current.Scenes[scene.name] = measureScene(scene)
+		current.Scenes[scene.name] = measureScene(scene, stackOffset)
 		fmt.Printf("%-16s %s  %.3f ms/step\n", scene.name, current.Scenes[scene.name].Fingerprint, current.Scenes[scene.name].StepMs)
 	}
 	if update {

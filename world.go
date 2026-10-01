@@ -482,8 +482,8 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 
 // warmStartPair: a contact point takes the impulses of the closest point of the previous step (in the local space of
 // body A, as the contact cache of Jolt matches its points; Box2D matches them by feature id), among the previous
-// manifolds of the same pair. The contact takes the friction, twist & rolling impulses of the previous contact of its
-// first matched point
+// manifolds of the same pair. The contact takes the friction, twist, rolling & spinning impulses of the previous
+// contact of its first matched point
 func warmStartPair(manifolds, previous []constraint.Manifold) {
 	if len(previous) == 0 {
 		return
@@ -520,7 +520,7 @@ func warmStartPair(manifolds, previous []constraint.Manifold) {
 		// the impulses of the whole contact come from the previous contact of its first point
 		if source >= 0 {
 			manifold.FrictionImpulse, manifold.TwistImpulse = previous[source].FrictionImpulse, previous[source].TwistImpulse
-			manifold.RollingImpulse = previous[source].RollingImpulse
+			manifold.RollingImpulse, manifold.SpinningImpulse = previous[source].RollingImpulse, previous[source].SpinningImpulse
 		}
 	}
 }

@@ -40,7 +40,7 @@ func narrow(a, b *actor.RigidBody) (bool, mgl64.Vec3, float64, int) {
 }
 
 // regressions: the reference is measured on the working tree only
-func regressions(update bool) bool {
+func regressions(update bool, stackOffset int) bool {
 	fmt.Println("the regressions run on the working tree, not on v0.2.0")
 	return false
 }

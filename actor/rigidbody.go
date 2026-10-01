@@ -52,8 +52,11 @@ type Material struct {
 	DynamicFriction float64
 	// RollingResistance slows down the rolling spheres and capsules, usually in the range [0,1]
 	RollingResistance float64
-	LinearDamping     float64 // 0.0 - 1.0, typical: 0.01
-	AngularDamping    float64 // 0.0 - 1.0, typical: 0.05
+	// SpinningResistance slows down the spheres and capsules spinning on their contact (a top), without unit: the
+	// contact holds a torque of SpinningResistance * radius * its normal force around its normal. 0: it spins forever
+	SpinningResistance float64
+	LinearDamping      float64 // 0.0 - 1.0, typical: 0.01
+	AngularDamping     float64 // 0.0 - 1.0, typical: 0.05
 }
 
 func (material Material) GetMass() float64 {

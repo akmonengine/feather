@@ -190,6 +190,10 @@ type contactConstraint struct {
 	rollingImpulse    [2]float64
 	rollingA          [2]mgl64.Vec3 // angular velocity of A given by a unit impulse
 	rollingB          [2]mgl64.Vec3
+
+	// spinning resistance, around the normal: the row of the twist (twistMass), with its own bound
+	spinningResistance float64
+	spinningImpulse    float64
 }
 
 type solver struct {
@@ -392,6 +396,10 @@ func (s *solver) prepareConstraint(i int) {
 		for k := range c.tangents {
 			c.rollingImpulse[k] = manifold.RollingImpulse.Dot(c.tangents[k])
 		}
+	}
+	c.spinningResistance = constraint.ComputeSpinningResistance(manifold.BodyA.Material, manifold.BodyB.Material, radiusA, radiusB)
+	if c.spinningResistance > 0 {
+		c.spinningImpulse = manifold.SpinningImpulse
 	}
 	for j := 0; j < manifold.Count; j++ {
 		point := &manifold.Points[j]
@@ -791,6 +799,9 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 	if c.rollingResistance > 0 {
 		c.applyRolling(stateA, stateB, c.rollingImpulse)
 	}
+	if c.spinningResistance > 0 {
+		c.applyTwist(stateA, stateB, c.spinningImpulse)
+	}
 }
 
 // push solves the contacts with their spring, to push the overlap out. No friction (as Box3D): solved there, before
@@ -817,6 +828,7 @@ func (s *solver) relaxConstraint(c *contactConstraint) {
 	c.turnAnchors(stateA, stateB)
 	s.solveNormals(c, stateA, stateB, false)
 	c.solveRolling(stateA, stateB)
+	c.solveSpinning(stateA, stateB)
 	c.solveFriction(stateA, stateB)
 }
 
@@ -1038,6 +1050,33 @@ func (c *contactConstraint) solveRolling(stateA, stateB *bodyState) {
 	c.applyRolling(stateA, stateB, [2]float64{impulse[0] - previous[0], impulse[1] - previous[1]})
 }
 
+// ========== SPINNING RESISTANCE ==========
+// solveSpinning: a torque against the spin around the normal, up to spinningResistance * the normal impulse. The
+// contact of a ball is a patch, not a point: a patch of radius a under a load N holds the torque 2/3 µ a N (uniform
+// pressure). The model is the spinning friction of Bullet (a row around the normal, bounded by a length times the
+// normal impulse), the length given as the rolling resistance of Box2D (a ratio of the radius); warm started, and
+// bounded as a whole contact, not point by point. The twist of solveFriction (the lever arms of the points) stays
+func (c *contactConstraint) solveSpinning(stateA, stateB *bodyState) {
+	if c.spinningResistance <= 0 {
+		return
+	}
+	normalImpulse := 0.0
+	for j := 0; j < c.pointsCount; j++ {
+		normalImpulse += c.points[j].normalImpulse
+	}
+	wA, wB := &stateA.angularVelocity, &stateB.angularVelocity
+	spin := (wB[0]-wA[0])*c.normal[0] + (wB[1]-wA[1])*c.normal[1] + (wB[2]-wA[2])*c.normal[2]
+	previous := c.spinningImpulse
+	impulse, limit := previous-c.twistMass*spin, c.spinningResistance*normalImpulse
+	if impulse > limit {
+		impulse = limit
+	} else if impulse < -limit {
+		impulse = -limit
+	}
+	c.spinningImpulse = impulse
+	c.applyTwist(stateA, stateB, impulse-previous)
+}
+
 // ========== FRICTION ==========
 // solveFriction: Coulomb's law at the friction center (as Box3D & Jolt). The twist around the normal is held up to
 // µ Σ (lever arm × normal impulse) of the points, then the tangent impulse stays in a disk of radius µ Σ normal impulse
@@ -1152,6 +1191,7 @@ func (s *solver) storeImpulses() {
 func (s *solver) storeImpulsesConstraint(i int) {
 	c := &s.constraints[i]
 	c.manifold.RollingImpulse = c.tangents[0].Mul(c.rollingImpulse[0]).Add(c.tangents[1].Mul(c.rollingImpulse[1]))
+	c.manifold.SpinningImpulse = c.spinningImpulse
 	for j := 0; j < c.pointsCount; j++ {
 		point := &c.manifold.Points[j]
 		cp := &c.points[j]

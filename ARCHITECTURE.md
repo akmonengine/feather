@@ -117,12 +117,20 @@ Four levels, from the most precise to the widest:
    (stacks, high mass ratios, overlap recovery, house of cards, chains, far from the origin...), small in the tests,
    full in the bench (`go run . -scenes`, `go run . -compare` side by side with v0.2.0). Each scene holds (a derived
    criterion) and, where Box2D has the scene, does at least as well as Box2D v3.1.
-4. **Regressions** (`bench/regression.go`): 6 chaotic scenes and the scenes of Solver2D, compared to
+4. **Regressions** (`bench/regression.go`): 6 chaotic scenes, spinning tops and the scenes of Solver2D, compared to
    `bench/baseline.json`:
    - the fingerprint of the final state (identical on the same GOARCH);
    - quality metrics, 0.5 mm of tolerance on a depth, 0.1 % on an energy gain;
-   - the time of a step (+20 %) and of its phases (+30 %, over 5 % of the step), best of 3 runs, only on the machine
-     of the reference, and for the steps over 0.1 ms (under it, the noise of the timer dominates).
+   - the time of a step (+20 %) and of its phases (+30 %, over 5 % of the step), each the best of 3 runs, only on the
+     machine of the reference, and for the steps over 0.1 ms (under it, the noise of the timer dominates).
+
+   The 3 runs start at 3 depths of the stack, a third of a page of 4 KiB apart (`bench/stack.go`). The time of a phase
+   depends on where the stack lies in its page: `Tree.scan` copies AABBs on the stack, and at a few depths a write of
+   16 bytes straddles two pages (the broad phase of "solver2d confined": 0.084 ms instead of 0.046, 10 depths out of
+   512). The depth comes from the size of every frame above: 8 bytes more in a frame of the engine or of the bench
+   doubled the time of this phase with the same code. With the best run of each phase over the 3 depths, the 512
+   depths give 0.043 to 0.049 ms. `go run . -check -stack 2936` moves the stack of the scenes in its page (in bytes):
+   the result must stay the same.
 
 `World.Profile()` gives the time of each phase of the last step (broad phase, narrow phase, prepare, substeps,
 restitution, continuous collision, islands), without allocation.
@@ -135,7 +143,7 @@ restitution, continuous collision, islands), without allocation.
 - The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
   triangle during the step, and sink by a few mm before the next step.
 - The friction around the normal comes from the lever arms of the points: a ball spinning on itself on its single point
-  of contact never stops (no sleep).
+  of contact never stops (no sleep), unless its material has a `SpinningResistance` (0 by default).
 - A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
   the feature of the body above the triangle, the middle of the capsule is missed.
 - The restitution is applied once per step, with the approach velocity of the impact: a body not round (box,

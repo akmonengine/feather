@@ -56,6 +56,33 @@ There is no bounce under 1 m/s of impact (`RestitutionThreshold`), so resting bo
 on a flat ground, and a scene with balls never sleeps. The contact uses the largest value of both bodies, times the largest
 radius (0 for a box). A ball rolling at v stops after `v² / (2 * 5/7 * resistance * g)`.
 
+### Spinning resistance
+`SpinningResistance` (without unit, 0 by default) slows down the spheres and capsules spinning on their contact, like a
+top. Without it, a ball spinning around the vertical on its single point of contact never stops, and never sleeps.
+The contact uses the largest value of both bodies, times the largest radius (0 for a box, whose points already hold the
+twist by their lever arms): it holds a torque of `resistance * radius * normal force` around its normal, and nothing
+around the other axes (a rolling ball is not slowed down, see `RollingResistance`). It doesn't depend on the friction
+of the bodies: a ball without friction brakes its spin at the same rate.
+
+The largest radius of both shapes is used: a ball of radius 10 cm spinning on top of a static ball of radius 1 m brakes
+10 times faster than on a flat ground (the same holds for the rolling resistance). Give such a large round body a
+smaller resistance, or none.
+
+A ball of radius r spinning at ω slows down at `resistance * r * g / (2/5 * r²) = 5/2 * resistance * g / r` (rad/s²),
+and stops after `ω / (5/2 * resistance * g / r)`: 1.6 s at 20 rad/s for a ball of radius 10 cm with a resistance of
+0.05. It falls asleep 0.5 s after it stopped.
+
+The resistance stands for the width of the contact: a patch of radius `a` pressed uniformly holds a torque of
+`2/3 * µ * a * normal force`, so `resistance = 2/3 * µ * a / r`. The µ of this formula is part of the value you choose:
+the engine doesn't multiply the resistance by the friction of the materials.
+
+| Value | Radius of the patch (µ = 0.6) |
+|-------|-------------------------------|
+| 0 | a point: spins forever |
+| 0.01 | 2.5 % of the radius of the ball |
+| 0.05 | 12.5 % |
+| 0.2 | 50 % |
+
 ### Damping
 `LinearDamping` and `AngularDamping` (1/s) slow the body down: `v = v / (1 + h * damping)` at each substep.
 

@@ -686,6 +686,33 @@
         "substeps": 0.0021346566666666667
       }
     },
+    "spinning tops": {
+      "fingerprint": "bbcee7f022b515b2",
+      "quality": {
+        "awake": {
+          "value": 0,
+          "unit": ""
+        },
+        "last spin": {
+          "value": 1.3833333333333333,
+          "unit": "s"
+        },
+        "worst top drift": {
+          "value": 0.0690250563563366,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 0.4391468333333333,
+      "phasesMs": {
+        "broad phase": 0.012620683333333334,
+        "continuous": 0.009976388888888889,
+        "islands": 0.0009386222222222221,
+        "narrow phase": 0.028789683333333333,
+        "prepare": 0.04040793333333333,
+        "restitution": 0.009200916666666668,
+        "substeps": 0.3358570777777778
+      }
+    },
     "terrain piles": {
       "fingerprint": "ca16c8f217a79890",
       "quality": {

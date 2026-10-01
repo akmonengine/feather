@@ -4,6 +4,7 @@
 //	go run . [-only sim|epa|speed]                            # the working tree
 //	go run -tags v020 -modfile=go.v020.mod . [-only ...]      # v0.2.0 (XPBD), for comparison
 //	go run . -check                                           # the regressions against baseline.json (regression.go)
+//	go run . -check -stack 1024                               # the same, the stack moved in its page (stack.go)
 //	go run . -update                                          # write baseline.json, after a wanted change
 //	go run . -scenes ; go run . -compare                      # the scenes of Solver2D (reference.go)
 //
@@ -226,6 +227,7 @@ func main() {
 	part := flag.String("only", "", "sim, epa or speed (default: all)")
 	check := flag.Bool("check", false, "compare to the reference baseline.json, exit 1 on a regression")
 	update := flag.Bool("update", false, "write the reference baseline.json")
+	stackOffset := flag.Int("stack", 0, "with -check: where the stack of the scenes starts in its page of 4 KiB, in bytes (the speed must not depend on it)")
 	referenceScenes := flag.Bool("scenes", false, "run the scenes of Solver2D (bench/scenes) at their full size")
 	compare := flag.Bool("compare", false, "print the scenes of the working tree and of v0.2.0 side by side")
 	flag.Parse()
@@ -237,7 +239,7 @@ func main() {
 		return
 	}
 	if *check || *update {
-		if !regressions(*update) {
+		if !regressions(*update, *stackOffset) {
 			os.Exit(1)
 		}
 		return
