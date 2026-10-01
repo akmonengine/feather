@@ -28,6 +28,65 @@ are those whose exact AABBs overlap, with an awake dynamic body, sorted by the i
 sort): the list is the same as a search from scratch, and the same as the former uniform grid gave, so the solver keeps
 its order and its results bit for bit.
 
+## Collision filtering
+
+The filter is the one of the 3 engines Feather follows, reduced to what they share.
+
+**Layers and masks.** A body has a layer (one bit) and a mask; a pair collides if
+`a.Mask & b.Layer != 0 && b.Mask & a.Layer != 0`. It is the test of Box2D (`categoryBits` & `maskBits`, `b2Filter`:
+`include/box2d/types.h:268-277`; `b2ShouldShapesCollide`: `src/contact.c:469-478`, v3.1.0), of Bullet and of Jolt in its
+mask mode ("Two layers can collide if Object1.Group & Object2.Mask is non-zero and Object2.Group & Object1.Mask is
+non-zero", `ObjectLayerPairFilterMask.h:12` and `:45-49`, v5.3.0). PhysX leaves the test to the game (4 words of
+`PxFilterData`, `PxFiltering.h:365`, read by a filter shader, `:594`); its sample shader does a group table and masks
+(`ExtDefaultSimulationFilterShader.cpp:238-274`, 5.6.0). 32 layers, as the layers of Unity and the words of PhysX.
+
+**Not taken.** The signed group of Box2D (`groupIndex`, `types.h:279-285`: the same negative group never collides, the
+same positive group always does, before the masks): the ignored pairs and the joints do its job between 2 bodies, the
+layers between families, and a third rule which overrides the masks makes a filter hard to read. The broad phase layers
+of Jolt (`BroadPhaseLayer.h:12-17`: one tree per group of layers): Feather keeps its 2 trees, static and dynamic
+(Box2D v3 has one tree per body type, 3 of them: `b2BroadPhase.trees`, `src/broad_phase.h:28`). The group filter of Jolt (`GroupFilter.h:17-26`, `GroupFilterTable.h:96-116`: a bit table of the sub groups
+of a ragdoll, where `Ragdoll.cpp:192-204` disables each parent with its child): the table of pairs below gives the same
+result without a group per ragdoll.
+
+**Pairs which never collide.** One table of pairs of bodies, a map keyed by both pointers: O(1) per pair, and skipped
+when it is empty. A pair is in it for 2 reasons, kept together in its entry:
+- the game ignores it (`World.IgnoreCollision(a, b, ignore)`: `Physics.IgnoreCollision(collider1, collider2, ignore)`
+  of Unity; Box2D v3.1 has a joint for it, the filter joint, `b2CreateFilterJoint`, `src/joint.c:472-496`);
+- joints without `CollideConnected` link its bodies (`collideConnected` of the joints of Box2D, read by
+  `b2ShouldBodiesCollide`, `src/body.c:1848-1884`, which walks the joints of the body with the fewest joints;
+  `PxConstraintFlag::eCOLLISION_ENABLED` of PhysX, `PxConstraint.h:57`). The entry counts them.
+
+A pair leaves the table when it has no reason left. `CollideConnected` is read when the joint is added: the joint
+remembers it entered the table, and leaves it the same way.
+
+**Where.** In the broad phase, when the pairs of the step are emitted from the pairs kept (`Tree.scan`), after the
+tests of the AABBs and of the awake bodies: a resting pair doesn't reach the filter. Box2D filters when a pair is
+created (`b2PairQueryCallback`, `src/broad_phase.c:257` and `:265`) and must then destroy the contacts and reset the
+proxy when a filter changes (`b2Shape_SetFilter`, `src/shape.c:1209-1231`); Jolt filters at each step, in the search
+of the pairs (`Body::sFindCollidingPairsCanCollide`, `Body.inl:75`). Feather does as Jolt: the filter is 2 masks and,
+only when the table is not empty, a hash; in return a filter can change at any time, with nothing to invalidate.
+
+**Triggers.** A trigger is a body like the others in the broad phase: the filter applies before, a filtered pair sends
+no trigger event (the sensors of Box2D go through `b2ShouldShapesCollide` too, `src/sensor.c:78`). Unlike Box2D, the
+table of pairs applies to the triggers too, as it did in v0.3.0 for the bodies of a joint.
+
+**Continuous collision.** `stopAtImpact` queries the trees itself: it skips the bodies the fast body doesn't collide
+with, by the same test (`World.ShouldCollide`), as Box2D (`b2ContinuousQueryCallback`, `src/solver.c:241` and `:260`).
+
+**Queries only.** A body of empty mask collides with nothing, and still has its leaf in the tree with its layer. It is
+the "Query Only" collision of Unreal ("This body is used only for spatial queries (raycasts, sweeps, and overlaps). It
+cannot be used for simulation (rigid body, constraints)", Collision Response Reference) and a PhysX shape with
+`eSCENE_QUERY_SHAPE` without `eSIMULATION_SHAPE` (`PxShape.h:80-85`). No flag is needed: it follows from the masks.
+
+**Filter of the queries.** `QueryFilter`: a mask of layers and a few excluded bodies, as the `b2QueryFilter` of Box2D
+(`types.h:296-304`) and the `PxQueryFilterData` of PhysX (`PxQueryFiltering.h:134-147`). `Accepts(body)` reads the layer
+of the body, not its mask. It is a deviation, on purpose: Box2D tests both ways, the mask of the shape against the
+category of the query too (`src/world.c:2083`), and PhysX compares the query to a word of the shape kept apart from
+its simulation filter (`PxQueryFiltering.h:125-126`). In Feather the mask of a body only says what it collides with:
+a body of empty mask is still seen by the queries on its layer, which is what makes the "queries only" bodies. It is
+the `layerMask` of `Physics.Raycast` in Unity: the layer of the collider against the mask of the ray.
+The excluded bodies are searched one by one, as `IgnoreMultipleBodiesFilter` of Jolt (`BodyFilter.h:55-80`).
+
 ## Pair cache and warm start
 
 The contacts of a pair are kept with the pair of the broad phase. If a body moved less than 1 mm and turned less than

@@ -44,8 +44,8 @@ type World struct {
 	shift []int32 // buffer of RemoveBody
 	// the broad phase
 	tree Tree
-	// pairs of bodies linked by a joint that must not collide
-	jointPairs   map[pairKey]int
+	// pairs of bodies which never collide: ignored, or linked by a joint
+	filter       pairFilter
 	solverJoints []Joint
 	// 2 buffers: one for the contacts of this step, one for the previous step
 	buffers [2][]constraint.Manifold
@@ -83,11 +83,9 @@ func (w *World) AddJoint(joint Joint) {
 	base := joint.base()
 	w.islands.wake(base.BodyA)
 	w.islands.wake(base.BodyB)
-	if !base.CollideConnected {
-		if w.jointPairs == nil {
-			w.jointPairs = make(map[pairKey]int)
-		}
-		w.jointPairs[makePairKey(base.BodyA, base.BodyB)]++
+	base.filtering = !base.CollideConnected
+	if base.filtering {
+		w.filter.link(base.BodyA, base.BodyB, 1)
 	}
 }
 
@@ -101,11 +99,8 @@ func (w *World) RemoveJoint(joint Joint) {
 		base := joint.base()
 		w.islands.wake(base.BodyA)
 		w.islands.wake(base.BodyB)
-		if !base.CollideConnected {
-			key := makePairKey(base.BodyA, base.BodyB)
-			if w.jointPairs[key]--; w.jointPairs[key] <= 0 {
-				delete(w.jointPairs, key)
-			}
+		if base.filtering {
+			w.filter.link(base.BodyA, base.BodyB, -1)
 		}
 		return
 	}
@@ -134,17 +129,10 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	}
 
 	w.Events.forget(body)
-	// the bodies touching the removed body wake up (with their islands): they may have to fall.
-	// The sleeping bodies have no contact anymore: their AABB is used
+	// the bodies touching the removed body wake up (with their islands): they may have to fall
 	w.islands.remove(body)
-	aabb := body.AABB()
-	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
-	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
-	for _, other := range w.Bodies {
-		if other.IsSleeping && aabb.Overlaps(other.AABB()) {
-			w.islands.wake(other)
-		}
-	}
+	w.wakeNeighbors(body)
+	w.filter.forget(body)
 	// the contacts of the body leave: the contacts kept by the other pairs move down
 	n := 0
 	for i := range w.contacts {
@@ -158,6 +146,19 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	w.contacts = w.contacts[:n]
 	w.tree.shiftContacts(w.shift, w.step)
 	w.shift = w.shift[:0]
+}
+
+// wakeNeighbors: the sleeping bodies which collide with the body wake up, with their islands. The sleeping bodies have
+// no contact anymore: their AABB is used
+func (w *World) wakeNeighbors(body *actor.RigidBody) {
+	aabb := body.AABB()
+	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
+	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
+	for _, other := range w.Bodies {
+		if other.IsSleeping && aabb.Overlaps(other.AABB()) && w.ShouldCollide(body, other) {
+			w.islands.wake(other)
+		}
+	}
 }
 
 // workersHandle owns the workers of a World. When the World is not used anymore, the handle is collected
@@ -197,7 +198,7 @@ func (w *World) UpdateHeightfield(body *actor.RigidBody, minX, minZ, maxX, maxZ 
 	regionMinX, regionMaxX := (float64(minX-1)-halfX)*field.Scale.X(), (float64(maxX+1)-halfX)*field.Scale.X()
 	regionMinZ, regionMaxZ := (float64(minZ-1)-halfZ)*field.Scale.Z(), (float64(maxZ+1)-halfZ)*field.Scale.Z()
 	for _, other := range w.Bodies {
-		if !other.IsSleeping {
+		if !other.IsSleeping || !w.ShouldCollide(body, other) {
 			continue
 		}
 		bounds := localBounds(body.Transform, other.AABB())
@@ -304,6 +305,7 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	mark := time.Now()
 	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
 
+	w.tree.filter = &w.filter
 	w.tree.sync(w.Bodies, w.aabbs)
 	w.pairs = w.tree.findPairs(w.Bodies, w.aabbs, pool)
 	mark = w.lap(&w.profile.BroadPhase, mark)
@@ -377,10 +379,6 @@ func (w *World) computeAABB(i int) {
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
 	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
-	if len(w.jointPairs) > 0 && w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
-		w.counts[i] = 0
-		return
-	}
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
 		// against a static body, the contact exists before the body touches it, from its speed (the speculative CCD of

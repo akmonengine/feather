@@ -16,6 +16,7 @@ feather/
 ├── collision_heightfield.go # heightfields: triangles, inner edges, patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
 ├── tree.go             # broad phase: dynamic AABB trees, the pairs kept from a step to the next
+├── filter.go           # collision filtering: layers & masks, ignored pairs, linked bodies, the filter of the queries
 ├── event.go            # collision, trigger & sleep events
 ├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
@@ -30,13 +31,13 @@ Step(dt)
 ├── wake the sleeping bodies touched by a moving body
 ├── Phase 1: collision detection (once per step)
 │   ├── AABBs enlarged by the distance each body can travel during dt
-│   ├── broad phase: pairs of overlapping AABBs (AABB trees)
+│   ├── broad phase: pairs of overlapping AABBs (AABB trees) which pass the collision filters
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
 │   ├── events: pairs touching or overlapping (triggers are not solved)
 │   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
 ├── Phase 2: solver (substeps: articulations, then contacts and joints by color), then restitution
-├── continuous collision: the fast bodies are moved back to their first impact
+├── continuous collision: the fast bodies are moved back to their first impact (with the bodies they collide with)
 └── Phase 3: sleep islands & events
 ```
 
@@ -57,6 +58,30 @@ Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative s
 static body.
 Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
 (the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
+
+## Collision filtering
+`filter.go`. A pair is emitted by the broad phase (`Tree.scan`) only if it passes 2 filters, in this order:
+1. **the layers**: `actor.RigidBody.Layer` (one bit among 32) and `Mask`. `ShouldCollide(a, b)`: each body has its
+   layer in the mask of the other. `NewRigidBody` gives `LayerDefault` and `AllLayers`: everything collides.
+2. **the pairs which never collide**: one table (`pairFilter`, a map keyed by the pair of bodies, O(1) per pair), with
+   the 2 reasons a pair can have: ignored by the game (`World.IgnoreCollision`), or linked by joints without
+   `CollideConnected` (their count). A pair leaves the table with its last reason; a removed body leaves it with its
+   pairs. The table is read by the workers of the broad phase, and only written between 2 steps.
+
+The filters are read at each step: a change of `Layer`, `Mask` or of the table applies at the next step, the pair stays
+in the records of the broad phase (its stored AABBs still overlap) and is emitted again when the filter lets it.
+`World.SetFilter` and `World.IgnoreCollision` also wake the bodies up.
+
+| Where | What the filter does |
+|-------|----------------------|
+| broad phase | a filtered pair is not emitted: no narrow phase, no manifold, no contact |
+| triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event |
+| continuous collision | `stopAtImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
+| sleep | a filtered pair has no contact: it wakes nobody up and links no island. `RemoveBody` and `UpdateHeightfield` only wake the sleeping bodies which collide with the body |
+| queries | `QueryFilter{Mask, Excluded}.Accepts(body)`: the layer of the body is in the mask of the query, and the body is not excluded. The mask of the body is not read |
+
+A body of empty mask (`actor.NoLayers`) collides with nothing but keeps its leaf in the tree, with its layer: the
+"queries only" bodies.
 
 ## Solver
 See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dynamic bodies (`bodyState`):

@@ -23,7 +23,8 @@ const (
 // pairCacheCosMaxDeltaRotationDiv2: the dot product of 2 unit quaternions is the cosine of half their angle
 var pairCacheCosMaxDeltaRotationDiv2 = math.Cos(pairCacheMaxDeltaRotation / 2)
 
-// BroadPhase returns the pairs of bodies whose AABBs overlap, always in the same order (whatever the workers)
+// BroadPhase returns the pairs of bodies whose AABBs overlap and whose layers collide (ShouldCollide), always in the
+// same order (whatever the workers)
 func BroadPhase(bodies []*actor.RigidBody, workersCount int) []Pair {
 	boxes := make([]actor.AABB, len(bodies))
 	for i, body := range bodies {

@@ -36,6 +36,29 @@ body.AddForce(mgl64.Vec3{10, 0, 0}) // in N, during the next step
 world.Step(1.0 / 60.0)
 ```
 
+## Collision filtering
+Each body has a layer (one bit among 32) and a mask, the layers it collides with. 2 bodies collide if each one has its
+layer in the mask of the other. By default a body is on `actor.LayerDefault` and collides with every layer.
+
+```go
+const (
+	layerWorld actor.Layers = 1 << iota
+	layerPawn
+	layerDebris
+)
+pawn.Layer, pawn.Mask = layerPawn, layerWorld|layerPawn  // the pawns don't collide with the debris
+debris.Layer, debris.Mask = layerDebris, layerWorld      // the debris only collide with the world
+
+world.IgnoreCollision(tail, pelvis, true) // this pair never collides, whatever its layers
+world.AddJoint(joint)                     // neither do the 2 bodies of a joint, unless joint.CollideConnected
+
+decor.Mask = actor.NoLayers               // "queries only": no contact, seen by the queries on its layer
+filter := feather.QueryFilter{Mask: layerWorld | layerDebris, Excluded: []*actor.RigidBody{pawn}}
+```
+The filtered pairs leave in the broad phase: no narrow phase, no contact, no event, nobody wakes up. The triggers and
+the continuous collision go through the same filter. See the [physics guide](PHYSICS_GUIDE.md#collision-filtering) and
+the [algorithms](ALGORITHMS.md#collision-filtering).
+
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
 It is made of substeps, soft constraints, warm starting and relaxation:
@@ -156,12 +179,17 @@ cd bench && go run . -scenes    # the scenes at full size (-compare: with v0.2.0
 - W. J. Stronge, Impact Mechanics (2000): Poisson's hypothesis for the restitution
 - Brian Mirtich, Impulse-based Dynamic Simulation of Rigid Body Systems (1996): conservative advancement
 - Solver2D, the samples of the reference scenes: https://github.com/erincatto/solver2d (MIT)
+- Collision filtering: Box2D v3.1 (`b2Filter`, `b2ShouldShapesCollide`, the filter joint), Jolt 5.3
+  (`ObjectLayerPairFilterMask`, `GroupFilterTable`), PhysX 5.6 (`PxFilterData`, `PxShapeFlag`,
+  https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyCollision.html#collision-filtering),
+  Unreal "Query Only" (https://dev.epicgames.com/documentation/en-us/unreal-engine/collision-response-reference-in-unreal-engine),
+  Unity `Physics.IgnoreCollision` (https://docs.unity3d.com/ScriptReference/Physics.IgnoreCollision.html)
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
 Feather is written from the publications and the documentation of these projects:
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
-  the graph coloring, the continuous collision
+  the graph coloring, the continuous collision, the category & mask bits of the collision filter
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
   the contact patches, the body pair cache
 

@@ -12,7 +12,9 @@ import (
 // ========== CONTINUOUS COLLISION ==========
 // The speculative contacts stop most of the fast bodies. They can miss a body accelerated by the solver during the step:
 // as in Box2D v3, after the solver, a fast body is moved back to its first impact with a static body (or with any body
-// for a bullet), found along its motion. Its velocity is kept: the contact of the next step stops it.
+// for a bullet), found along its motion. Its velocity is kept: the contact of the next step stops it. A body is only
+// stopped by the bodies it collides with (World.ShouldCollide, as the continuous collision of Box2D skips the filtered
+// shapes and bodies).
 
 const (
 	// continuousSafetyFactor: a body is fast when it moves more than half of its smallest extent during a step (Box2D)
@@ -105,7 +107,7 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 	fraction := 1.0
 	for _, index := range scratch.candidates {
 		other := w.Bodies[index]
-		if other == body || other.IsTrigger || w.jointPairs[makePairKey(body, other)] > 0 {
+		if other == body || other.IsTrigger || !w.ShouldCollide(body, other) {
 			continue
 		}
 		// the bullets against all the bodies, the other bodies against the static bodies only

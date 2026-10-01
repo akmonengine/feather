@@ -39,7 +39,7 @@ type JointBase struct {
 	// LocalFrameA & LocalFrameB: the anchor and the orientation of the joint in the local space of each body
 	LocalFrameA actor.Transform
 	LocalFrameB actor.Transform
-	// CollideConnected: if false, the 2 bodies don't collide with each other
+	// CollideConnected: if false, the 2 bodies don't collide with each other. Read when the joint is added to the world
 	CollideConnected bool
 	// Hertz & DampingRatio: the softness of the joint. 0 hertz = DefaultJointHertz
 	Hertz        float64
@@ -56,6 +56,8 @@ type JointBase struct {
 	linearImpulse mgl64.Vec3
 	// inArticulation: the point constraint is solved with the other joints of its tree (articulation.go)
 	inArticulation bool
+	// filtering: the joint put its bodies in the pairs which never collide, when it was added (filter.go)
+	filtering bool
 }
 
 func (j *JointBase) base() *JointBase { return j }

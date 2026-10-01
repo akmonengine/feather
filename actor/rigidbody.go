@@ -28,6 +28,20 @@ const (
 	DefaultTimeToSleep = 0.5
 )
 
+// Layers is a set of collision layers, one bit per layer (32 layers)
+type Layers uint32
+
+const (
+	// LayerDefault: the layer of a body created by NewRigidBody
+	LayerDefault Layers = 1
+
+	// AllLayers: the mask of a body created by NewRigidBody, it collides with every layer
+	AllLayers Layers = math.MaxUint32
+
+	// NoLayers: the mask of a body which collides with nothing (see the "queries only" recipe of PHYSICS_GUIDE.md)
+	NoLayers Layers = 0
+)
+
 type Material struct {
 	Density     float64
 	mass        float64
@@ -78,6 +92,11 @@ type RigidBody struct {
 	Material Material
 	BodyType BodyType // Dynamic or Static
 
+	// Layer of the body (one bit), and Mask: the layers it collides with. 2 bodies collide if each one has its layer
+	// in the mask of the other
+	Layer Layers
+	Mask  Layers
+
 	// Collision shape
 	Shape ShapeInterface // The collision shape
 	aabb  AABB
@@ -98,6 +117,8 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 		Shape:     shape,
 		BodyType:  bodyType,
 		Velocity:  mgl64.Vec3{0, 0, 0},
+		Layer:     LayerDefault,
+		Mask:      AllLayers,
 	}
 
 	// Calculate mass data based on body type

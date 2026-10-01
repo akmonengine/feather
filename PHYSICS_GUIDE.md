@@ -69,7 +69,8 @@ ball.EnableTwistLimit, ball.TwistMin, ball.TwistMax = true, -0.2, 0.2
 world.AddJoint(ball)
 ```
 - `Hertz` & `DampingRatio`: the softness of the joint (60 Hz and 2 by default, capped at 1/4 of the substeps rate).
-- `CollideConnected` (false by default): the 2 bodies of the joint don't collide with each other.
+- `CollideConnected` (false by default): the 2 bodies of the joint don't collide with each other. Set it before
+  `AddJoint`: it is read when the joint is added (see [Collision filtering](#collision-filtering)).
 - The drive of the ball joint (`DriveTarget`, `DriveHertz`, `DriveDampingRatio`) brings the child to a target rotation,
   like a muscle: a damping ratio of 1 reaches it without overshoot.
 - The motor of the hinge turns at `MotorSpeed` with at most `MaxMotorTorque`.
@@ -85,6 +86,69 @@ world.AddJoint(slider)
   and 2 swings (a cone if both are limited).
 - Its drives bring B to `DriveTargetPosition` and `DriveTargetRotation` (in the frame A).
 - The limits are soft: a huge force bends them a little (under 0.5° for 5 g at the end of an arm).
+
+### Collision filtering
+Who collides with whom is decided by 3 things, tested in the broad phase before any contact is computed.
+
+**Layers and masks.** Each body has a `Layer` (one bit among 32) and a `Mask` (the layers it collides with). 2 bodies
+collide if each one has its layer in the mask of the other: one refusal is enough. A new body is on
+`actor.LayerDefault` with the mask `actor.AllLayers`: everything collides, as before the layers existed.
+```go
+const (
+	layerWorld actor.Layers = 1 << iota // the layers of the game: one bit each
+	layerPawn
+	layerDebris
+)
+ground.Layer = layerWorld
+pawn.Layer, pawn.Mask = layerPawn, layerWorld|layerPawn // not the debris
+debris.Layer, debris.Mask = layerDebris, layerWorld     // only the world
+
+world.SetFilter(pawn, layerPawn, layerWorld) // during the game: the same, and the bodies resting on it wake up
+```
+- Give each body one layer. A layer of 0 collides with nothing and is seen by no query.
+- A layer of several bits is allowed, as in Box2D, Jolt and Bullet: the body is on each of these layers. It collides
+  with a body whose mask has at least one of them, and a query sees it if its mask has at least one of them.
+- `Layer` and `Mask` can be written at any time, they are read at each step. Written directly, nobody wakes up: a
+  sleeping body resting on a body which doesn't collide with it anymore keeps floating until something wakes it up.
+  `World.SetFilter` writes them and wakes up the body and the sleeping bodies it collided with. Called with the layer
+  and the mask the body already has, it does nothing: it can be called at each frame.
+- `World.SetFilter` doesn't wake up the bodies the body collides with from now on. A static body which becomes solid
+  around a sleeping body leaves it asleep, inside: it is pushed out when something else wakes it up. It is the same
+  for a body added to the world with `AddBody`, and in Box2D.
+
+**Ignored pairs.** `world.IgnoreCollision(a, b, true)`: these 2 bodies never collide, whatever their layers; their
+other pairs are not changed. `false` restores the pair. For the pair a layer can't describe: the tail and the pelvis it
+starts from (the tail still hits the legs), a projectile and the body which fires it.
+- The cost is a hash per pair of overlapping AABBs with an awake body, only when the world has ignored pairs or joints.
+- Both bodies wake up when the pair changes. The pair is forgotten when one of its bodies is removed from the world.
+
+**Linked bodies.** The 2 bodies of a joint don't collide, unless the joint has `CollideConnected`: the neighboring
+capsules of a ragdoll overlap at their joints and must not push each other. It is the same table as the ignored pairs:
+a pair ignored and linked stays filtered when the joint is removed, and collides again when it is restored too.
+
+A filtered pair has no contact: it is not solved, sends no collision or trigger event, wakes nobody up, and a fast body
+is not stopped by a body it doesn't collide with (continuous collision). A trigger is filtered like any body, and the
+test goes both ways: the mask of the trigger must have the layer of the bodies it detects, and the mask of these
+bodies must have the layer of the trigger. With only one of them, no event is sent.
+
+#### Queries only
+A body of empty mask collides with nothing, but stays in the broad phase with its layer: the world queries (ray,
+sweep, overlap) see it. It is the recipe for a decor seen by the rays which costs nothing in the narrow phase nor in
+the solver. In the broad phase it costs what any static body costs, about 24 ns per step even far from everything
+(its AABB is computed and compared to its leaf at each step), plus about 10 ns per dynamic body overlapping it:
+```go
+decor := actor.NewRigidBody(transform, shape, actor.BodyTypeStatic, 0)
+decor.Layer, decor.Mask = layerDecor, actor.NoLayers
+world.AddBody(decor)
+
+// a query which sees the decor and the world, but not the character casting it
+filter := feather.QueryFilter{Mask: layerDecor | layerWorld, Excluded: []*actor.RigidBody{character}}
+filter.Accepts(decor) // true: the layer of the body is in the mask of the query, its own mask is not read
+```
+- Make it static: no pair, no contact, no event, nothing in the solver. A dynamic body of empty mask is still
+  integrated: it falls through everything under gravity.
+- It wakes nobody up, neither when it moves nor when it is removed.
+- `QueryFilter{}` (empty mask) sees nothing: use `actor.AllLayers` to see every layer.
 
 ### Terrain
 ```go
