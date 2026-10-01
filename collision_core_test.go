@@ -67,11 +67,20 @@ func TestSphereInsideBox(t *testing.T) {
 	}
 }
 
+// roundedShapesOnBox: a box with a sphere and a lying capsule resting on it
+func roundedShapesOnBox() (box, sphere, capsule *actor.RigidBody) {
+	box = createBox(mgl64.Vec3{}, mgl64.Vec3{0.5, 0.5, 0.5}, actor.BodyTypeStatic)
+	sphere = createSphere(mgl64.Vec3{0.3, 0.74, 0.2}, 0.25, actor.BodyTypeDynamic)
+	capsule = createCapsule(mgl64.Vec3{0, 0.8, 0}, mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1}), 0.4, 0.3, actor.BodyTypeDynamic)
+	return box, sphere, capsule
+}
+
 // The cores of the rounded shapes don't allocate: the core is the shape itself, seen through another type
 func TestCoresDoNotAllocate(t *testing.T) {
-	box := createBox(mgl64.Vec3{}, mgl64.Vec3{0.5, 0.5, 0.5}, actor.BodyTypeStatic)
-	sphere := createSphere(mgl64.Vec3{0.3, 0.74, 0.2}, 0.25, actor.BodyTypeDynamic)
-	capsule := createCapsule(mgl64.Vec3{0, 0.8, 0}, mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1}), 0.4, 0.3, actor.BodyTypeDynamic)
+	if raceEnabled {
+		t.Skip("sync.Pool drops its items with the race detector")
+	}
+	box, sphere, capsule := roundedShapesOnBox()
 	var m constraint.Manifold
 	allocs := testing.AllocsPerRun(100, func() {
 		Collide(sphere, box, SpeculativeDistance, &m)
@@ -80,6 +89,12 @@ func TestCoresDoNotAllocate(t *testing.T) {
 	if allocs != 0 {
 		t.Errorf("the rounded shapes against a box allocate %.1f times per run, want 0", allocs)
 	}
+}
+
+// A capsule lying on a box touches it by its segment: 2 points
+func TestLyingCapsuleOnBoxHasTwoPoints(t *testing.T) {
+	box, _, capsule := roundedShapesOnBox()
+	var m constraint.Manifold
 	if !Collide(box, capsule, SpeculativeDistance, &m) || m.Count != 2 {
 		t.Errorf("the capsule lying on the box has %d points, want 2", m.Count)
 	}
