@@ -21,6 +21,8 @@ All shapes live in the `actor` package and implement `actor.ShapeInterface`.
 | `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; its segment against the other shapes (GJK distance + radius) |
 | `Heightfield` | a grid of heights (static only), 2 triangles per cell | GJK/EPA against each triangle under the body |
 
+Each shape also casts a ray on itself, in its local space (`CastRay`): the world queries are built on it.
+
 ```go
 body := actor.NewRigidBody(
 	actor.Transform{Position: mgl64.Vec3{0, 1, 0}, Rotation: mgl64.QuatIdent()},
@@ -58,6 +60,45 @@ filter := feather.QueryFilter{Mask: layerWorld | layerDebris, Excluded: []*actor
 The filtered pairs leave in the broad phase: no narrow phase, no contact, no event, nobody wakes up. The triggers and
 the continuous collision go through the same filter. See the [physics guide](PHYSICS_GUIDE.md#collision-filtering) and
 the [algorithms](ALGORITHMS.md#collision-filtering).
+
+## Queries
+The world answers 3 questions about its bodies, static or dynamic, awake or asleep: what is on this segment (a ray),
+what does this shape touch first if it moves there (a sweep), what is in this volume (an overlap). A query takes an
+origin and a translation, and gives its hit at a fraction of the translation, from 0 to 1.
+
+```go
+filter := feather.DefaultQueryFilter() // every layer, without the triggers
+filter.Excluded = []*actor.RigidBody{character}
+
+// the ground under a foot: the first body on 2 m down
+if hit, ok := world.Raycast(foot, mgl64.Vec3{0, -2, 0}, filter); ok {
+	_ = hit.Body     // the body, hit.Triangle on a heightfield
+	_ = hit.Point    // foot + hit.Fraction * translation
+	_ = hit.Normal   // out of the body
+}
+
+// every body on a line of sight, sorted by fraction, in a buffer reused from a call to the next
+hits = world.RaycastAll(eye, target.Sub(eye), filter, hits[:0])
+
+// a camera arm: how far a sphere of 20 cm can move back before it touches something
+ball := &actor.Sphere{Radius: 0.2}
+hit, ok := world.Sweep(ball, actor.Transform{Position: head, Rotation: mgl64.QuatIdent()}, back, filter)
+
+// the bodies in a blast of 3 m, in the order of world.Bodies
+bodies = world.Overlap(&actor.Sphere{Radius: 3}, actor.Transform{Position: center, Rotation: mgl64.QuatIdent()}, filter, bodies[:0])
+
+world.SyncQueries() // after the game added, moved or reshaped bodies, if a query must see them before the next Step
+```
+- A ray is exact on each shape. A moving shape (a sphere, a capsule, a box) stops within 1 µm of the body it hits
+  (0.1 mm between 2 boxes), never in it.
+- A ray or a shape which starts in a body hits it at the fraction 0, the normal against its direction.
+- The top side of a heightfield only is hit; a hole is not.
+- At the same fraction, the body of the lowest index in `World.Bodies` is hit: the results don't depend on the workers
+  nor on the shape of the trees.
+- No allocation, no write: any number of goroutines can run queries together while nothing writes the world. A query
+  during `Step` panics.
+
+See the [physics guide](PHYSICS_GUIDE.md#queries) and the [algorithms](ALGORITHMS.md#queries).
 
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
@@ -156,14 +197,17 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
   free flight.
 - **Scenes of Solver2D** (`bench/scenes`): the samples of Erin Catto's Solver2D in 3D, each checked, and compared to
   Box2D v3.1 on the same scenes (the reference: Feather must do at least as well; the known gaps are followed by #821).
-- **Regressions** (`bench/`): 7 scenes (piles, pyramid, joint chain, rain on a terrain, spinning tops) and the scenes of Solver2D against a committed reference:
-  fingerprint, quality and speed per phase (`World.Profile`).
+- **Regressions** (`bench/`): 7 scenes (piles, pyramid, joint chain, rain on a terrain, spinning tops), 2 scenes of
+  queries and the scenes of Solver2D against a committed reference: fingerprint, quality and speed per phase
+  (`World.Profile`).
+- **Queries** (`query_*_test.go`): each query against a walk of every body, on 300 bodies of every kind.
 ````
 go test ./...
 cd bench && go run . -check     # exit 1 on a regression
 cd bench && go run . -update    # after a wanted change
 cd bench && go test ./...       # the scenes of Solver2D
 cd bench && go run . -scenes    # the scenes at full size (-compare: with v0.2.0)
+cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
 ````
 
 ## Sources
@@ -187,12 +231,22 @@ cd bench && go run . -scenes    # the scenes at full size (-compare: with v0.2.0
 - Spinning resistance: Bullet 3.25 (`btCollisionObject::setSpinningFriction`, `setupTorsionalFrictionConstraint`;
   https://github.com/bulletphysics/bullet3), PhysX 5.6 (`PxShape::setTorsionalPatchRadius`), Box3D & Box2D v3.1 (the
   rolling resistance)
+- Queries: Box3D (`b3World_CastRay`, `b3World_CastShape`, `b3World_OverlapShape`, `b3DynamicTree_RayCast`,
+  `b3ShapeCast`, `b3ShapeCastHeightField`; https://github.com/erincatto/box3d, commit 9f998c8), Box2D v3.1 ("refit BVH",
+  docs/simulation.md), Jolt 5.3 (`RaySphere.h`, `RayCapsule.h`, `RayAABox.h`, `PlaneShape::CastRay`, `RayCast.h`),
+  PhysX 5.6 (`PxSceneQuerySystem.h`, `GuRaycastTests.cpp`), Unity (`Physics.Raycast`, `Physics.SyncTransforms`,
+  `QueryTriggerInteraction`), Unreal (`FHitResult::bStartPenetrating`,
+  https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/FHitResult)
+- John Amanatides & Andrew Woo, A Fast Voxel Traversal Algorithm for Ray Tracing (Eurographics 1987): the walk of a
+  grid by a ray
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
 Feather is written from the publications and the documentation of these projects:
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
+- [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the queries (an origin and a translation, the ray
+  through a tree, the ray on a sphere)
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
   the contact patches, the body pair cache
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance)

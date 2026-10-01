@@ -63,6 +63,48 @@
         "substeps": 0.039858965
       }
     },
+    "queries scattered": {
+      "fingerprint": "f3ff0fda0fcc3047",
+      "quality": {
+        "missed the ground": {
+          "value": 0,
+          "unit": ""
+        },
+        "woken by the queries": {
+          "value": 0,
+          "unit": ""
+        }
+      },
+      "stepMs": 59.397309,
+      "phasesMs": {
+        "all hits level 50 m": 14.438060333333333,
+        "capsule level 2 m": 15.321385666666666,
+        "overlap sphere 1 m": 7.092214333333334,
+        "ray down 2 m": 3.834362,
+        "ray level 50 m": 9.029888,
+        "sphere down 2 m": 6.684974333333333,
+        "sync queries": 2.8205080000000002
+      }
+    },
+    "queries terrain": {
+      "fingerprint": "1cf1e9dea6fedaed",
+      "quality": {
+        "missed the terrain": {
+          "value": 0,
+          "unit": ""
+        },
+        "worst height of a ray": {
+          "value": 5.329070518200751e-12,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 46.67909433333333,
+      "phasesMs": {
+        "ray down on the terrain": 2.8225343333333335,
+        "ray of 1000 m across the terrain": 2.6169186666666664,
+        "sphere down on the terrain": 41.23964133333333
+      }
+    },
     "rain on terrain": {
       "fingerprint": "ce4a4303727cef5d",
       "quality": {

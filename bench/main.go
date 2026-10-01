@@ -6,6 +6,7 @@
 //	go run . -check                                           # the regressions against baseline.json (regression.go)
 //	go run . -check -stack 1024                               # the same, the stack moved in its page (stack.go)
 //	go run . -update                                          # write baseline.json, after a wanted change
+//	go run . -queries                                         # the cost of the queries (queries.go)
 //	go run . -scenes ; go run . -compare                      # the scenes of Solver2D (reference.go)
 //
 // Every scene runs at the setting of each version, one worker: 60 Hz with 8 sub-steps for the working tree (the
@@ -230,7 +231,12 @@ func main() {
 	stackOffset := flag.Int("stack", 0, "with -check: where the stack of the scenes starts in its page of 4 KiB, in bytes (the speed must not depend on it)")
 	referenceScenes := flag.Bool("scenes", false, "run the scenes of Solver2D (bench/scenes) at their full size")
 	compare := flag.Bool("compare", false, "print the scenes of the working tree and of v0.2.0 side by side")
+	queries := flag.Bool("queries", false, "print the cost of the queries: rays, sweeps, overlaps")
 	flag.Parse()
+	if *queries {
+		queryCosts()
+		return
+	}
 	if *referenceScenes || *compare {
 		ok := *referenceScenes && runScenes() || *compare && compareScenes()
 		if !ok {

@@ -72,6 +72,11 @@ func (t *triangleShape) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance f
 	return contacts
 }
 
+// CastRay: a ray is cast on the heightfield, not on its triangles
+func (t *triangleShape) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (actor.RayHit, bool) {
+	return actor.RayHit{}, false
+}
+
 // triangleContact: the points of a triangle, in heightfieldScratch.points, with their normal (from the terrain to the body).
 // A witness contact is only used if its patch has no other contact
 type triangleContact struct {

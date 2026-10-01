@@ -3,6 +3,7 @@ package feather
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akmonengine/feather/actor"
@@ -58,6 +59,9 @@ type World struct {
 
 	// profile of the last step
 	profile Profile
+
+	// stepping: a step is running, the queries panic (query.go)
+	stepping atomic.Bool
 
 	// parallelFrom: the step runs on several goroutines from this count of bodies (minParallelBodies if 0). The tests
 	// lower it, to run the parallel paths on small scenes
@@ -217,6 +221,7 @@ func (w *World) Step(dt float64) {
 	if dt <= 0 {
 		return
 	}
+	w.stepping.Store(true)
 	workers := max(DefaultWorkers, w.Workers)
 	substeps := max(1, w.Substeps)
 	contactHertz := w.ContactHertz
@@ -276,6 +281,13 @@ func (w *World) Step(dt float64) {
 
 	// Phase 3: Sleep & events
 	w.islands.update(s, dt)
+	mark = w.lap(&w.profile.Islands, mark)
+
+	// the trees follow the bodies moved by the step, for the queries: the events are sent after, their listeners can
+	// run queries
+	w.syncMoved()
+	mark = w.lap(&w.profile.BroadPhase, mark)
+	w.stepping.Store(false)
 
 	w.Events.processSleepEvents(w.Bodies)
 	w.Events.flush()
@@ -294,19 +306,9 @@ func (w *World) lap(phase *time.Duration, mark time.Time) time.Time {
 // with the static bodies exist before the bodies touch (speculative contacts: the speculative CCD of PhysX, the
 // "Continuous Speculative" mode of Unity)
 func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manifold {
-	if cap(w.aabbs) < len(w.Bodies) {
-		w.aabbs = make([]actor.AABB, len(w.Bodies))
-	}
-	w.aabbs = w.aabbs[:len(w.Bodies)]
 	w.dt = dt
-	if w.aabbJob == nil {
-		w.aabbJob = w.computeAABB
-	}
 	mark := time.Now()
-	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
-
-	w.tree.filter = &w.filter
-	w.tree.sync(w.Bodies, w.aabbs)
+	w.syncTrees(pool)
 	w.pairs = w.tree.findPairs(w.Bodies, w.aabbs, pool)
 	mark = w.lap(&w.profile.BroadPhase, mark)
 
@@ -333,6 +335,37 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	manifolds := compactManifolds(w.manifolds, w.offsets, w.counts)
 	w.lap(&w.profile.NarrowPhase, mark)
 	return manifolds
+}
+
+// syncTrees: the trees of the broad phase take the bodies of the world at their AABBs, enlarged by the distance they
+// can travel during a step of w.dt. It runs at the start of a step, for its pairs, and in SyncQueries, for the queries:
+// Feather doesn't know what the game wrote, every body is tested. With syncMoved at the end of a step, all three give
+// the same AABBs for the bodies which didn't change, so that a body is put back in its tree once (Tree.update compares
+// the AABB of a static body bit for bit)
+func (w *World) syncTrees(pool *workerPool) {
+	if cap(w.aabbs) < len(w.Bodies) {
+		w.aabbs = make([]actor.AABB, len(w.Bodies))
+	}
+	w.aabbs = w.aabbs[:len(w.Bodies)]
+	if w.aabbJob == nil {
+		w.aabbJob = w.computeAABB
+	}
+	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
+
+	w.tree.filter = &w.filter
+	w.tree.sync(w.Bodies, w.aabbs)
+}
+
+// syncMoved: at the end of a step, the trees take the bodies the step moved, at the AABBs of syncTrees: the bodies of
+// the solver, awake when the step started or woken by it (the continuous collision and the sleep only write these).
+// The static and the sleeping bodies are not read: a world asleep pays nothing. As the last stage of a step of Box2D
+// v3, which only enlarges the AABBs of the bodies which left them ("for shapes that have moved significantly",
+// docs/simulation.md)
+func (w *World) syncMoved() {
+	for _, i := range w.solver.stateBody {
+		w.computeAABB(int(i))
+		w.tree.update(i, w.Bodies[i], w.aabbs[i])
+	}
 }
 
 // wakeTouched: a sleeping body touched by an awake dynamic body wakes up with its island (as in Box2D & Jolt).

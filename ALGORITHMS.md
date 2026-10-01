@@ -7,6 +7,7 @@
 5. [Joints](#joints)
 6. [Heightfield](#heightfield)
 7. [Continuous collision](#continuous-collision)
+8. [Queries](#queries)
 
 ## Broad phase
 
@@ -421,3 +422,135 @@ to the origin (Voronoi regions, Ericson 5.1 & 9.5).
 
 A sleeping body touched by an awake body wakes up with its island during the collision detection, and gets its contacts
 in the same step (like Jolt).
+
+## Queries
+A ray, a moving shape and an overlap, on the trees of the broad phase. Sources read: Box3D (commit `9f998c8`), Box2D
+v3.1.0, Jolt v5.3.0, PhysX 5.6.0, the ScriptReference of Unity, the API reference of Unreal.
+
+**Convention.** A query is an origin and a translation, its hit is at a fraction of the translation, from 0 to 1: the
+convention of Box3D (`b3World_CastRay`, `b3World_CastShape`, `include/box3d/box3d.h:83-107`; `b3RayResult`,
+`types.h:1353-1386`) and of Jolt, where PhysX and Unity take a unit direction and a distance. No direction to
+normalize, and a translation without length has a meaning: a point. The results come by value or in a buffer of the
+caller, as the `NonAlloc` queries of Unity, where Box3D and Jolt call a function for each hit (`b3CastResultFcn`,
+`types.h:100-117`): in Go, a closure given to a method escapes and allocates.
+
+**The trees between 2 steps.** A step leaves the trees up to date for the queries which follow it, as the last stage of
+a step of Box2D v3: "Refitting [...] is necessary to ensure the BVH is valid for subsequent queries, such as ray casts"
+(`docs/simulation.md:1913-1917`; `b2Solve`, `src/solver.c:1881`). As in Box2D, which only enlarges the AABBs "for
+shapes that have moved significantly", the end of a step only reads the bodies the step moved, the bodies of its
+solver: neither the static bodies nor the sleeping ones (`World.syncMoved`). What the game writes is taken on demand by
+`SyncQueries`: `Physics.SyncTransforms` of Unity ("Do use it after Transform changes [...] if you're immediately
+performing a physics query"), `flushUpdates` of PhysX (`PxSceneQuerySystem.h:143-156`). Not taken: the lazy update of
+PhysX at the first query, which writes the scene from a query and needs a lock; the update at each write of Box2D
+(`b2Body_SetTransform`, `src/body.c:681-728`), the fields of a body of Feather being public.
+
+**Ray through a tree** (`aabbTree.cast`), as `b3DynamicTree_RayCast` of Box3D (`src/dynamic_tree.c:1062-1188`): in
+depth with a fixed stack, the segment tested by slabs against the AABB of both children of a node, the closest child
+walked first (`:1124-1136`), and the segment shortened at each hit (`:1163-1171`), which drops the nodes it enters
+further. Differences: the children are ordered by the fraction where the segment enters them, not by the distance of
+their center; a node entered exactly at the best fraction is still walked, for the rule of the lowest index; when the
+stack is full, a child is walked at once by a call instead of being dropped (Box3D asserts). The inverse of the
+translation is kept finite: a segment starting in the plane of a face of an AABB would give 0 × ∞. For a moving shape,
+the segment is the path of the center of its AABB and the AABBs of the nodes are enlarged by its half sizes
+(`b3DynamicTree_BoxCast`, `dynamic_tree.c:1191`).
+
+**Ray on a shape** (`CastRay`, in the local space of the shape), analytic on each:
+
+| Shape | Method | Source |
+|---|---|---|
+| sphere | the closest point of the line to the center, then its distance to the surface along the line | `b3RayCastSphere`, Box3D `src/sphere.c:62-137` (after "Precision Improvements for Ray/Sphere Intersection", Ray Tracing Gems, 2019); the quadratic of Jolt `Geometry/RaySphere.h:17-40` loses digits far from the sphere; Ericson 5.3.2 |
+| box | slabs: the ray is in the box while it is between its 3 pairs of faces | Jolt `Geometry/RayAABox.h`; PhysX `GuIntersectionRayBox.cpp:59`; Ericson 5.3.3 |
+| capsule | the infinite cylinder, then the spheres of both ends if the ray enters the cylinder beside the segment | Jolt `Geometry/RayCapsule.h:19-34`, `RayCylinder.h`; Box3D `src/capsule.c:99` solves the closest points of the 2 segments instead; Ericson 5.3.7 |
+| plane | the half space under the plane, in world space | Jolt `PlaneShape::CastRay`, `PlaneShape.cpp:167-190`; Ericson 5.3.1 |
+| heightfield | a walk of the cells, then the planes of the 2 triangles of each cell | below |
+
+The sections of Ericson (*Real-Time Collision Detection*, chapter 5, "Intersecting Lines, Rays, and (Directed)
+Segments") are given by their titles in its table of contents.
+
+**Start in a shape.** The shapes are solid: a ray which starts in a sphere, a box, a capsule or under a plane hits at
+the fraction 0, the normal against its direction; so does a moving shape which overlaps a body. It is the choice of
+PhysX (`GuRaycastTests.cpp:97-100`, `:147-150`; `hadInitialOverlap`, `PxGeometryHit.h:121`), of Jolt
+(`mTreatConvexAsSolid = true`, `RayCast.h:83-84`), of Unreal (`FHitResult::bStartPenetrating`: "Whether the trace
+started in penetration, i.e. with an initial blocking overlap") and of the raw casts of Box3D (`sphere.c:81-86`,
+`distance.c:1084-1100`). Not taken: Unity ("Raycasts will not detect Colliders for which the Raycast origin is inside
+the Collider") and `b3World_CastRayClosest` (`physics_world.c:3000`), where a camera arm starting against a wall goes
+through it. The caller who wants to ignore the body excludes it.
+
+**Start in exact contact.** A moving shape only "starts in" a body it penetrates. In exact contact, it hits at the
+fraction 0, with the normal of the contact, if it moves towards the body, and hits nothing if it moves away or along
+it: a camera arm or a character against a wall slides along it. It is the rule of Jolt, which only keeps the hit of a
+shape cast when its normal faces the motion (`contact_normal.Dot(mDirection) > 0`, "Test if backfacing",
+`ConvexShape.cpp:283-285`, the default mode). Not taken: Box3D, where any start closer than its slop is an "initial
+overlap" whatever the direction, without normal (`distance.c:1084-1100`). Jolt extends its rule to the overlaps;
+Feather doesn't: a shape which penetrates a body is stopped at the fraction 0 whatever its direction. What it means:
+- **The exact contact is decided by the rounding.** A shape put in contact by computed coordinates (a center at the
+  sum of the radii) is in contact, a hair apart or a hair in the body, as the last bit falls: measured on spheres put
+  against a sphere, 1 in 8 to 1 in 3, depending on the coordinates, is seen in the body, and stopped at the fraction 0
+  even when it moves away. A mover never puts its shape in contact: it starts again from the place given by `Sweep`
+  (0.5 to 1 µm from the body), or keeps a skin.
+- **A body within 1 µm is touched.** The shape is "on" a body closer than twice the gap (see the sweep, below): a
+  shape which passes within 1 µm of a body, moving towards it by any amount, hits it.
+
+**Back faces.** Only the top side of a heightfield is hit, by a ray and by a moving shape, as everywhere by default
+(Box3D "Ignores back-side collision on meshes and height-fields", `box3d.h:85`; Jolt `IgnoreBackFaces`,
+`RayCast.h:78-81`; Unity `Physics.queriesHitBackfaces`). `Overlap` sees both sides.
+
+**Ray on a heightfield** (`Heightfield.CastRay`, `CellWalk`). The ray walks the cells under it, in the order it meets
+them, then tests the 2 triangles of each cell: the traversal of a grid by a ray of Amanatides & Woo ("A Fast Voxel
+Traversal Algorithm for Ray Tracing", Eurographics 1987), used by the ray and shape casts of the height fields of Box3D
+(`b3RayCastHeightField` & `b3ShapeCastHeightField`, `src/height_field.c:593-601` and `:605`) and of PhysX
+(`traceSegment`, `GuHeightFieldUtil.h:481`); Ericson 7.4.2 ("Uniform Grid Intersection Test"). Differences:
+- **By columns.** Amanatides & Woo step from a cell to the next by the closest of the next 2 lines of the grid. Here
+  the walk follows the axis the ray moves the most along, column by column, and takes in each column the range of rows
+  between the points where the ray enters and leaves it: the same cells for a ray, and it widens to a box (a moving
+  shape) by its half sizes, where Box3D walks the leading corner of the box and sweeps its front.
+- **2 levels.** The columns are taken by blocks of 16 (the blocks of the narrow phase, with their lowest and highest
+  heights): a block the ray flies over or under is skipped with its 256 cells. Jolt walks a min/max hierarchy instead
+  (`HeightFieldShape.cpp`).
+- **The triangle.** A triangle of a heightfield is a plane over half a cell: the height of the ray above it is linear
+  along the ray, the hit is where it is 0, if this point is over the triangle and the ray comes from above. It is a
+  ray against a plane (Ericson 5.3.1) and a test of 3 lines of the grid, in the place of the Möller-Trumbore
+  intersection Jolt uses for its triangles (`Geometry/RayTriangle.h:8-9`).
+- **On an edge.** A ray which falls on an edge or on a sample hits several triangles at the same fraction:
+  `Hit.Triangle` names the lowest index, wherever the ray comes from, as a moving shape and as the bodies do. The rule
+  only holds at the very same fraction (a flat terrain); elsewhere the rounding chooses, and both triangles are right.
+- **No leak.** The point may be a billionth of a cell out of its triangle, and the walk is widened by twice as much: a
+  ray on an edge, on a sample or on the border of a hole hits the triangles around it. Möller-Trumbore, tested on each
+  triangle alone, leaks on the edges a ray lies on (the brute force of the tests needs the same slack there).
+
+**Sweep** (`World.Sweep`, `query_sweep.go`): conservative advancement (Mirtich 1996) on the cores of the shapes, as
+`b3ShapeCast` of Box3D (`src/distance.c:1044-1172`; `sphere.c:205-217`, `capsule.c:342-354`). At each iteration GJK
+gives the distance of the cores (a point for a sphere, a segment for a capsule) and its direction; the shape moves
+forward by this distance, less the radii and the gap, divided by the speed it closes at along this direction. The
+distance is convex along the path: the advancement is a Newton iteration from the left, it never crosses the surface.
+Measured on the tests: 4.3 iterations per hit, 9 at most; 32 at most (20 in Box3D). A sweep which would need more
+gives its hit where the shape is at the 32nd iteration, before the contact: the shape never goes further than it
+should. Box3D gives no hit then (`distance.c:1044-1172`).
+- **The gap.** The shape stops 0.5 µm before the contact, and is on it within 1 µm (0.05 and 0.1 mm between 2 shapes
+  without radius, where GJK is less sharp): the hit never overlaps the body, and the same sweep from the hit finds the
+  body at the fraction 0. Box3D aims at `B3_LINEAR_SLOP` (5 mm) from the contact, within a quarter of it
+  (`distance.c:1047-1052`), and the continuous collision of Feather stops 5 mm short (`ccd.go`, on the whole shapes,
+  not changed): too far for a foot or a camera.
+- **Plane**: the lowest point of the shape along the normal of the plane reaches it first: exact, no iteration.
+- **Heightfield**: the triangles of the cells of `CellWalk`, a band of the width of the shape along its path, not the
+  whole AABB of the motion; the walk ends when the band enters cells after the best hit. A triangle is skipped if the
+  shape moves along its normal: it comes from behind, or leaves (`b3ShapeCastHeightField` skips the triangles whose
+  plane is over the center of the shape instead).
+- **Not taken**: the GJK ray cast of van den Bergen, of Jolt (`GJKClosestPoint.h:506`) and PhysX (`GuGJKRaycast.h:55`):
+  one loop instead of a GJK per iteration, faster, but a new algorithm in `gjk/`.
+
+**Overlap** (`World.Overlap`): the candidates of the trees for the AABB of the shape, then the distance of the cores by
+GJK against the sum of the radii; a plane by the lowest point of the shape; a heightfield by its triangles under the
+shape, from any side. The contact counts.
+
+**Order.** At the same fraction, the body of the lowest index in `World.Bodies` is hit, and on a heightfield the
+triangle of the lowest index; `RaycastAll` is sorted by
+fraction then by index, `Overlap` by index (Unity: "the order of the results is undefined"). The results don't depend
+on the shape of the trees, nor on `Workers`.
+
+**Triggers.** `QueryFilter.Triggers`, false by default: `QueryTriggerInteraction` of Unity (`Ignore`, `Collide`). In
+Box2D and Box3D a sensor is a shape filtered by its category.
+
+**Concurrency.** No lock: several readers or one writer, as the queries without lock of Jolt
+(`GetNarrowPhaseQueryNoLock`, `PhysicsSystem.h:124-125`). A query during a step panics, as Box3D refuses a locked
+world (`b3GetUnlockedWorldFromId`, `src/physics_world.c:95-109`).

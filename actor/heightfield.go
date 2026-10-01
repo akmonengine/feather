@@ -288,3 +288,63 @@ func (h *Heightfield) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.V
 func (h *Heightfield) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	return contacts
 }
+
+// CastRay: the ray walks the cells under it (WalkCells: the blocks it flies over are skipped), and in each cell meets
+// the planes of both triangles. A triangle is a plane over half a cell: the height of the ray above it is linear along
+// the ray, and the ray hits where it is 0, if this point is over the triangle. Only the top side is hit: a ray coming
+// from below goes through, as through a hole. The point may be footprintSlack out of the triangle: a ray on an edge or
+// on a sample hits the triangles around it, and never leaks between them. At the very same fraction, the triangle of
+// the lowest index is named
+func (h *Heightfield) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool) {
+	if !finiteRay(origin, translation) {
+		return RayHit{}, false
+	}
+	// the ray in the grid: a cell is a unit square, the sample (x, z) at (x, z)
+	startX, startZ := origin.X()/h.Scale.X()+float64(h.XSamples-1)/2, origin.Z()/h.Scale.Z()+float64(h.ZSamples-1)/2
+	alongX, alongZ := translation.X()/h.Scale.X(), translation.Z()/h.Scale.Z()
+
+	hit, found := RayHit{Fraction: maxFraction, Triangle: NoTriangle}, false
+	slopeX, slopeZ := 0.0, 0.0
+	var walk CellWalk
+	walk.start(h, origin, translation, mgl64.Vec3{}, maxFraction)
+	for {
+		x, z, ok := walk.Next(hit.Fraction)
+		if !ok {
+			break
+		}
+		u, v := startX-float64(x), startZ-float64(z)
+		h00, h01, h10, h11 := h.height(x, z), h.height(x, z+1), h.height(x+1, z), h.height(x+1, z+1)
+		// the slopes of both triangles along x & z (in the cell: per cell, not per meter)
+		slopes := [2][2]float64{{h11 - h01, h01 - h00}, {h10 - h00, h11 - h10}}
+		for t, slope := range slopes {
+			above := origin.Y() - (h00 + slope[0]*u + slope[1]*v)
+			descent := slope[0]*alongX + slope[1]*alongZ - translation.Y()
+			// from below, along the plane, or further than the best hit
+			if above < 0 || descent <= 0 || above > hit.Fraction*descent {
+				continue
+			}
+			fraction := above / descent
+			hitU, hitV := u+fraction*alongX, v+fraction*alongZ
+			// triangle 0 is the half of the cell where v >= u, triangle 1 the other half
+			across := hitV - hitU
+			if t == 1 {
+				hitU, hitV, across = hitV, hitU, -across
+			}
+			if hitU < -footprintSlack || hitV > 1+footprintSlack || across < -footprintSlack {
+				continue
+			}
+			// at the same fraction (a ray on an edge or on a sample), the triangle of the lowest index is kept,
+			// wherever the ray comes from
+			triangle := int32(2*(x*(h.ZSamples-1)+z) + t)
+			if found && fraction == hit.Fraction && triangle > hit.Triangle {
+				continue
+			}
+			hit.Fraction, hit.Triangle, found = fraction, triangle, true
+			slopeX, slopeZ = slope[0], slope[1]
+		}
+	}
+	if found {
+		hit.Normal = mgl64.Vec3{-slopeX / h.Scale.X(), 1, -slopeZ / h.Scale.Z()}.Normalize()
+	}
+	return hit, found
+}

@@ -103,6 +103,8 @@ type recorder struct {
 	step      time.Duration
 	phases    map[string]time.Duration
 	steps     int
+	// results of the queries of the scene (queries.go): they enter its fingerprint
+	results []uint64
 }
 
 var recording *recorder
@@ -144,7 +146,7 @@ var regressionScenes = append([]regressionScene{
 	{"joint chain", jointChain},
 	{"rain on terrain", rainOnTerrain},
 	{"spinning tops", spinningTops},
-}, solverScenes()...)
+}, append(queryScenes, solverScenes()...)...)
 
 // solverScenes: the scenes of Solver2D (bench/scenes), at their small size (the full size is for -scenes)
 func solverScenes() []regressionScene {
@@ -536,6 +538,9 @@ func measureScene(scene regressionScene, stackOffset int) sceneResult {
 						_ = binary.Write(hash, binary.LittleEndian, math.Float64bits(x))
 					}
 				}
+			}
+			for _, x := range recording.results {
+				_ = binary.Write(hash, binary.LittleEndian, x)
 			}
 			result.Fingerprint = fmt.Sprintf("%016x", hash.Sum64())
 			result.Quality = quality

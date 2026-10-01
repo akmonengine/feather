@@ -175,7 +175,97 @@ filter.Accepts(decor) // true: the layer of the body is in the mask of the query
 - Make it static: no pair, no contact, no event, nothing in the solver. A dynamic body of empty mask is still
   integrated: it falls through everything under gravity.
 - It wakes nobody up, neither when it moves nor when it is removed.
-- `QueryFilter{}` (empty mask) sees nothing: use `actor.AllLayers` to see every layer.
+- `QueryFilter{}` (empty mask) sees nothing: start from `feather.DefaultQueryFilter()`, which sees every layer.
+
+### Queries
+A query asks the world about its bodies without moving them: `Raycast` (the first body on a segment), `RaycastAll`
+(all of them), `Sweep` (the first body a moving shape touches), `Overlap` (the bodies in a volume). It sees the static
+bodies, the dynamic bodies awake or asleep, and the bodies "queries only", at their place of the end of the last step.
+It wakes nobody up and sends no event.
+
+```go
+filter := feather.DefaultQueryFilter()              // every layer, no trigger
+filter.Mask = layerWorld | layerDecor               // or a few layers: the layer of the body must be in the mask
+filter.Excluded = []*actor.RigidBody{character}     // never the body which asks
+filter.Triggers = true                              // the triggers too
+```
+`feather.QueryFilter{}` sees nothing (its mask is empty): always start from `DefaultQueryFilter()`. The mask of a body
+is not read: a body which collides with nothing is seen on its layer. A body of layer 0 is seen by no query.
+
+**The ground under a foot.** A ray from the knee to under the sole: `Fraction` tells how far the ground is, `Normal`
+how to tilt the foot.
+```go
+hit, ok := world.Raycast(knee, mgl64.Vec3{0, -0.8, 0}, filter)
+if ok {
+	ground := hit.Point // knee + hit.Fraction * translation
+	slope := hit.Normal // out of the ground; hit.Triangle is the triangle of a terrain (2*cell + t), else -1
+}
+```
+A ray has no thickness: on stairs or on rubble, a sphere of the size of the sole gives a steadier answer.
+`hit.Fraction` is then where the sphere stops, `hit.Point` the point of the ground it touches.
+```go
+sole := &actor.Sphere{Radius: 0.08}
+hit, ok := world.Sweep(sole, actor.Transform{Position: knee, Rotation: mgl64.QuatIdent()}, mgl64.Vec3{0, -0.8, 0}, filter)
+```
+
+**A camera arm.** A sphere moved from the head to the wanted place of the camera: the camera goes where the sphere
+stops. A ray would let the camera see through the corner of a wall.
+```go
+lens := &actor.Sphere{Radius: 0.2}
+arm := wanted.Sub(head)
+if hit, ok := world.Sweep(lens, actor.Transform{Position: head, Rotation: mgl64.QuatIdent()}, arm, filter); ok {
+	camera = head.Add(arm.Mul(hit.Fraction))
+}
+```
+- The sphere stops between 0 and 1 µm from what it hits, never in it: the sweep of the next frame starts free.
+- Against a wall, a sweep which moves away from it or along it hits nothing: the camera, or a character, slides along
+  the wall. Start the next sweep from the place the last one gave, or keep a skin (1 mm is plenty) between the shape
+  and the walls: a shape put in exact contact by your own computation is, by the rounding, in the wall once in a few
+  times, and then stopped at the fraction 0 whatever its direction.
+- A body resting on the ground rests a little in it: a sweep started from its pose hits the ground at the fraction 0.
+  Exclude the ground, or start from above.
+- If the head is already in a wall, the sweep hits at the fraction 0, the normal against the arm: the camera stays on
+  the head. To go through this wall, exclude its body and sweep again.
+- A sweep moves a sphere, a capsule or a box, without turning it. A plane or a heightfield cannot be moved: it panics.
+
+**What is around.** The bodies in a volume, in the order of `World.Bodies`; a body touching the volume is in.
+```go
+blast := &actor.Sphere{Radius: 3}
+bodies = world.Overlap(blast, actor.Transform{Position: center, Rotation: mgl64.QuatIdent()}, filter, bodies[:0])
+```
+
+**Decor "queries only".** A wall of leaves the rays must see and the bodies must not hit: static, an empty mask, a
+layer (see [above](#queries-only)). It costs nothing in the narrow phase nor in the solver.
+
+**Buffers.** `RaycastAll` and `Overlap` append to the slice they are given: keep it, and pass `hits[:0]`. With a
+capacity large enough, no query allocates.
+
+**Start in a body.** A ray which starts in a sphere, a box, a capsule or under a plane hits this body at the fraction
+0, at its origin, the normal against its direction; so does a shape which overlaps a body. A ray without length is a
+point: the bodies which hold it are hit, without normal. A terrain is a surface: only its top side is hit, a ray from
+below goes through, as through a hole.
+
+**When to call `SyncQueries`.** The queries see the world of the end of the last `Step`. What the game writes after it
+is seen after the next `Step`, or after `SyncQueries`:
+```go
+world.AddBody(crate)
+door.Transform.Position = open
+door.UpdateAABB()        // after a write to a transform or to a shape, as for a step
+world.SyncQueries()      // the rays of this frame see the crate, and the door open
+```
+- Not needed after `Step`, nor after `RemoveBody` (a removed body is never hit).
+- Without it, a body added is not seen, and a body moved is seen at its old place.
+- Call it once after all the writes, not after each: it costs about 30 ns per body of the world.
+
+**Threads.** Queries only read: any number of goroutines can run them at the same time, the pose of hundreds of
+characters on 8 goroutines for example. Nothing may write the world meanwhile: no `Step`, `SyncQueries`, `AddBody`,
+`RemoveBody`, `UpdateHeightfield`, no write to a body. Feather takes no lock; a query during `Step` panics
+(`feather: query during Step`). A listener of an event can run queries: it runs after the step.
+
+**Cost**, on one core of a Ryzen 7 5800X, among 1000 bodies scattered on 100 x 100 m (`cd bench && go run . -queries`):
+about 0.4 µs for a ray of 2 m down, 0.9 µs for a level ray of 50 m, 0.7 µs for a sphere moved 2 m down, 0.7 µs for an
+overlap of 1 m; on a terrain of 1025 x 1025 samples, 0.3 µs for a ray down, 2.7 µs for a ray of 1000 m across it, 4 µs
+for a sphere moved 2 m down.
 
 ### Terrain
 ```go

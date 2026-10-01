@@ -75,6 +75,12 @@ func (t *aabbTree) release(n int32) {
 	t.free = append(t.free, n)
 }
 
+// empty: the tree has no leaf. The zero value of a tree is empty: no node, and a root at 0 until the first sync clears
+// it (a World is a literal: a query can come before any Step or SyncQueries)
+func (t *aabbTree) empty() bool {
+	return t.root == nullNode || len(t.nodes) == 0
+}
+
 func (t *aabbTree) clear() {
 	t.nodes = t.nodes[:0]
 	t.free = t.free[:0]
@@ -280,7 +286,7 @@ func (t *aabbTree) rotate(node int32) {
 
 // query appends the bodies of the leaves overlapping the AABB to out, in the order of the traversal. stack is reused
 func (t *aabbTree) query(aabb actor.AABB, stack []int32, out []int32) ([]int32, []int32) {
-	if t.root == nullNode {
+	if t.empty() {
 		return stack, out
 	}
 	stack = append(stack[:0], t.root)
@@ -302,7 +308,7 @@ func (t *aabbTree) query(aabb actor.AABB, stack []int32, out []int32) ([]int32, 
 
 // height of the tree (0 for one leaf), for the tests
 func (t *aabbTree) height() int32 {
-	if t.root == nullNode {
+	if t.empty() {
 		return -1
 	}
 	return t.nodes[t.root].height
@@ -564,11 +570,19 @@ func (t *Tree) forget(k int32) {
 	for _, record := range t.fat {
 		t.fatIndex[record.key] = struct{}{}
 	}
-	for i, index := range t.moved {
-		if index > k {
-			t.moved[i] = index - 1
+	// the removed proxy has no pair to find anymore: kept, its index would be the one of the next body, or past the
+	// last one
+	moved := t.moved[:0]
+	for _, index := range t.moved {
+		if index == k {
+			continue
 		}
+		if index > k {
+			index--
+		}
+		moved = append(moved, index)
 	}
+	t.moved = moved
 }
 
 // shiftContacts: contacts were removed from the contacts of the step stamp: shift[i] of them before the contact i.

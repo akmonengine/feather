@@ -126,16 +126,25 @@ func (w *World) SetFilter(body *actor.RigidBody, layer, mask actor.Layers) {
 }
 
 // QueryFilter of the world queries (ray, sweep, overlap): the layers they see, and the bodies they skip. The mask of a
-// body is not read: a body which collides with nothing is still seen on its layer. The zero value sees nothing
+// body is not read: a body which collides with nothing is still seen on its layer. The zero value sees nothing: start
+// from DefaultQueryFilter
 type QueryFilter struct {
 	// Mask: the layers seen by the query (actor.AllLayers for all of them)
 	Mask actor.Layers
 	// Excluded bodies, skipped whatever their layer: the body which casts the ray. A few bodies, searched one by one
 	// (IgnoreMultipleBodiesFilter of Jolt)
 	Excluded []*actor.RigidBody
+	// Triggers: the query also sees the triggers. The zero value ignores them
+	Triggers bool
+}
+
+// DefaultQueryFilter sees every layer, and ignores the triggers (b3DefaultQueryFilter of Box3D; the triggers as
+// QueryTriggerInteraction.Ignore of Unity)
+func DefaultQueryFilter() QueryFilter {
+	return QueryFilter{Mask: actor.AllLayers}
 }
 
 // Accepts: the query sees the body
 func (f QueryFilter) Accepts(body *actor.RigidBody) bool {
-	return f.Mask&body.Layer != 0 && !slices.Contains(f.Excluded, body)
+	return f.Mask&body.Layer != 0 && (f.Triggers || !body.IsTrigger) && !slices.Contains(f.Excluded, body)
 }
