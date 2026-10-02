@@ -16,10 +16,14 @@ const (
 	spinResistance = 0.05
 	spinSpeed      = 20.0
 
-	// spinTolerance: the deceleration is the analytic one at ± 10 % (the criterion of #827). 12.33 rad/s² are measured
-	// for 12.26 (+0.55 %): without any spinning resistance a ball already loses 0.068 rad/s², its single point of
-	// contact counts half its overlap as a lever arm for the twist friction (prepareFriction, a known defect)
-	spinTolerance = 0.10
+	// spinTolerance: the deceleration is the analytic one at ± 0.1 %. The resistance is the only torque around the
+	// normal (the single point of a ball holds no twist): what is left is the rounding of the measure
+	spinTolerance = 0.001
+
+	// spinKept: without spinning resistance a top keeps its spin, to the rounding (rad/s lost over 10 s at 20 rad/s).
+	// Nothing acts around the normal of its single point: the twist has no lever arm, the friction is applied on the
+	// axis of the spin
+	spinKept = 1e-9
 )
 
 // spinDeceleration of a solid sphere (I = 2/5·m·R²) under the torque c·R·m·g: c·R·g / (2/5·R²)
@@ -133,18 +137,67 @@ func TestSpinningResistanceStopsTheTop(t *testing.T) {
 	}
 }
 
-// Without spinning resistance, the ball still spins after 10 s: its single point holds no twist (but the one of half
-// its overlap, counted as a lever arm: 0.07 rad/s² here)
-func TestTopSpinsForeverWithoutSpinningResistance(t *testing.T) {
-	w, ball := spinScene(1, spinRadius, 0, 0, true)
-	ball.AngularVelocity = mgl64.Vec3{0, spinSpeed, 0}
-	simulate(w, 10, nil)
-	t.Logf("spinning at %.4f rad/s after 10 s", ball.AngularVelocity.Y())
-	if speed := ball.AngularVelocity.Y(); speed < 0.95*spinSpeed {
-		t.Errorf("spinning at %v rad/s after 10 s, want %v", speed, spinSpeed)
+// Without spinning resistance, a top keeps its spin: a ball of radius 10 cm at 20 rad/s around the vertical still spins
+// at 20 rad/s after 10 s (± spinKept), awake, and its single point never holds any twist. The same for a smaller ball,
+// for the ball added before the ground (the other body of the contact), on a tilted plane, on a box resting on the
+// ground, and for a capsule standing on its cap
+func TestTopKeepsItsSpinWithoutSpinningResistance(t *testing.T) {
+	tilted := mgl64.Vec3{0.36, 0.48, 0.8}
+	cases := []struct {
+		name  string
+		axis  mgl64.Vec3
+		scene func() (*World, *actor.RigidBody)
+	}{
+		{"ball", mgl64.Vec3{0, 1, 0}, func() (*World, *actor.RigidBody) { return spinScene(1, spinRadius, 0, 0, true) }},
+		{"ball before the ground", mgl64.Vec3{0, 1, 0}, func() (*World, *actor.RigidBody) { return spinScene(1, spinRadius, 0, 0, false) }},
+		{"diameter of 10 cm", mgl64.Vec3{0, 1, 0}, func() (*World, *actor.RigidBody) { return spinScene(1, spinRadius/2, 0, 0, true) }},
+		{"tilted plane", tilted, func() (*World, *actor.RigidBody) { return spinSceneOn(tilted, 0) }},
+		{"ball on a box", mgl64.Vec3{0, 1, 0}, func() (*World, *actor.RigidBody) {
+			w := newScene(1)
+			addGround(w, 0.8)
+			addBody(w, mgl64.Vec3{0, cubeHalf, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.8, 0)
+			ball := addBody(w, mgl64.Vec3{0, 2*cubeHalf + spinRadius, 0}, mgl64.QuatIdent(), &actor.Sphere{Radius: spinRadius}, actor.BodyTypeDynamic, 0.8, 0)
+			simulate(w, 0.25, nil)
+			return w, ball
+		}},
+		{"standing capsule", mgl64.Vec3{0, 1, 0}, func() (*World, *actor.RigidBody) {
+			const halfHeight = 0.2
+			w := newScene(1)
+			addGround(w, 0.8)
+			capsule := addBody(w, mgl64.Vec3{0, halfHeight + spinRadius, 0}, mgl64.QuatIdent(),
+				&actor.Capsule{HalfHeight: halfHeight, Radius: spinRadius}, actor.BodyTypeDynamic, 0.8, 0)
+			simulate(w, 0.25, nil)
+			return w, capsule
+		}},
 	}
-	if ball.IsSleeping {
-		t.Error("the spinning ball fell asleep")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w, top := c.scene()
+			top.AngularVelocity = c.axis.Mul(spinSpeed)
+			single := 0
+			simulate(w, 10, func() {
+				for i := range w.contacts {
+					if w.contacts[i].Count != 1 {
+						continue
+					}
+					single++
+					if w.contacts[i].TwistImpulse != 0 {
+						t.Fatalf("the single point of the top holds a twist of %.3g N·m·s", w.contacts[i].TwistImpulse)
+					}
+				}
+			})
+			if single < 600 {
+				t.Fatalf("the top rested on a single point during %d steps of 600: the scene tests nothing", single)
+			}
+			speed := top.AngularVelocity.Dot(c.axis)
+			t.Logf("spinning at %.12f rad/s after 10 s", speed)
+			if math.Abs(speed-spinSpeed) > spinKept {
+				t.Errorf("spinning at %.12f rad/s after 10 s, want %v (lost %.3g rad/s)", speed, spinSpeed, spinSpeed-speed)
+			}
+			if top.IsSleeping {
+				t.Error("the spinning top fell asleep")
+			}
+		})
 	}
 }
 
@@ -381,8 +434,8 @@ func TestSpinningImpulseWithoutResistance(t *testing.T) {
 	if stored != 0 {
 		t.Errorf("the contact keeps a spinning impulse of %.3g N·m·s without resistance", stored)
 	}
-	// the step brakes by the twist of the single point only (see spinTolerance), not by the resistance
-	if lost := before - ball.AngularVelocity.Y(); lost > 0.1*spinDeceleration(spinResistance, spinRadius)*sceneDt {
+	// nothing brakes the step: neither the resistance, nor the twist of the single point
+	if lost := before - ball.AngularVelocity.Y(); math.Abs(lost) > spinKept {
 		t.Errorf("the ball lost %.4g rad/s in a step without resistance", lost)
 	}
 }
