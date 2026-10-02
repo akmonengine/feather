@@ -28,6 +28,9 @@ type ShapeInterface interface {
 	// CollideWithPlane appends to contacts the points of the shape closer to the plane than the margin
 	// (plane: planeNormal·p + planeDistance = 0). contacts is a buffer given by the caller, to avoid allocations
 	CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact
+	// CastRay: the first point of the segment origin + f*translation, f in [0, maxFraction], on the shape, in its
+	// local space (see RayHit)
+	CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool)
 }
 
 // Box represents an oriented box collision shape
@@ -189,6 +192,47 @@ func (b *Box) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, my
 	return contacts
 }
 
+// CastRay by slabs, as RayAABox of Jolt: the ray is in the box while it is between its 3 pairs of faces at once. The
+// normal is the one of the face it enters by
+func (b *Box) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool) {
+	if !finiteRay(origin, translation) {
+		return RayHit{}, false
+	}
+	h := b.HalfExtents
+	if math.Abs(origin[0]) <= h[0] && math.Abs(origin[1]) <= h[1] && math.Abs(origin[2]) <= h[2] {
+		return startInside(translation), true
+	}
+	enter, exit := 0.0, maxFraction
+	axis, side := -1, 0.0
+	for k := 0; k < 3; k++ {
+		if translation[k] == 0 {
+			// along the faces: between them all the way, or never
+			if math.Abs(origin[k]) > h[k] {
+				return RayHit{}, false
+			}
+			continue
+		}
+		// the face the ray meets first is on the side it comes from
+		near := 1.0
+		if translation[k] > 0 {
+			near = -1
+		}
+		if fraction := (near*h[k] - origin[k]) / translation[k]; fraction > enter {
+			enter, axis, side = fraction, k, near
+		}
+		exit = math.Min(exit, (-near*h[k]-origin[k])/translation[k])
+		if enter > exit {
+			return RayHit{}, false
+		}
+	}
+	if axis < 0 {
+		return RayHit{}, false
+	}
+	hit := RayHit{Fraction: enter, Triangle: NoTriangle}
+	hit.Normal[axis] = side
+	return hit, true
+}
+
 // Sphere represents a spherical collision shape
 type Sphere struct {
 	Radius float64
@@ -252,6 +296,21 @@ func (s *Sphere) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64,
 	})
 }
 
+// CastRay: where the ray enters the sphere
+func (s *Sphere) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool) {
+	if !finiteRay(origin, translation) {
+		return RayHit{}, false
+	}
+	if origin.LenSqr() <= s.Radius*s.Radius {
+		return startInside(translation), true
+	}
+	fraction, ok := raySphere(origin, translation, s.Radius, maxFraction)
+	if !ok {
+		return RayHit{}, false
+	}
+	return RayHit{Fraction: fraction, Normal: origin.Add(translation.Mul(fraction)).Normalize(), Triangle: NoTriangle}, true
+}
+
 // Plane represents an infinite plane collision shape
 // The plane is defined by the equation: Normal · p + Distance = 0
 // where Normal is the plane's normal vector (must be normalized)
@@ -293,4 +352,74 @@ func (p *Plane) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, c
 // CollideWithPlane - Plane/Plane collision (not supported)
 func (p *Plane) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64, myTransform Transform, margin float64, contacts PlaneContact) PlaneContact {
 	return contacts
+}
+
+// CastRay against the half space under the plane, as PlaneShape::CastRay of Jolt. The plane is in world space
+// (Normal·p + Distance = 0): the ray too, whatever the transform of the body
+func (p *Plane) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool) {
+	if !finiteRay(origin, translation) {
+		return RayHit{}, false
+	}
+	height := origin.Dot(p.Normal) + p.Distance
+	if height <= 0 {
+		return startInside(translation), true
+	}
+	descent := -translation.Dot(p.Normal)
+	if descent <= 0 || height > maxFraction*descent {
+		return RayHit{}, false
+	}
+	return RayHit{Fraction: height / descent, Normal: p.Normal, Triangle: NoTriangle}, true
+}
+
+// ========== RAYS ==========
+// A ray is a segment: its origin and its translation, in the local space of the shape. Its hit is its first point in
+// the shape, at the fraction of the translation where it is (the convention of Box3D: b3RayCastInput). The shapes are
+// solid: a ray which starts in a shape hits it at its origin, the normal against its direction (the raycasts of PhysX,
+// mTreatConvexAsSolid of Jolt). A ray without length is a point: a hit without normal if it is in the shape.
+
+// NoTriangle: the triangle of a hit on a shape which has none
+const NoTriangle int32 = -1
+
+// RayHit of a ray against a shape, in the local space of the shape
+type RayHit struct {
+	Fraction float64    // of the translation, in [0, 1]
+	Normal   mgl64.Vec3 // unit, out of the shape
+	Triangle int32      // heightfield: 2*cell + t (cell = x*(ZSamples-1)+z), else NoTriangle
+}
+
+// finiteRay: a ray with a NaN or an infinite coordinate hits nothing (x - x is 0 for a finite x only)
+func finiteRay(origin, translation mgl64.Vec3) bool {
+	sum := 0.0
+	for k := 0; k < 3; k++ {
+		sum += (origin[k] - origin[k]) + (translation[k] - translation[k])
+	}
+	return sum == 0
+}
+
+// startInside: the hit of a ray which starts in the shape
+func startInside(translation mgl64.Vec3) RayHit {
+	hit := RayHit{Triangle: NoTriangle}
+	if length := translation.Len(); length > 0 {
+		hit.Normal = translation.Mul(-1 / length)
+	}
+	return hit
+}
+
+// raySphere: the fraction where a ray which starts out of the sphere of center 0 enters it. The closest point of the
+// line to the center is found first, then its distance to the surface along the line: the difference of 2 squares of
+// the quadratic never mixes the distance of the origin with the radius (b3RayCastSphere of Box3D, after "Precision
+// Improvements for Ray/Sphere Intersection", Ray Tracing Gems, 2019)
+func raySphere(origin, translation mgl64.Vec3, radius, maxFraction float64) (float64, bool) {
+	lengthSqr := translation.LenSqr()
+	closest := -origin.Dot(translation) / lengthSqr
+	// the ray goes away from the center, or has no length
+	if !(closest > 0) {
+		return 0, false
+	}
+	inside := radius*radius - origin.Add(translation.Mul(closest)).LenSqr()
+	if inside < 0 {
+		return 0, false
+	}
+	fraction := math.Max(0, closest-math.Sqrt(inside/lengthSqr))
+	return fraction, fraction <= maxFraction
 }

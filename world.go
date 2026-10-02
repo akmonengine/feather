@@ -3,6 +3,7 @@ package feather
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akmonengine/feather/actor"
@@ -44,8 +45,8 @@ type World struct {
 	shift []int32 // buffer of RemoveBody
 	// the broad phase
 	tree Tree
-	// pairs of bodies linked by a joint that must not collide
-	jointPairs   map[pairKey]int
+	// pairs of bodies which never collide: ignored, or linked by a joint
+	filter       pairFilter
 	solverJoints []Joint
 	// 2 buffers: one for the contacts of this step, one for the previous step
 	buffers [2][]constraint.Manifold
@@ -58,6 +59,9 @@ type World struct {
 
 	// profile of the last step
 	profile Profile
+
+	// stepping: a step is running, the queries panic (query.go)
+	stepping atomic.Bool
 
 	// parallelFrom: the step runs on several goroutines from this count of bodies (minParallelBodies if 0). The tests
 	// lower it, to run the parallel paths on small scenes
@@ -83,11 +87,9 @@ func (w *World) AddJoint(joint Joint) {
 	base := joint.base()
 	w.islands.wake(base.BodyA)
 	w.islands.wake(base.BodyB)
-	if !base.CollideConnected {
-		if w.jointPairs == nil {
-			w.jointPairs = make(map[pairKey]int)
-		}
-		w.jointPairs[makePairKey(base.BodyA, base.BodyB)]++
+	base.filtering = !base.CollideConnected
+	if base.filtering {
+		w.filter.link(base.BodyA, base.BodyB, 1)
 	}
 }
 
@@ -101,11 +103,8 @@ func (w *World) RemoveJoint(joint Joint) {
 		base := joint.base()
 		w.islands.wake(base.BodyA)
 		w.islands.wake(base.BodyB)
-		if !base.CollideConnected {
-			key := makePairKey(base.BodyA, base.BodyB)
-			if w.jointPairs[key]--; w.jointPairs[key] <= 0 {
-				delete(w.jointPairs, key)
-			}
+		if base.filtering {
+			w.filter.link(base.BodyA, base.BodyB, -1)
 		}
 		return
 	}
@@ -134,17 +133,10 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	}
 
 	w.Events.forget(body)
-	// the bodies touching the removed body wake up (with their islands): they may have to fall.
-	// The sleeping bodies have no contact anymore: their AABB is used
+	// the bodies touching the removed body wake up (with their islands): they may have to fall
 	w.islands.remove(body)
-	aabb := body.AABB()
-	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
-	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
-	for _, other := range w.Bodies {
-		if other.IsSleeping && aabb.Overlaps(other.AABB()) {
-			w.islands.wake(other)
-		}
-	}
+	w.wakeNeighbors(body)
+	w.filter.forget(body)
 	// the contacts of the body leave: the contacts kept by the other pairs move down
 	n := 0
 	for i := range w.contacts {
@@ -158,6 +150,19 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	w.contacts = w.contacts[:n]
 	w.tree.shiftContacts(w.shift, w.step)
 	w.shift = w.shift[:0]
+}
+
+// wakeNeighbors: the sleeping bodies which collide with the body wake up, with their islands. The sleeping bodies have
+// no contact anymore: their AABB is used
+func (w *World) wakeNeighbors(body *actor.RigidBody) {
+	aabb := body.AABB()
+	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
+	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
+	for _, other := range w.Bodies {
+		if other.IsSleeping && aabb.Overlaps(other.AABB()) && w.ShouldCollide(body, other) {
+			w.islands.wake(other)
+		}
+	}
 }
 
 // workersHandle owns the workers of a World. When the World is not used anymore, the handle is collected
@@ -197,7 +202,7 @@ func (w *World) UpdateHeightfield(body *actor.RigidBody, minX, minZ, maxX, maxZ 
 	regionMinX, regionMaxX := (float64(minX-1)-halfX)*field.Scale.X(), (float64(maxX+1)-halfX)*field.Scale.X()
 	regionMinZ, regionMaxZ := (float64(minZ-1)-halfZ)*field.Scale.Z(), (float64(maxZ+1)-halfZ)*field.Scale.Z()
 	for _, other := range w.Bodies {
-		if !other.IsSleeping {
+		if !other.IsSleeping || !w.ShouldCollide(body, other) {
 			continue
 		}
 		bounds := localBounds(body.Transform, other.AABB())
@@ -216,6 +221,7 @@ func (w *World) Step(dt float64) {
 	if dt <= 0 {
 		return
 	}
+	w.stepping.Store(true)
 	workers := max(DefaultWorkers, w.Workers)
 	substeps := max(1, w.Substeps)
 	contactHertz := w.ContactHertz
@@ -275,6 +281,13 @@ func (w *World) Step(dt float64) {
 
 	// Phase 3: Sleep & events
 	w.islands.update(s, dt)
+	mark = w.lap(&w.profile.Islands, mark)
+
+	// the trees follow the bodies moved by the step, for the queries: the events are sent after, their listeners can
+	// run queries
+	w.syncMoved()
+	mark = w.lap(&w.profile.BroadPhase, mark)
+	w.stepping.Store(false)
 
 	w.Events.processSleepEvents(w.Bodies)
 	w.Events.flush()
@@ -293,18 +306,9 @@ func (w *World) lap(phase *time.Duration, mark time.Time) time.Time {
 // with the static bodies exist before the bodies touch (speculative contacts: the speculative CCD of PhysX, the
 // "Continuous Speculative" mode of Unity)
 func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manifold {
-	if cap(w.aabbs) < len(w.Bodies) {
-		w.aabbs = make([]actor.AABB, len(w.Bodies))
-	}
-	w.aabbs = w.aabbs[:len(w.Bodies)]
 	w.dt = dt
-	if w.aabbJob == nil {
-		w.aabbJob = w.computeAABB
-	}
 	mark := time.Now()
-	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
-
-	w.tree.sync(w.Bodies, w.aabbs)
+	w.syncTrees(pool)
 	w.pairs = w.tree.findPairs(w.Bodies, w.aabbs, pool)
 	mark = w.lap(&w.profile.BroadPhase, mark)
 
@@ -331,6 +335,37 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 	manifolds := compactManifolds(w.manifolds, w.offsets, w.counts)
 	w.lap(&w.profile.NarrowPhase, mark)
 	return manifolds
+}
+
+// syncTrees: the trees of the broad phase take the bodies of the world at their AABBs, enlarged by the distance they
+// can travel during a step of w.dt. It runs at the start of a step, for its pairs, and in SyncQueries, for the queries:
+// Feather doesn't know what the game wrote, every body is tested. With syncMoved at the end of a step, all three give
+// the same AABBs for the bodies which didn't change, so that a body is put back in its tree once (Tree.update compares
+// the AABB of a static body bit for bit)
+func (w *World) syncTrees(pool *workerPool) {
+	if cap(w.aabbs) < len(w.Bodies) {
+		w.aabbs = make([]actor.AABB, len(w.Bodies))
+	}
+	w.aabbs = w.aabbs[:len(w.Bodies)]
+	if w.aabbJob == nil {
+		w.aabbJob = w.computeAABB
+	}
+	pool.run(len(w.Bodies), bodiesChunk, w.aabbJob)
+
+	w.tree.filter = &w.filter
+	w.tree.sync(w.Bodies, w.aabbs)
+}
+
+// syncMoved: at the end of a step, the trees take the bodies the step moved, at the AABBs of syncTrees: the bodies of
+// the solver, awake when the step started or woken by it (the continuous collision and the sleep only write these).
+// The static and the sleeping bodies are not read: a world asleep pays nothing. As the last stage of a step of Box2D
+// v3, which only enlarges the AABBs of the bodies which left them ("for shapes that have moved significantly",
+// docs/simulation.md)
+func (w *World) syncMoved() {
+	for _, i := range w.solver.stateBody {
+		w.computeAABB(int(i))
+		w.tree.update(i, w.Bodies[i], w.aabbs[i])
+	}
 }
 
 // wakeTouched: a sleeping body touched by an awake dynamic body wakes up with its island (as in Box2D & Jolt).
@@ -377,10 +412,6 @@ func (w *World) computeAABB(i int) {
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
 	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
-	if len(w.jointPairs) > 0 && w.jointPairs[makePairKey(pair.BodyA, pair.BodyB)] > 0 {
-		w.counts[i] = 0
-		return
-	}
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
 		// against a static body, the contact exists before the body touches it, from its speed (the speculative CCD of
@@ -484,8 +515,8 @@ func relativeSpeed(a, b *actor.RigidBody) float64 {
 
 // warmStartPair: a contact point takes the impulses of the closest point of the previous step (in the local space of
 // body A, as the contact cache of Jolt matches its points; Box2D matches them by feature id), among the previous
-// manifolds of the same pair. The contact takes the friction, twist & rolling impulses of the previous contact of its
-// first matched point
+// manifolds of the same pair. The contact takes the friction, twist, rolling & spinning impulses of the previous
+// contact of its first matched point
 func warmStartPair(manifolds, previous []constraint.Manifold) {
 	if len(previous) == 0 {
 		return
@@ -522,7 +553,7 @@ func warmStartPair(manifolds, previous []constraint.Manifold) {
 		// the impulses of the whole contact come from the previous contact of its first point
 		if source >= 0 {
 			manifold.FrictionImpulse, manifold.TwistImpulse = previous[source].FrictionImpulse, previous[source].TwistImpulse
-			manifold.RollingImpulse = previous[source].RollingImpulse
+			manifold.RollingImpulse, manifold.SpinningImpulse = previous[source].RollingImpulse, previous[source].SpinningImpulse
 		}
 	}
 }

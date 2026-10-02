@@ -257,10 +257,10 @@ func solveAngular3(stateA, stateB *bodyState, c mgl64.Vec3, soft spring, useBias
 		bias, row = c.Mul(soft.biasRate), soft
 	}
 	k := actor.Add3(&stateA.inverseInertia, &stateB.inverseInertia)
-	if math.Abs(actor.Det3(&k)) < 1e-30 {
+	inverse, ok := massInverse(stateA, stateB, &k)
+	if !ok {
 		return accumulated
 	}
-	inverse := actor.Inv3(&k)
 	impulse := row.impulse3(&inverse, cdot, bias, accumulated)
 	applyAngular(stateA, stateB, impulse)
 	return accumulated.Add(impulse)

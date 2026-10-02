@@ -29,22 +29,32 @@ func far(origin mgl64.Vec3, scene farScene) func(size Size, play Player) Result 
 	}
 }
 
-// farPyramid: a pyramid of 10 layers of cubes of 1 m, 25 cm apart: they fall on each other, then stand
+// farPyramid: a pyramid of 10 layers of cubes of 1 m, 25 cm apart: they fall on each other, then stand. The cubes land
+// with their 4 points at the separation 0: which ones are solved as springs is a draw, at the origin and far from it.
+// The far deviation is the distance between both draws: a millimetre, centimetres for a few. Its variants put the cubes
+// 25 to 26 cm apart
 var farPyramid = Scene{
-	Name: "far pyramid",
-	Run: far(mgl64.Vec3{100000, -80000, 60000}, func(origin mgl64.Vec3, play Player) ([]*actor.RigidBody, Result) {
+	Name:  "far pyramid",
+	Run:   farCubes(0.25),
+	Draws: []string{"far deviation"},
+	Vary:  across(0.25, 0.26, farCubes),
+	Check: func(r Result) error {
+		return atMost(r, "worst drift", layersSlop(10)*1000, "a contact per layer")
+	},
+}
+
+// farCubes: the scene far pyramid, the cubes gap apart (m)
+func farCubes(gap float64) func(size Size, play Player) Result {
+	return far(mgl64.Vec3{100000, -80000, 60000}, func(origin mgl64.Vec3, play Player) ([]*actor.RigidBody, Result) {
 		const count = 10
 		w := newWorld()
 		staticBox(w, origin.Add(mgl64.Vec3{0, -1, 0}), mgl64.QuatIdent(), mgl64.Vec3{100, 1, 100}, defaultMaterial)
-		cubes := squarePyramid(w, origin.Add(mgl64.Vec3{0, 0.5, 0}), count, 0.5, 0.25, defaultMaterial)
+		cubes := squarePyramid(w, origin.Add(mgl64.Vec3{0, 0.5, 0}), count, 0.5, gap, defaultMaterial)
 		play(w, 2, nil)
 		start := positions(cubes)
 		play(w, 3, nil)
 		return cubes, Result{"worst drift": mm(worstDrift(cubes, start))}
-	}),
-	Check: func(r Result) error {
-		return atMost(r, "worst drift", layersSlop(10)*1000, "a contact per layer")
-	},
+	})
 }
 
 // farStack: a plank on a small roller and a small box, 2 cubes on the plank. The roller is a capsule lying across the

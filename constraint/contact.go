@@ -48,6 +48,10 @@ type Manifold struct {
 	// RollingImpulse applied by the solver during the last step (N·m·s), to warm start the next step
 	RollingImpulse mgl64.Vec3
 
+	// SpinningImpulse of the spinning resistance, around the normal, applied by the solver during the last step
+	// (N·m·s), to warm start the next step
+	SpinningImpulse float64
+
 	// When the contact points were computed: the normal in the local space of A,
 	// and the position & rotation of B in the local space of A (pair cache)
 	LocalNormal      mgl64.Vec3

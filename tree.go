@@ -75,6 +75,12 @@ func (t *aabbTree) release(n int32) {
 	t.free = append(t.free, n)
 }
 
+// empty: the tree has no leaf. The zero value of a tree is empty: no node, and a root at 0 until the first sync clears
+// it (a World is a literal: a query can come before any Step or SyncQueries)
+func (t *aabbTree) empty() bool {
+	return t.root == nullNode || len(t.nodes) == 0
+}
+
 func (t *aabbTree) clear() {
 	t.nodes = t.nodes[:0]
 	t.free = t.free[:0]
@@ -280,7 +286,7 @@ func (t *aabbTree) rotate(node int32) {
 
 // query appends the bodies of the leaves overlapping the AABB to out, in the order of the traversal. stack is reused
 func (t *aabbTree) query(aabb actor.AABB, stack []int32, out []int32) ([]int32, []int32) {
-	if t.root == nullNode {
+	if t.empty() {
 		return stack, out
 	}
 	stack = append(stack[:0], t.root)
@@ -302,7 +308,7 @@ func (t *aabbTree) query(aabb actor.AABB, stack []int32, out []int32) ([]int32, 
 
 // height of the tree (0 for one leaf), for the tests
 func (t *aabbTree) height() int32 {
-	if t.root == nullNode {
+	if t.empty() {
 		return -1
 	}
 	return t.nodes[t.root].height
@@ -332,6 +338,9 @@ type Tree struct {
 	planes   []int32 // the large bodies
 	proxies  []proxy
 	bodies   []*actor.RigidBody // the bodies the proxies were made for: a mismatch rebuilds everything
+
+	// filter: the pairs of bodies which never collide (nil without a World)
+	filter *pairFilter
 
 	// the pairs of proxies whose stored AABBs overlap, kept from a step to the next, and the proxies put in a tree
 	// since the last search
@@ -561,11 +570,19 @@ func (t *Tree) forget(k int32) {
 	for _, record := range t.fat {
 		t.fatIndex[record.key] = struct{}{}
 	}
-	for i, index := range t.moved {
-		if index > k {
-			t.moved[i] = index - 1
+	// the removed proxy has no pair to find anymore: kept, its index would be the one of the next body, or past the
+	// last one
+	moved := t.moved[:0]
+	for _, index := range t.moved {
+		if index == k {
+			continue
 		}
+		if index > k {
+			index--
+		}
+		moved = append(moved, index)
 	}
+	t.moved = moved
 }
 
 // shiftContacts: contacts were removed from the contacts of the step stamp: shift[i] of them before the contact i.
@@ -592,11 +609,14 @@ func (t *Tree) queryCandidates(aabb actor.AABB, stack []int32, out []int32) ([]i
 // proxy put in a tree since the last search (a dynamic body out of its enlarged AABB, a static body moved by the
 // game, a body added) queries the trees, and a resting body costs nothing. The planes and the heightfields pair with
 // every body which moved. The pairs are dropped when their stored AABBs no longer overlap. The pairs of the step are
-// the ones whose exact AABBs overlap, with an awake dynamic body: the same pairs as a search from scratch, in the same
-// order. Each pair keeps the contacts of its last step (pairRecord): the World finds them without any lookup
+// the ones whose exact AABBs overlap and which pass the collision filters (filter.go), with an awake dynamic body: the
+// same pairs as a search from scratch, in the same order. A filtered pair stays in the records (the filters can change
+// at any time) but is never emitted. Each pair keeps the contacts of its last step (pairRecord): the World finds them
+// without any lookup
 
-// findPairs: the pairs of bodies whose AABBs overlap, with at least an awake dynamic body, sorted by the index of the
-// first body (the planes of a body before its other pairs, in the order of the planes). The slice is reused
+// findPairs: the pairs of bodies whose AABBs overlap and which pass the collision filters, with at least an awake
+// dynamic body, sorted by the index of the first body (the planes of a body before its other pairs, in the order of the
+// planes). The slice is reused
 func (t *Tree) findPairs(bodies []*actor.RigidBody, boxes []actor.AABB, pool *workerPool) []Pair {
 	t.pairs = t.pairs[:0]
 	t.bodyList, t.boxes = bodies, boxes
@@ -689,8 +709,8 @@ func (t *Tree) query(c int) {
 	}
 }
 
-// scan: the chunk c of the records emits the pairs of the step, and the pairs which no longer overlap become
-// tombstones
+// scan: the chunk c of the records emits the pairs of the step (the filtered pairs are skipped), and the pairs which
+// no longer overlap become tombstones
 func (t *Tree) scan(c int) {
 	chunk := &t.chunks[c]
 	chunk.pairs, chunk.dead = chunk.pairs[:0], chunk.dead[:0]
@@ -712,13 +732,14 @@ func (t *Tree) scan(c int) {
 			if !plane {
 				i, j = j, i
 			}
-			if !isAwakeDynamic(bodies[j]) {
+			if !isAwakeDynamic(bodies[j]) || !t.filter.collides(bodies[i], bodies[j]) {
 				continue
 			}
 			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: j, second: int32(slices.Index(t.planes, i)), plane: true, slot: int32(k)})
 			continue
 		}
-		if needsSolving(bodies[i], bodies[j]) {
+		// the filters last: the pairs of resting bodies, the most of them, are skipped before
+		if needsSolving(bodies[i], bodies[j]) && t.filter.collides(bodies[i], bodies[j]) {
 			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: i, second: j, slot: int32(k)})
 		}
 	}

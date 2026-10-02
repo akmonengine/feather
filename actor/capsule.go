@@ -130,3 +130,39 @@ func (c *Capsule) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance float64
 
 	return contacts
 }
+
+// CastRay: the infinite cylinder around the segment, then the spheres of both ends if the ray enters the cylinder out
+// of the segment (RayCapsule of Jolt). A ray entering the cylinder beside an end goes through its sphere before it
+// can reach the side: the first sphere hit is the hit
+func (c *Capsule) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (RayHit, bool) {
+	if !finiteRay(origin, translation) {
+		return RayHit{}, false
+	}
+	closest := mgl64.Vec3{0, mgl64.Clamp(origin.Y(), -c.HalfHeight, c.HalfHeight), 0}
+	if origin.Sub(closest).LenSqr() <= c.Radius*c.Radius {
+		return startInside(translation), true
+	}
+
+	// ========== SIDE ==========
+	// seen along the axis, the cylinder is a circle
+	flatOrigin, flatTranslation := mgl64.Vec3{origin.X(), 0, origin.Z()}, mgl64.Vec3{translation.X(), 0, translation.Z()}
+	if flatOrigin.LenSqr() > c.Radius*c.Radius {
+		fraction, ok := raySphere(flatOrigin, flatTranslation, c.Radius, maxFraction)
+		if !ok {
+			return RayHit{}, false
+		}
+		if math.Abs(origin.Y()+fraction*translation.Y()) <= c.HalfHeight {
+			return RayHit{Fraction: fraction, Normal: flatOrigin.Add(flatTranslation.Mul(fraction)).Normalize(), Triangle: NoTriangle}, true
+		}
+	}
+
+	// ========== ENDS ==========
+	hit, found := RayHit{Fraction: maxFraction, Triangle: NoTriangle}, false
+	for _, end := range [2]float64{c.HalfHeight, -c.HalfHeight} {
+		fromEnd := origin.Sub(mgl64.Vec3{0, end, 0})
+		if fraction, ok := raySphere(fromEnd, translation, c.Radius, hit.Fraction); ok {
+			hit.Fraction, hit.Normal, found = fraction, fromEnd.Add(translation.Mul(fraction)).Normalize(), true
+		}
+	}
+	return hit, found
+}

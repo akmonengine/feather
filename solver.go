@@ -114,7 +114,13 @@ type bodyState struct {
 	body            *actor.RigidBody
 	velocity        mgl64.Vec3
 	angularVelocity mgl64.Vec3
-	invMass         float64
+	invMass         float64 // without its locks: see linearMass
+
+	// the locked world axes of the body: it has no inverse mass along linearLock (invMassAxes), no inverse inertia around
+	// angularLock (inverseInertia)
+	invMassAxes mgl64.Vec3
+	linearLock  actor.Axes
+	angularLock actor.Axes
 
 	deltaPosition  mgl64.Vec3 // since the beginning of the step
 	deltaMatrix    mgl64.Mat3 // deltaRotation as a matrix, updated once per substep
@@ -126,7 +132,7 @@ type bodyState struct {
 // bodyStart is what the solver keeps of a body at the beginning of the step, apart from its state: read by a few
 // bodies per substep (the ones turning, with an anisotropic inertia), the states stay compact for the contacts
 type bodyStart struct {
-	inertia  mgl64.Mat3 // inverse inertia in world space
+	inertia  mgl64.Mat3 // inverse inertia in world space, without the locks
 	rotation mgl64.Quat
 }
 
@@ -190,6 +196,10 @@ type contactConstraint struct {
 	rollingImpulse    [2]float64
 	rollingA          [2]mgl64.Vec3 // angular velocity of A given by a unit impulse
 	rollingB          [2]mgl64.Vec3
+
+	// spinning resistance, around the normal: the row of the twist (twistMass), with its own bound
+	spinningResistance float64
+	spinningImpulse    float64
 }
 
 type solver struct {
@@ -221,6 +231,8 @@ type solver struct {
 	indices map[*actor.RigidBody]int
 	h       float64
 	invH    float64
+	// locked: an awake body has a locked axis (the mass matrix of the joints can be singular: lockedInverse)
+	locked bool
 
 	// static bodies (and sleeping ones) share this state: no mass, they never move
 	static bodyState
@@ -298,12 +310,14 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	}
 	s.stateIndex = s.stateIndex[:len(bodies)]
 	s.stateBody = s.stateBody[:0]
+	s.locked = false
 	for i, body := range bodies {
 		s.stateIndex[i] = -1
 		if !isAwakeDynamic(body) {
 			continue
 		}
 		s.stateIndex[i] = int32(len(s.stateBody))
+		s.locked = s.locked || body.LinearLock|body.AngularLock != actor.NoAxes
 		if len(s.indices) > 0 {
 			if _, ok := s.indices[body]; ok {
 				s.indices[body] = len(s.stateBody)
@@ -393,6 +407,10 @@ func (s *solver) prepareConstraint(i int) {
 			c.rollingImpulse[k] = manifold.RollingImpulse.Dot(c.tangents[k])
 		}
 	}
+	c.spinningResistance = constraint.ComputeSpinningResistance(manifold.BodyA.Material, manifold.BodyB.Material, radiusA, radiusB)
+	if c.spinningResistance > 0 {
+		c.spinningImpulse = manifold.SpinningImpulse
+	}
 	for j := 0; j < manifold.Count; j++ {
 		point := &manifold.Points[j]
 		cp := &c.points[j]
@@ -435,10 +453,14 @@ func (c *contactConstraint) prepareFriction(stateA, stateB *bodyState, staticFri
 		total += weight
 	}
 	c.centerCoreA, c.centerCoreB = centerA.Mul(1/total), centerB.Mul(1/total)
-	rA, rB := c.frictionArms(c.centerCoreA, c.centerCoreB)
-	for j := 0; j < c.pointsCount; j++ {
-		c.points[j].leverArm = c.points[j].rA.Sub(rA).Len()
+	// the lever arm of a point for the twist: its distance to the center, both on the surface of A (their cores, the
+	// radius of A is the same for all). A single point is its own center: its lever arm stays 0, it holds no twist
+	if c.pointsCount > 1 {
+		for j := 0; j < c.pointsCount; j++ {
+			c.points[j].leverArm = c.points[j].coreA.Sub(c.centerCoreA).Len()
+		}
 	}
+	rA, rB := c.frictionArms(c.centerCoreA, c.centerCoreB)
 	c.makeFrictionRows(stateA, stateB, rA, rB)
 
 	c.frictionImpulse = [2]float64{manifold.FrictionImpulse.Dot(c.tangents[0]), manifold.FrictionImpulse.Dot(c.tangents[1])}
@@ -462,12 +484,18 @@ func (c *contactConstraint) makeFrictionRows(stateA, stateB *bodyState, rA, rB m
 		c.frictionRows[k] = makeJacobian(stateA, stateB, rA, rB, c.tangents[k])
 	}
 	t0, t1 := &c.frictionRows[0], &c.frictionRows[1]
-	linear := stateA.invMass + stateB.invMass
-	kxx := linear + t0.angularA.Dot(t0.impulseA) + t0.angularB.Dot(t0.impulseB)
-	kyy := linear + t1.angularA.Dot(t1.impulseA) + t1.angularB.Dot(t1.impulseB)
+	kxx := linearMass(stateA, stateB, c.tangents[0]) + t0.angularA.Dot(t0.impulseA) + t0.angularB.Dot(t0.impulseB)
+	kyy := linearMass(stateA, stateB, c.tangents[1]) + t1.angularA.Dot(t1.impulseA) + t1.angularB.Dot(t1.impulseB)
 	kxy := t0.angularA.Dot(t1.impulseA) + t0.angularB.Dot(t1.impulseB)
+	if stateA.linearLock|stateB.linearLock != actor.NoAxes {
+		// both tangents are coupled by the locked axes too
+		kxy += crossMass(stateA, stateB, c.tangents[0], c.tangents[1])
+	}
 	c.frictionMass = [3]float64{}
-	if det := kxx*kyy - kxy*kxy; det > minFrictionDeterminant {
+	if stateA.isLocked() || stateB.isLocked() {
+		// the bodies may not answer along a tangent (a box which can't turn, nor move along X): the other one rubs
+		c.frictionMass, _ = lockedInverse2(kxx, kxy, kyy)
+	} else if det := kxx*kyy - kxy*kxy; det > minFrictionDeterminant {
 		c.frictionMass = [3]float64{kyy / det, -kxy / det, kxx / det}
 	}
 	c.twistMass = 0
@@ -520,18 +548,25 @@ func (s *solver) indexOf(body *actor.RigidBody) int {
 // stateOf fills the state of the body i
 func (s *solver) stateOf(i int) {
 	body := s.bodies[s.stateBody[i]]
-	inverseInertia := body.GetInverseInertiaWorld()
-	s.states[i] = bodyState{
+	inverseInertia := body.GetFreeInverseInertiaWorld()
+	s.starts[i] = bodyStart{inertia: inverseInertia, rotation: body.Transform.Rotation}
+	state := &s.states[i]
+	*state = bodyState{
 		body:            body,
 		velocity:        body.Velocity,
 		angularVelocity: body.AngularVelocity,
 		deltaRotation:   mgl64.QuatIdent(),
 		deltaMatrix:     mgl64.Ident3(),
 		invMass:         body.InverseMass(),
+		invMassAxes:     body.InverseMassAxes(),
+		linearLock:      body.LinearLock,
+		angularLock:     body.AngularLock,
 		inverseInertia:  inverseInertia,
 		anisotropic:     !isIsotropic(body.InertiaLocal),
 	}
-	s.starts[i] = bodyStart{inertia: inverseInertia, rotation: body.Transform.Rotation}
+	if state.angularLock != actor.NoAxes {
+		state.angularLock.LockInverseInertia(&state.inverseInertia)
+	}
 }
 
 // makeJacobian for an impulse along the direction, applied at rA and rB
@@ -539,7 +574,7 @@ func makeJacobian(stateA, stateB *bodyState, rA, rB, direction mgl64.Vec3) jacob
 	var j jacobian
 	j.turnA(stateA, rA, direction)
 	j.turnB(stateB, rB, direction)
-	j.updateMass(stateA, stateB)
+	j.updateMass(stateA, stateB, direction)
 	return j
 }
 
@@ -553,16 +588,17 @@ func (j *jacobian) velocity(stateA, stateB *bodyState, direction mgl64.Vec3) flo
 
 // apply the impulse λ along the direction: -λ on A, +λ on B.
 // The static state is shared by all the static bodies: it is never written (it has no mass anyway).
+// The inverse mass is the one of each axis: a locked axis keeps its velocity.
 // The components are written out: the vector methods go through the stack
 func (j *jacobian) apply(stateA, stateB *bodyState, direction mgl64.Vec3, lambda float64) {
 	if stateA.body != nil {
-		v, w, m := &stateA.velocity, &stateA.angularVelocity, lambda*stateA.invMass
-		v[0], v[1], v[2] = v[0]-direction[0]*m, v[1]-direction[1]*m, v[2]-direction[2]*m
+		v, w, m := &stateA.velocity, &stateA.angularVelocity, &stateA.invMassAxes
+		v[0], v[1], v[2] = v[0]-direction[0]*(lambda*m[0]), v[1]-direction[1]*(lambda*m[1]), v[2]-direction[2]*(lambda*m[2])
 		w[0], w[1], w[2] = w[0]-j.impulseA[0]*lambda, w[1]-j.impulseA[1]*lambda, w[2]-j.impulseA[2]*lambda
 	}
 	if stateB.body != nil {
-		v, w, m := &stateB.velocity, &stateB.angularVelocity, lambda*stateB.invMass
-		v[0], v[1], v[2] = v[0]+direction[0]*m, v[1]+direction[1]*m, v[2]+direction[2]*m
+		v, w, m := &stateB.velocity, &stateB.angularVelocity, &stateB.invMassAxes
+		v[0], v[1], v[2] = v[0]+direction[0]*(lambda*m[0]), v[1]+direction[1]*(lambda*m[1]), v[2]+direction[2]*(lambda*m[2])
 		w[0], w[1], w[2] = w[0]+j.impulseB[0]*lambda, w[1]+j.impulseB[1]*lambda, w[2]+j.impulseB[2]*lambda
 	}
 }
@@ -611,7 +647,7 @@ func (c *contactConstraint) turnAnchors(stateA, stateB *bodyState) {
 		if turnB {
 			cp.normal.turnB(stateB, actor.MulMat3(&stateB.deltaMatrix, cp.coreB).Sub(c.normal.Mul(c.radiusB)), c.normal)
 		}
-		cp.normal.updateMass(stateA, stateB)
+		cp.normal.updateMass(stateA, stateB, c.normal)
 	}
 	// the friction center turns with its bodies
 	coreA, coreB := c.centerCoreA, c.centerCoreB
@@ -642,9 +678,9 @@ func (j *jacobian) turnB(stateB *bodyState, rB, direction mgl64.Vec3) {
 	j.impulseB = mgl64.Vec3{m[0]*b[0] + m[3]*b[1] + m[6]*b[2], m[1]*b[0] + m[4]*b[1] + m[7]*b[2], m[2]*b[0] + m[5]*b[1] + m[8]*b[2]}
 }
 
-func (j *jacobian) updateMass(stateA, stateB *bodyState) {
+func (j *jacobian) updateMass(stateA, stateB *bodyState, direction mgl64.Vec3) {
 	j.mass = 0
-	k := stateA.invMass + stateB.invMass + (j.impulseA[0]*j.angularA[0] + j.impulseA[1]*j.angularA[1] + j.impulseA[2]*j.angularA[2]) +
+	k := linearMass(stateA, stateB, direction) + (j.impulseA[0]*j.angularA[0] + j.impulseA[1]*j.angularA[1] + j.impulseA[2]*j.angularA[2]) +
 		(j.impulseB[0]*j.angularB[0] + j.impulseB[1]*j.angularB[1] + j.impulseB[2]*j.angularB[2])
 	if k > 0 {
 		j.mass = 1 / k
@@ -681,12 +717,21 @@ func (s *solver) integrateVelocity(i int) {
 
 	// ========== ANGULAR ==========
 	angularVelocity := state.angularVelocity
-	if state.anisotropic {
+	// a body which turns around a single world axis has no gyroscopic torque along it: its locks hold it all
+	if state.anisotropic && state.angularLock.Count() < 2 {
 		angularVelocity = gyroscopic(angularVelocity, state.deltaRotation.Mul(s.starts[i].rotation).Normalize(), body.InertiaLocal, h)
 	}
 	state.angularVelocity = mgl64.Vec3{angularVelocity[0] * angularDamping, angularVelocity[1] * angularDamping, angularVelocity[2] * angularDamping}
 	if torque := body.Torque(); torque != (mgl64.Vec3{}) {
 		state.angularVelocity = state.angularVelocity.Add(actor.MulMat3(&state.inverseInertia, torque).Mul(h))
+	}
+
+	// ========== LOCKS ==========
+	// the gravity and the gyroscopic torque don't go through the inverse mass (as Jolt locks the velocity after the
+	// gravity, MotionProperties::ApplyForceTorqueAndDragInternal), nor a velocity written by the game (as the lock
+	// flags of PhysX clear it)
+	if state.isLocked() {
+		state.lockVelocities()
 	}
 }
 
@@ -735,6 +780,10 @@ func (s *solver) integratePosition(i int) {
 		turned := actor.Mul3(&state.deltaMatrix, &s.starts[i].inertia)
 		transposed := actor.Transpose3(&state.deltaMatrix)
 		state.inverseInertia = actor.Mul3(&turned, &transposed)
+		// the locks are in world space: the turned inertia is locked again, not the locked inertia turned
+		if state.angularLock != actor.NoAxes {
+			state.angularLock.LockInverseInertia(&state.inverseInertia)
+		}
 	}
 }
 
@@ -791,6 +840,9 @@ func (s *solver) warmStartConstraint(c *contactConstraint) {
 	if c.rollingResistance > 0 {
 		c.applyRolling(stateA, stateB, c.rollingImpulse)
 	}
+	if c.spinningResistance > 0 {
+		c.applyTwist(stateA, stateB, c.spinningImpulse)
+	}
 }
 
 // push solves the contacts with their spring, to push the overlap out. No friction (as Box3D): solved there, before
@@ -817,6 +869,7 @@ func (s *solver) relaxConstraint(c *contactConstraint) {
 	c.turnAnchors(stateA, stateB)
 	s.solveNormals(c, stateA, stateB, false)
 	c.solveRolling(stateA, stateB)
+	c.solveSpinning(stateA, stateB)
 	c.solveFriction(stateA, stateB)
 }
 
@@ -835,6 +888,7 @@ func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, s
 	}
 	var block normalBlock
 	block.count = n
+	linear := linearMass(stateA, stateB, c.normal)
 	for i := 0; i < n; i++ {
 		cp := &c.points[i]
 		separation := currentSeparation(stateA, stateB, cp, c.normal)
@@ -849,7 +903,7 @@ func (s *solver) solveNormals(c *contactConstraint, stateA, stateB *bodyState, s
 			gamma = c.spring.gamma
 		}
 		for j := 0; j <= i; j++ {
-			k := stateA.invMass + stateB.invMass + cp.normal.angularA.Dot(c.points[j].normal.impulseA) +
+			k := linear + cp.normal.angularA.Dot(c.points[j].normal.impulseA) +
 				cp.normal.angularB.Dot(c.points[j].normal.impulseB)
 			block.matrix[i][j], block.matrix[j][i] = k, k
 		}
@@ -880,7 +934,7 @@ func (s *solver) solveNormal(c *contactConstraint, stateA, stateB *bodyState, so
 		}
 		gamma = c.spring.gamma
 	}
-	k := stateA.invMass + stateB.invMass + cp.normal.angularA.Dot(cp.normal.impulseA) + cp.normal.angularB.Dot(cp.normal.impulseB)
+	k := linearMass(stateA, stateB, c.normal) + cp.normal.angularA.Dot(cp.normal.impulseA) + cp.normal.angularB.Dot(cp.normal.impulseB)
 	previous := cp.normalImpulse
 	r := cp.normal.velocity(stateA, stateB, c.normal) + bias
 	r -= k * previous
@@ -1038,6 +1092,33 @@ func (c *contactConstraint) solveRolling(stateA, stateB *bodyState) {
 	c.applyRolling(stateA, stateB, [2]float64{impulse[0] - previous[0], impulse[1] - previous[1]})
 }
 
+// ========== SPINNING RESISTANCE ==========
+// solveSpinning: a torque against the spin around the normal, up to spinningResistance * the normal impulse. The
+// contact of a ball is a patch, not a point: a patch of radius a under a load N holds the torque 2/3 µ a N (uniform
+// pressure). The model is the spinning friction of Bullet (a row around the normal, bounded by a length times the
+// normal impulse), the length given as the rolling resistance of Box2D (a ratio of the radius); warm started, and
+// bounded as a whole contact, not point by point. The twist of solveFriction (the lever arms of the points) stays
+func (c *contactConstraint) solveSpinning(stateA, stateB *bodyState) {
+	if c.spinningResistance <= 0 {
+		return
+	}
+	normalImpulse := 0.0
+	for j := 0; j < c.pointsCount; j++ {
+		normalImpulse += c.points[j].normalImpulse
+	}
+	wA, wB := &stateA.angularVelocity, &stateB.angularVelocity
+	spin := (wB[0]-wA[0])*c.normal[0] + (wB[1]-wA[1])*c.normal[1] + (wB[2]-wA[2])*c.normal[2]
+	previous := c.spinningImpulse
+	impulse, limit := previous-c.twistMass*spin, c.spinningResistance*normalImpulse
+	if impulse > limit {
+		impulse = limit
+	} else if impulse < -limit {
+		impulse = -limit
+	}
+	c.spinningImpulse = impulse
+	c.applyTwist(stateA, stateB, impulse-previous)
+}
+
 // ========== FRICTION ==========
 // solveFriction: Coulomb's law at the friction center (as Box3D & Jolt). The twist around the normal is held up to
 // µ Σ (lever arm × normal impulse) of the points, then the tangent impulse stays in a disk of radius µ Σ normal impulse
@@ -1152,6 +1233,7 @@ func (s *solver) storeImpulses() {
 func (s *solver) storeImpulsesConstraint(i int) {
 	c := &s.constraints[i]
 	c.manifold.RollingImpulse = c.tangents[0].Mul(c.rollingImpulse[0]).Add(c.tangents[1].Mul(c.rollingImpulse[1]))
+	c.manifold.SpinningImpulse = c.spinningImpulse
 	for j := 0; j < c.pointsCount; j++ {
 		point := &c.manifold.Points[j]
 		cp := &c.points[j]

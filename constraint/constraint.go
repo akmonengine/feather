@@ -28,3 +28,10 @@ func ComputeDynamicFriction(matA, matB actor.Material) float64 {
 func ComputeRollingResistance(matA, matB actor.Material, radiusA, radiusB float64) float64 {
 	return math.Max(matA.RollingResistance, matB.RollingResistance) * math.Max(radiusA, radiusB)
 }
+
+// ComputeSpinningResistance is the largest spinning resistance of both materials, times the largest radius of both
+// shapes (0 for a box), as the rolling resistance: it limits the torque that stops the spin around the normal (the
+// spinning friction of Bullet, whose coefficient is this length)
+func ComputeSpinningResistance(matA, matB actor.Material, radiusA, radiusB float64) float64 {
+	return math.Max(matA.SpinningResistance, matB.SpinningResistance) * math.Max(radiusA, radiusB)
+}

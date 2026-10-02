@@ -110,13 +110,18 @@ func (c *capsuleCore) Support(direction mgl64.Vec3) mgl64.Vec3 {
 
 // NewCoreProxy: the core of the body and its radius. The other shapes are their own core, with a radius of 0
 func NewCoreProxy(body *actor.RigidBody) (Proxy, float64) {
-	switch shape := body.Shape.(type) {
+	return NewCoreProxyAt(body.Transform, body.Shape)
+}
+
+// NewCoreProxyAt: the core of the shape at the transform, and its radius (a shape moved by a query)
+func NewCoreProxyAt(transform actor.Transform, shape actor.ShapeInterface) (Proxy, float64) {
+	switch shape := shape.(type) {
 	case *actor.Sphere:
-		return NewProxyAt(body.Transform, (*sphereCore)(shape)), shape.Radius
+		return NewProxyAt(transform, (*sphereCore)(shape)), shape.Radius
 	case *actor.Capsule:
-		return NewProxyAt(body.Transform, (*capsuleCore)(shape)), shape.Radius
+		return NewProxyAt(transform, (*capsuleCore)(shape)), shape.Radius
 	}
-	return NewProxy(body), 0
+	return NewProxyAt(transform, shape), 0
 }
 
 // NewProxyAt: the shape at the transform (a body during its motion)
