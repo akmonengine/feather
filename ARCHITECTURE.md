@@ -129,10 +129,29 @@ else knows about the locks, apart from the integration (gravity, gyroscopic torq
   `World.Close()` stops them (they are also stopped when the World is garbage collected).
 - The broad phase, the narrow phase, the preparation of the contacts and the integration of the bodies:
   each body, pair or contact writes its result at its own index, the order of execution doesn't matter.
-- The pairs are sorted (index of the first body, then of the second body).
+- The order of the bodies is the one of `World.Bodies`: `AddBody` puts a body last, `RemoveBody` moves the following
+  bodies up by one (the trees, the pairs and the contacts follow, `Tree.removed`), a body added again is last whatever
+  its former index. The same bodies added and removed in the same order give the same result.
+- The pairs are sorted by the indices of their bodies (`Tree.sortPairs`: the first body by a counting sort, then the few
+  pairs of a body, its planes first, by an insertion sort). The pair search already gives them in the same order whatever
+  the workers (its chunks are read in their order): the sort makes it the order of a search from scratch, whatever the
+  history of the trees, and keeps the contacts of a body next to each other for the solver. It costs 4.4 ns per pair on
+  one goroutine: 3.8 µs for the 856 pairs of 500 bodies landing, 15 µs for the 3471 pairs of 2000 bodies, 0.1 to 0.2 %
+  of their step with 1 worker and 0.4 to 1 % with 8 (`go test -run xxx -bench SortPairs`, on a Ryzen 7 5800X).
+  Box2D states the rule (`contact.c` in v3.1, "Contacts and determinism": the contacts must exist in the same order
+  whatever the thread count, the Gauss-Seidel solver is order dependent) and now sorts the keys of its new pairs
+  (`b2UpdateBroadPhasePairs`, `broad_phase.c`, read on 02/10/2026: "Pairs arrive in deterministic order but scrambled
+  relative to body and shape order, sorting them here improves solver performance"); Jolt sorts the constraints and the
+  contacts of each island (`PhysicsSettings::mDeterministicSimulation`, on by default in 5.5.0: off, it runs "faster
+  but it will no longer be deterministic").
 - The solver is a Gauss-Seidel: a constraint uses the result of the previous one. The contacts and the joints are
   colored (like Box2D v3): the constraints of a color don't share any dynamic body, so a color is solved in parallel.
   The colors are always solved in the same order: the result is the same bit for bit, whatever the number of workers.
+- It is tested (`determinism_test.go`): the bits of the bodies and of the contacts after each of the 1000 steps of 200
+  bodies (a pile bouncing on chains and on linked boxes), and of a pile of 600 bodies, are the same between two runs and
+  with 1, 4 and 8 workers, also when bodies are removed and added again during the run. Each scene must reach the
+  parallel path of every stage, or its test fails. The result is the same on a given GOARCH only: Go may fuse
+  `x*y + z` into a single rounding on some architectures.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Tests & benchmarks
