@@ -111,14 +111,23 @@ var ballAndChain = Scene{
 }
 
 // jointGrid: a net of spheres linked by ball joints to their 4 neighbours, held by 7 × 7 nodes in its middle, falling
-// under twice the gravity (as in Solver2D)
+// under twice the gravity (as in Solver2D). The nodes hit each other as the net folds: its worst gap is a draw, its
+// variants fall under 1.98 to 2.02 times the gravity
 var jointGrid = Scene{
 	Name:   "joint grid",
 	joints: true,
-	Run: func(size Size, play Player) Result {
+	Run:    net(2),
+	Draws:  []string{"worst gap"},
+	Vary:   across(1.98, 2.02, net),
+	Check:  func(r Result) error { return holds(r, 0.5) },
+}
+
+// net: the scene joint grid, falling under pull times the gravity
+func net(pull float64) func(size Size, play Player) Result {
+	return func(size Size, play Player) Result {
 		count := map[Size]int{Small: 20, Full: 60}[size]
 		w := newWorld()
-		w.Gravity = w.Gravity.Mul(2)
+		w.Gravity = w.Gravity.Mul(pull)
 		m := material{friction: 0.6, density: 1}
 		nodes := make([]*actor.RigidBody, count*count)
 		var links []link
@@ -152,8 +161,7 @@ var jointGrid = Scene{
 			fastest = math.Max(fastest, maxSpeed(nodes))
 		})
 		return Result{"worst gap": mm(gap), "max speed": {fastest, "m/s"}, "finite": finiteMetric(nodes)}
-	},
-	Check: func(r Result) error { return holds(r, 0.5) },
+	}
 }
 
 // stretchedChain: a chain of 40 links of 1 m hanging from a static body, created stretched twice: it recovers the state

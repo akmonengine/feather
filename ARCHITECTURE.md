@@ -160,6 +160,14 @@ Four levels, from the most precise to the widest:
    Solver2D, compared to `bench/baseline.json`:
    - the fingerprint of the final state (identical on the same GOARCH);
    - quality metrics, 0.5 mm of tolerance on a depth, 0.1 % on an energy gain;
+   - the draws: 11 measures of 8 scenes are decided by the rounding (the depth of a pile, the speed left in the ball of
+     "rush", the worst gap of the net, the far deviation of the pyramid...). Pushing every body by 1 µm/s moves them by
+     more than their tolerance: any change of the engine draws them again, one value says nothing. Each is followed by
+     its median over 32 variants of its scene (other seeds for the piles; a drop height, a radius, a push, a gravity or
+     a gap across a finite range for the others), with a tolerance of 3 standard deviations of that median, measured in
+     the ensemble (from the median to its upper quartile, so a few variants far in the tail don't widen it) and never
+     under the tolerance of the unit. The worst variant is written in the reference to be read, it is not compared. The
+     variants are not timed: they run in parallel after the timed scenes (`-check` takes about 80 s);
    - the time of a step (+20 %) and of its phases (+30 %, over 5 % of the step), each the best of 3 runs, only on the
      machine of the reference, and for the steps over 0.1 ms (under it, the noise of the timer dominates).
 

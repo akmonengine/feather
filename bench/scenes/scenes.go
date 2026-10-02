@@ -56,6 +56,20 @@ type Scene struct {
 	// references.go). Gap: the ticket following a known gap to Box3D, if any
 	Reference func(Result, Size) error
 	Gap       string
+	// Draws: the measures of the scene which are a draw. They are decided by the rounding (a contact at the separation 0
+	// solved as a spring or as a speculative row, 2 impacts in one order or the other): any change of the engine draws
+	// them again, further than the tolerance of a measure. The bench follows their median over the variants of the scene.
+	// Vary runs the variant at spread, from 0 to 1: a length of the scene (a drop height, a radius, a gap...) across a
+	// finite range, where every variant is the same difficulty. Nil: no measure of the scene is a draw
+	Draws []string
+	Vary  func(size Size, spread float64, play Player) Result
+}
+
+// across: the variants of a scene built from a parameter, going from..to with the spread
+func across(from, to float64, at func(parameter float64) func(Size, Player) Result) func(Size, float64, Player) Result {
+	return func(size Size, spread float64, play Player) Result {
+		return at(from+(to-from)*spread)(size, play)
+	}
 }
 
 // Supported: the scene runs on this version

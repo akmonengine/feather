@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akmonengine/feather"
@@ -32,6 +33,8 @@ import (
 //   - its fingerprint, a hash of the bits of the positions & rotations at the end: it must be identical on the same
 //     architecture (GOARCH). A change of behaviour, even tiny, changes it: -update after a wanted change
 //   - its quality metrics, each with its tolerance (qualityTolerances): only a worse value is a regression
+//   - its draws: the measures decided by the rounding, followed by their median over the variants of the scene, with a
+//     tolerance coming from their spread (DRAWS, below)
 //   - its speed: the time of a step and of its phases (feather.Profile), each the best of speedRuns runs, every run at
 //     another depth of the stack (stack.go: the time of a phase depends on it). Only compared on the machine of the
 //     reference: a step slower by more than stepTolerance, or a phase taking more than 5 % of the step and slower by
@@ -73,10 +76,24 @@ type metric struct {
 	Unit  string  `json:"unit"`
 }
 
+// draw: a measure of a scene decided by the rounding, over the variants of the scene (DRAWS, below)
+type draw struct {
+	// Median of the variants
+	Median float64 `json:"median"`
+	Unit   string  `json:"unit"`
+	// Variants measured
+	Variants int `json:"variants"`
+	// Tolerance: how far over Median the median of another draw of the same variants may lie
+	Tolerance float64 `json:"tolerance"`
+	// Worst variant: written to be read, not compared (the tail of a draw is a draw of a few variants)
+	Worst float64 `json:"worst"`
+}
+
 // sceneResult: what a scene gives
 type sceneResult struct {
 	Fingerprint string            `json:"fingerprint"`
 	Quality     map[string]metric `json:"quality"`
+	Draws       map[string]draw   `json:"draws,omitempty"`
 	// StepMs: the mean time of a step (ms), PhasesMs the mean time of each phase
 	StepMs   float64            `json:"stepMs"`
 	PhasesMs map[string]float64 `json:"phasesMs"`
@@ -93,6 +110,10 @@ type baseline struct {
 type regressionScene struct {
 	name string
 	run  func() map[string]metric
+	// draws: the measures of the scene which are a draw, by name. They are measured over its variants, not by run:
+	// variant runs one of them, out of drawVariants, with the player it is given (the variants run along each other)
+	draws   []string
+	variant func(variant int, play scenes.Player) map[string]metric
 }
 
 // recorder: the worlds of the scene being measured, and the time of their steps
@@ -138,30 +159,56 @@ func profilePhases(p feather.Profile) map[string]time.Duration {
 
 // ========== SCENES ==========
 
+// The depths of a pile are draws: the variants of the 3 piles are other piles, by their seed
 var regressionScenes = append([]regressionScene{
-	{"slope pile", slopePile},
-	{"terrain piles", terrainPiles},
-	{"pyramid", pyramidDrift},
-	{"pile of 500", pile500},
-	{"joint chain", jointChain},
-	{"rain on terrain", rainOnTerrain},
-	{"spinning tops", spinningTops},
-	{"locked bodies", lockedBodies},
+	{name: "slope pile", run: func() map[string]metric { return slopePile(2, play) },
+		draws: []string{"landing depth", "resting depth"}, variant: func(variant int, play scenes.Player) map[string]metric {
+			return slopePile(int64(variant+1), play)
+		}},
+	{name: "terrain piles", run: terrainPiles,
+		draws: []string{"landing depth", "resting depth"}, variant: func(variant int, play scenes.Player) map[string]metric {
+			return terrainPile(int64(variant+1), play)
+		}},
+	{name: "pyramid", run: pyramidDrift},
+	{name: "pile of 500", run: pile500},
+	{name: "joint chain", run: jointChain},
+	{name: "rain on terrain", run: func() map[string]metric { return rainOnTerrain(7, unmeasured) },
+		draws: []string{"landing depth"}, variant: func(variant int, play scenes.Player) map[string]metric {
+			return rainOnTerrain(int64(variant+1), play)
+		}},
+	{name: "spinning tops", run: spinningTops},
+	{name: "locked bodies", run: lockedBodies},
 }, append(queryScenes, solverScenes()...)...)
 
 // solverScenes: the scenes of Solver2D (bench/scenes), at their small size (the full size is for -scenes)
 func solverScenes() []regressionScene {
+	metrics := func(result scenes.Result) map[string]metric {
+		quality := map[string]metric{}
+		for name, m := range result {
+			quality[name] = metric{m.Value, m.Unit}
+		}
+		return quality
+	}
 	var result []regressionScene
 	for _, scene := range scenes.All {
-		result = append(result, regressionScene{"solver2d " + scene.Name, func() map[string]metric {
-			quality := map[string]metric{}
-			for name, m := range scene.Run(scenes.Small, play) {
-				quality[name] = metric{m.Value, m.Unit}
+		entry := regressionScene{name: "solver2d " + scene.Name, run: func() map[string]metric {
+			return metrics(scene.Run(scenes.Small, play))
+		}}
+		if scene.Vary != nil {
+			entry.draws = scene.Draws
+			entry.variant = func(variant int, play scenes.Player) map[string]metric {
+				return metrics(scene.Vary(scenes.Small, float64(variant)/drawVariants, play))
 			}
-			return quality
-		}})
+		}
+		result = append(result, entry)
 	}
 	return result
+}
+
+// unmeasured plays without the measures of each step: the depth of a pile in a terrain costs more than its step, and is
+// a draw, measured over the variants
+func unmeasured(w *feather.World, seconds float64, _ func()) {
+	play(w, seconds, nil)
 }
 
 // mixedShape: a box, a sphere or a capsule, of 20 to 40 cm
@@ -180,12 +227,12 @@ func randomTurn(r *rand.Rand) mgl64.Quat {
 }
 
 // slopePile: 60 bodies dropped on a slope of 30°, hitting each other and tumbling
-func slopePile() map[string]metric {
+func slopePile(seed int64, play scenes.Player) map[string]metric {
 	angle := 30 * math.Pi / 180
 	normal := mgl64.Vec3{-math.Sin(angle), math.Cos(angle), 0}
 	w := world(1)
 	slope := body(w, tr(mgl64.Vec3{}, mgl64.QuatIdent()), &actor.Plane{Normal: normal}, actor.BodyTypeStatic, 0.6, 0)
-	r := rand.New(rand.NewSource(2))
+	r := rand.New(rand.NewSource(seed))
 	for i := 0; i < 60; i++ {
 		x, z := r.Float64()*8-4, r.Float64()*16-8
 		position := mgl64.Vec3{x, x*math.Tan(angle) + 1 + r.Float64()*3, z}
@@ -199,31 +246,31 @@ func slopePile() map[string]metric {
 	}
 }
 
-// terrainPiles: 60 bodies dropped on hills, 10 times (a pile is chaotic: its median & its worst are measured)
+// terrainPiles: 10 piles on hills, for the fingerprint and the speed
 func terrainPiles() map[string]metric {
-	const piles = 10
-	landings, restings := make([]float64, piles), make([]float64, piles)
-	for pile := 0; pile < piles; pile++ {
-		seed := int64(pile + 1)
-		w := world(1)
-		terrain := hills(w, seed)
-		field := terrain.Shape.(*actor.Heightfield)
-		r := rand.New(rand.NewSource(seed + 100))
-		for i := 0; i < 60; i++ {
-			x, z := r.Float64()*16-8, r.Float64()*16-8
-			ground, _ := field.HeightAt(x, z)
-			b := body(w, tr(mgl64.Vec3{x, ground + 1 + r.Float64()*3, z}, randomTurn(r)), mixedShape(r, i), actor.BodyTypeDynamic, 0.6, 0)
-			b.Material.RollingResistance = 0.1
-		}
-		play(w, 4, func() { landings[pile] = math.Max(landings[pile], deepest(w, terrain)) })
-		restings[pile] = deepest(w, terrain)
+	for seed := int64(1); seed <= 10; seed++ {
+		terrainPile(seed, unmeasured)
 	}
-	slices.Sort(landings)
-	slices.Sort(restings)
+	return map[string]metric{}
+}
+
+// terrainPile: 60 bodies dropped on hills
+func terrainPile(seed int64, play scenes.Player) map[string]metric {
+	w := world(1)
+	terrain := hills(w, seed)
+	field := terrain.Shape.(*actor.Heightfield)
+	r := rand.New(rand.NewSource(seed + 100))
+	for i := 0; i < 60; i++ {
+		x, z := r.Float64()*16-8, r.Float64()*16-8
+		ground, _ := field.HeightAt(x, z)
+		b := body(w, tr(mgl64.Vec3{x, ground + 1 + r.Float64()*3, z}, randomTurn(r)), mixedShape(r, i), actor.BodyTypeDynamic, 0.6, 0)
+		b.Material.RollingResistance = 0.1
+	}
+	landing := 0.0
+	play(w, 4, func() { landing = math.Max(landing, deepest(w, terrain)) })
 	return map[string]metric{
-		"median landing depth": {(landings[piles/2-1] + landings[piles/2]) / 2 * 1000, "mm"},
-		"worst landing depth":  {landings[piles-1] * 1000, "mm"},
-		"worst resting depth":  {restings[piles-1] * 1000, "mm"},
+		"landing depth": {landing * 1000, "mm"},
+		"resting depth": {deepest(w, terrain) * 1000, "mm"},
 	}
 }
 
@@ -306,11 +353,11 @@ func jointChain() map[string]metric {
 }
 
 // rainOnTerrain: 200 bodies falling on hills, 10 more every 0.1 s
-func rainOnTerrain() map[string]metric {
+func rainOnTerrain(seed int64, play scenes.Player) map[string]metric {
 	w := world(1)
-	terrain := hills(w, 7)
+	terrain := hills(w, seed)
 	field := terrain.Shape.(*actor.Heightfield)
-	r := rand.New(rand.NewSource(8))
+	r := rand.New(rand.NewSource(seed + 1))
 	landing, fell := 0.0, 0
 	for step := 0; step < int(math.Round(5/dt)); step++ {
 		if step%5 == 0 && len(w.Bodies) < 200 {
@@ -324,7 +371,7 @@ func rainOnTerrain() map[string]metric {
 		play(w, dt, func() { landing = math.Max(landing, deepest(w, terrain)) })
 	}
 	for _, b := range w.Bodies[1:] {
-		if b.Transform.Position.Y() < -5 && recording.measuring {
+		if b.Transform.Position.Y() < -5 {
 			fell++
 		}
 	}
@@ -526,34 +573,49 @@ func underTerrain(field *actor.Heightfield, b *actor.RigidBody) float64 {
 					corner[k] = -corner[k]
 				}
 			}
-			depth = math.Max(depth, -surfaceDistance(field, b.Transform.ToWorld(corner)))
+			depth = math.Max(depth, sunk(field, b.Transform.ToWorld(corner), 0))
 		}
 	case *actor.Sphere:
-		depth = shape.Radius - surfaceDistance(field, b.Transform.Position)
+		depth = sunk(field, b.Transform.Position, shape.Radius)
 	case *actor.Capsule:
 		bottom, top := shape.Segment(b.Transform)
 		for k := 0; k <= 50; k++ {
-			depth = math.Max(depth, shape.Radius-surfaceDistance(field, bottom.Add(top.Sub(bottom).Mul(float64(k)/50))))
+			depth = math.Max(depth, sunk(field, bottom.Add(top.Sub(bottom).Mul(float64(k)/50)), shape.Radius))
 		}
 	}
-	return math.Max(0, depth)
+	return depth
 }
 
-// surfaceDistance: the distance from the point to the triangles, negative under the terrain
-func surfaceDistance(field *actor.Heightfield, p mgl64.Vec3) float64 {
-	best := math.Inf(1)
-	around := mgl64.Vec3{1, 100, 1}
+// sunkReach: a point under the terrain is measured against the triangles 1 m around it at most
+const sunkReach = 1.0
+
+// sunk: how deep the ball around the point is under the terrain: its radius minus the distance from the point to the
+// triangles, counted negative under the terrain; 0 if the ball is above. Only the triangles which can be the closest
+// are measured: the ones within the radius of a point above the terrain (further, the ball doesn't touch them), the
+// ones as close as the terrain straight above a point under it
+func sunk(field *actor.Heightfield, p mgl64.Vec3, radius float64) float64 {
+	reach := radius
+	height, found := field.HeightAt(p.X(), p.Z())
+	under := found && p.Y() < height
+	if under {
+		reach = math.Min(height-p.Y(), sunkReach)
+	}
+	if reach == 0 {
+		return 0
+	}
+	closest := math.Inf(1)
+	around := mgl64.Vec3{reach, 100, reach}
 	for _, cell := range field.OverlapCells(actor.AABB{Min: p.Sub(around), Max: p.Add(around)}, nil) {
 		x, z := int(cell)/(field.ZSamples-1), int(cell)%(field.ZSamples-1)
 		for t := 0; t < 2; t++ {
 			triangle, _ := field.Triangle(x, z, t)
-			best = math.Min(best, p.Sub(closestOnTriangle(p, triangle)).Len())
+			closest = math.Min(closest, p.Sub(closestOnTriangle(p, triangle)).Len())
 		}
 	}
-	if height, ok := field.HeightAt(p.X(), p.Z()); ok && p.Y() < height {
-		return -best
+	if under {
+		return radius + closest
 	}
-	return best
+	return math.Max(0, radius-closest)
 }
 
 // closestOnTriangle: the closest point of the triangle (Ericson 5.1.5)
@@ -590,11 +652,100 @@ func closestOnTriangle(p mgl64.Vec3, triangle [3]mgl64.Vec3) mgl64.Vec3 {
 	return a.Add(ab.Mul(vb * denominator)).Add(ac.Mul(vc * denominator))
 }
 
+// ========== DRAWS ==========
+// Some measures are decided by the rounding: a contact at the separation 0 is solved as a spring or as a speculative
+// row, 2 impacts come in one order or the other, and the pile, the ball of spheres or the net ends elsewhere. Pushing
+// every body of the scene by 1 µm/s moves such a measure by more than its tolerance: any change of the engine draws it
+// again, and one value of it says nothing (rush: 0.12 to 0.91 m/s). The measures which are a draw are named by their
+// scene (regressionScene.draws, scenes.Scene.Draws); a scene which only keeps a symmetry (circle stack, warm start
+// energy, stretched chain, high mass ratio 2) is not one, the push breaks what it measures: its measures stay smooth
+// across a finite length of the scene.
+//
+// A draw is followed over an ensemble: drawVariants variants of its scene, each differing by a finite length of the
+// scene (the seed of a pile, a drop height, a radius: a variant is not the scene pushed by a rounding). The reference
+// holds:
+//   - the median of the variants;
+//   - its tolerance: how far over it the median of another draw of the same ensemble may lie. A change of the engine
+//     which keeps the quality draws every variant again: its median falls among the sorted variants of the reference
+//     at the rank n/2 ± √(n/2) (a variant is under the true median with a chance of 1/2, in both ensembles). The
+//     distance from the median to the variant 2 √(n/2) ranks over it (8 ranks out of 32: the upper quartile) is 2
+//     standard deviations of the median: the tolerance is drawSigmas of them. It is measured in the middle of the
+//     ensemble and assumes no law: the tail of a draw (a pile out of 8 with a body sunk by centimetres) doesn't widen
+//     it, 2 modes do. It is never under the tolerance of the unit;
+//   - the worst variant: to be read, it is not compared (the tail of an ensemble is a draw of a few variants).
+//
+// 2 draws of the same law are told apart less than 1 time out of 100, a law moved by twice its spread (the distance
+// between its quartiles) is seen 8 times out of 10 at least (TestDrawToleranceTellsADrawFromARegression). The variants
+// are not timed: they run along each other, after the timed scenes.
+
+const (
+	// drawVariants: the variants of an ensemble
+	drawVariants = 32
+
+	// drawSigmas: the median of a draw further than 3 of its standard deviations is a regression
+	drawSigmas = 3.0
+
+	// drawRankSigmas: the standard deviation of the median is measured over 2 standard deviations of its rank
+	drawRankSigmas = 2.0
+)
+
+// drawOf: the median of the variants, its tolerance and the worst variant
+func drawOf(variants []float64, unit string) draw {
+	sorted := slices.Clone(variants)
+	slices.Sort(sorted)
+	n := len(sorted)
+	median := (sorted[(n-1)/2] + sorted[n/2]) / 2
+	over := min(n-1, n/2+int(math.Ceil(drawRankSigmas*math.Sqrt(float64(n)/2))))
+	return draw{Median: median, Unit: unit, Variants: n, Tolerance: drawSigmas / drawRankSigmas * (sorted[over] - median), Worst: sorted[n-1]}
+}
+
+// tolerance of the draw: the one of its ensemble, the one of its unit at least
+func (d draw) tolerance() float64 {
+	return math.Max(d.Tolerance, qualityTolerances[d.Unit])
+}
+
+// measureDraws runs the variants of the scene along each other and gives its draws. The same scene gives the same bits:
+// a variant doesn't see the others
+func measureDraws(scene regressionScene) map[string]draw {
+	results := make([]map[string]metric, drawVariants)
+	var running sync.WaitGroup
+	slots := make(chan struct{}, runtime.GOMAXPROCS(0))
+	for variant := range results {
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			var worlds []*feather.World
+			results[variant] = scene.variant(variant, func(w *feather.World, seconds float64, each func()) {
+				if !slices.Contains(worlds, w) {
+					worlds = append(worlds, w)
+				}
+				scenes.Step(w, seconds, each)
+			})
+			for _, w := range worlds {
+				w.Close()
+			}
+		}()
+	}
+	running.Wait()
+	draws := map[string]draw{}
+	for _, name := range scene.draws {
+		values := make([]float64, drawVariants)
+		for variant, result := range results {
+			values[variant] = result[name].Value
+		}
+		draws[name] = drawOf(values, results[0][name].Unit)
+	}
+	return draws
+}
+
 // ========== RUN & COMPARE ==========
 
 // measureScene runs the scene speedRuns times: the quality & the fingerprint of the first run (all runs give the same
-// bits), the speed of the step and of each phase from its best run. The runs start at stackOffset in the page of the
-// stack, then a third of a page further each: a phase slow at a depth of the stack is not at the next one (stack.go)
+// bits), without its draws (measureDraws), the speed of the step and of each phase from its best run. The runs start
+// at stackOffset in the page of the stack, then a third of a page further each: a phase slow at a depth of the stack
+// is not at the next one (stack.go)
 func measureScene(scene regressionScene, stackOffset int) sceneResult {
 	var result sceneResult
 	for attempt := 0; attempt < speedRuns; attempt++ {
@@ -615,6 +766,9 @@ func measureScene(scene regressionScene, stackOffset int) sceneResult {
 				_ = binary.Write(hash, binary.LittleEndian, x)
 			}
 			result.Fingerprint = fmt.Sprintf("%016x", hash.Sum64())
+			for _, name := range scene.draws {
+				delete(quality, name)
+			}
 			result.Quality = quality
 		}
 		stepMs := milliseconds(recording.step) / float64(recording.steps)
@@ -659,6 +813,18 @@ func regressions(update bool, stackOffset int) bool {
 	for _, scene := range regressionScenes {
 		current.Scenes[scene.name] = measureScene(scene, stackOffset)
 		fmt.Printf("%-16s %s  %.3f ms/step\n", scene.name, current.Scenes[scene.name].Fingerprint, current.Scenes[scene.name].StepMs)
+	}
+	for _, scene := range regressionScenes {
+		if scene.variant == nil {
+			continue
+		}
+		result := current.Scenes[scene.name]
+		result.Draws = measureDraws(scene)
+		current.Scenes[scene.name] = result
+		for _, name := range sortedKeys(result.Draws) {
+			d := result.Draws[name]
+			fmt.Printf("%-16s %s: median %.3f %s of %d variants (tolerance %.3f, worst %.3f)\n", scene.name, name, d.Median, d.Unit, d.Variants, d.tolerance(), d.Worst)
+		}
 	}
 	if update {
 		data, err := json.MarshalIndent(current, "", "  ")
@@ -709,11 +875,25 @@ func compare(reference, current baseline) bool {
 		for _, name := range sortedKeys(want.Quality) {
 			before, after := want.Quality[name], got.Quality[name]
 			tolerance := qualityTolerances[before.Unit]
-			switch {
+			switch _, measured := got.Quality[name]; {
+			case !measured:
+				fail("%s: %s is in the reference, and not measured anymore (-update)", scene.name, name)
 			case after.Value > before.Value+tolerance:
 				fail("%s: %s %.3f %s, the reference is %.3f (tolerance %g)", scene.name, name, after.Value, before.Unit, before.Value, tolerance)
 			case after.Value < before.Value-tolerance:
 				fmt.Printf("better     %s: %s %.3f %s, the reference is %.3f\n", scene.name, name, after.Value, before.Unit, before.Value)
+			}
+		}
+		for _, name := range sortedKeys(got.Draws) {
+			before, after := want.Draws[name], got.Draws[name]
+			tolerance := before.tolerance()
+			switch _, drawn := want.Draws[name]; {
+			case !drawn || before.Variants != after.Variants:
+				fail("%s: %s over %d variants is not in the reference (-update)", scene.name, name, after.Variants)
+			case after.Median > before.Median+tolerance:
+				fail("%s: %s median %.3f %s of %d variants, the reference is %.3f (tolerance %.3f)", scene.name, name, after.Median, before.Unit, after.Variants, before.Median, tolerance)
+			case after.Median < before.Median-tolerance:
+				fmt.Printf("better     %s: %s median %.3f %s of %d variants, the reference is %.3f\n", scene.name, name, after.Median, before.Unit, after.Variants, before.Median)
 			}
 		}
 		if !sameMachine || want.StepMs < minComparedStepMs {

@@ -57,10 +57,23 @@ var warmStartEnergy = Scene{
 	},
 }
 
-// highMassRatio1: 3 pyramids of cubes of 2 m, a cube 100, 200 or 300 times heavier dropped on each
+// highMassRatio1: 3 pyramids of cubes of 2 m, a cube 100, 200 or 300 times heavier dropped on each from 2 m. Where the
+// heavy cube rests is a draw: its variants drop it from 1.95 to 2.05 m
 var highMassRatio1 = Scene{
-	Name: "high mass ratio 1",
-	Run: func(size Size, play Player) Result {
+	Name:  "high mass ratio 1",
+	Run:   heavyCubes(2),
+	Draws: []string{"heavy cube sag"},
+	Vary:  across(1.95, 2.05, heavyCubes),
+	// the pyramids hold: no cube leaves its place (moves by its half size), the heavy cube stays on the top
+	Check: func(r Result) error {
+		return firstError(atMost(r, "worst drift", 1000, "less than the half size of a cube"),
+			atMost(r, "heavy cube sag", 1000, "less than the half size of a cube"))
+	},
+}
+
+// heavyCubes: the scene high mass ratio 1, the heavy cubes dropped from drop (m) above the pyramids
+func heavyCubes(drop float64) func(size Size, play Player) Result {
+	return func(size Size, play Player) Result {
 		count := map[Size]int{Small: 4, Full: 10}[size]
 		w := newWorld()
 		ground(w, mgl64.Vec3{}, material{friction: 0.5})
@@ -68,8 +81,8 @@ var highMassRatio1 = Scene{
 		for j := 0; j < 3; j++ {
 			origin := mgl64.Vec3{float64(j-1) * float64(2*count+2), 0, 0}
 			bodies = append(bodies, squarePyramid(w, origin, count, 1, 0, material{friction: 0.5, density: 1})...)
-			// the heavy cube, 2 m above the top
-			top := origin.Add(mgl64.Vec3{0, 1 + 2*float64(count) + 2, 0})
+			// the heavy cube, above the top
+			top := origin.Add(mgl64.Vec3{0, 1 + 2*float64(count) + drop, 0})
 			tops = append(tops, box(w, top, mgl64.Vec3{1, 1, 1}, material{friction: 0.5, density: 100 * float64(j+1)}))
 		}
 		start := positions(bodies)
@@ -79,12 +92,7 @@ var highMassRatio1 = Scene{
 			sag = math.Max(sag, 1+2*float64(count)-top.Transform.Position.Y())
 		}
 		return Result{"worst drift": mm(worstDrift(bodies, start)), "heavy cube sag": mm(sag), "layers": {float64(count), ""}}
-	},
-	// the pyramids hold: no cube leaves its place (moves by its half size), the heavy cube stays on the top
-	Check: func(r Result) error {
-		return firstError(atMost(r, "worst drift", 1000, "less than the half size of a cube"),
-			atMost(r, "heavy cube sag", 1000, "less than the half size of a cube"))
-	},
+	}
 }
 
 // highMass: a slab of 20 × 20 × 1 m dropped from 15 m on 2 cubes of 1 m, 400 times lighter, on a plane or on a thick
@@ -273,10 +281,22 @@ var pyramid = Scene{
 }
 
 // rush: spheres pulled towards a static sphere without gravity (12.7 m/s², as in Solver2D), from a spiral of 5 m to
-// 25 m: they gather into a ball
+// 25 m: they gather into a ball. The ball is a block held by a few contacts, rolling on the static sphere: how fast it
+// still moves after 5 s and how much it is pressed are draws, their variants start the spiral from 5 to 7.4 m
 var rush = Scene{
-	Name: "rush",
-	Run: func(size Size, play Player) Result {
+	Name:  "rush",
+	Run:   rushFrom(5),
+	Draws: []string{"final speed", "final overlap"},
+	Vary:  across(5, 7.4, rushFrom),
+	Check: func(r Result) error {
+		// free fall from 25 m under 12.7 m/s² reaches 25 m/s
+		return atMost(r, "max speed", math.Sqrt(2*1000/(100*math.Pi*0.25)*25), "no body faster than its fall")
+	},
+}
+
+// rushFrom: the scene rush, the spiral starting at radius (m) from the static sphere
+func rushFrom(radius float64) func(size Size, play Player) Result {
+	return func(size Size, play Player) Result {
 		const pull = 1000 / (100 * math.Pi * 0.25)
 		count := map[Size]int{Small: 100, Full: 400}[size]
 		w := newWorld()
@@ -290,7 +310,7 @@ var rush = Scene{
 			y := 1 - 2*(float64(i)+0.5)/float64(count)
 			ring := math.Sqrt(1 - y*y)
 			direction := mgl64.Vec3{ring * math.Cos(golden*float64(i)), y, ring * math.Sin(golden*float64(i))}
-			spheres = append(spheres, sphere(w, direction.Mul(5+0.05*float64(i)), 0.5, m))
+			spheres = append(spheres, sphere(w, direction.Mul(radius+0.05*float64(i)), 0.5, m))
 		}
 		pullAll := func() {
 			for _, s := range spheres {
@@ -312,17 +332,27 @@ var rush = Scene{
 			}
 		}
 		return Result{"max speed": {fastest, "m/s"}, "final speed": {maxSpeed(spheres), "m/s"}, "final overlap": mm(overlap)}
-	},
+	}
+}
+
+// doubleDomino: 15 dominos 1 m apart, the first pushed at its top by 0.2 N·s: each one topples the next, all fall. The
+// step where the last one falls is a draw: its variants push the first from 0.2 to 0.22 N·s
+var doubleDomino = Scene{
+	Name:  "double domino",
+	Run:   dominoRow(0.2),
+	Draws: []string{"time of the last"},
+	Vary:  across(0.2, 0.22, dominoRow),
 	Check: func(r Result) error {
-		// free fall from 25 m under 12.7 m/s² reaches 25 m/s
-		return atMost(r, "max speed", math.Sqrt(2*1000/(100*math.Pi*0.25)*25), "no body faster than its fall")
+		if r["fallen"].Value != 15 {
+			return fmt.Errorf("%v dominos fell, want 15", r["fallen"].Value)
+		}
+		return nil
 	},
 }
 
-// doubleDomino: 15 dominos 1 m apart, the first pushed at its top: each one topples the next, all fall
-var doubleDomino = Scene{
-	Name: "double domino",
-	Run: func(size Size, play Player) Result {
+// dominoRow: the scene double domino, the first domino pushed by push (N·s)
+func dominoRow(push float64) func(size Size, play Player) Result {
+	return func(size Size, play Player) Result {
 		const count = 15
 		w := newWorld()
 		staticBox(w, mgl64.Vec3{0, -1, 0}, mgl64.QuatIdent(), mgl64.Vec3{100, 1, 100}, defaultMaterial)
@@ -330,9 +360,9 @@ var doubleDomino = Scene{
 		for i := 0; i < count; i++ {
 			dominos = append(dominos, box(w, mgl64.Vec3{-0.5*count + float64(i), 0.5, 0}, mgl64.Vec3{0.125, 0.5, 0.5}, defaultMaterial))
 		}
-		// an impulse of 0.2 N·s along X at the top of the first domino
+		// an impulse along X at the top of the first domino
 		first := dominos[0]
-		impulse, arm := mgl64.Vec3{0.2, 0, 0}, mgl64.Vec3{0, 0.5, 0}
+		impulse, arm := mgl64.Vec3{push, 0, 0}, mgl64.Vec3{0, 0.5, 0}
 		first.Velocity = impulse.Mul(1 / first.Material.GetMass())
 		first.AngularVelocity = first.GetInverseInertiaWorld().Mul3x1(arm.Cross(impulse))
 		tipping := math.Atan(0.125 / 0.5)
@@ -351,13 +381,7 @@ var doubleDomino = Scene{
 			}
 		}
 		return Result{"fallen": {float64(fallen), ""}, "time of the last": {fallTime, "s"}}
-	},
-	Check: func(r Result) error {
-		if r["fallen"].Value != 15 {
-			return fmt.Errorf("%v dominos fell, want 15", r["fallen"].Value)
-		}
-		return nil
-	},
+	}
 }
 
 // confined: spheres created overlapping in a box too small for them, without gravity: they stay inside, and are not

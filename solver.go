@@ -453,10 +453,14 @@ func (c *contactConstraint) prepareFriction(stateA, stateB *bodyState, staticFri
 		total += weight
 	}
 	c.centerCoreA, c.centerCoreB = centerA.Mul(1/total), centerB.Mul(1/total)
-	rA, rB := c.frictionArms(c.centerCoreA, c.centerCoreB)
-	for j := 0; j < c.pointsCount; j++ {
-		c.points[j].leverArm = c.points[j].rA.Sub(rA).Len()
+	// the lever arm of a point for the twist: its distance to the center, both on the surface of A (their cores, the
+	// radius of A is the same for all). A single point is its own center: its lever arm stays 0, it holds no twist
+	if c.pointsCount > 1 {
+		for j := 0; j < c.pointsCount; j++ {
+			c.points[j].leverArm = c.points[j].coreA.Sub(c.centerCoreA).Len()
+		}
 	}
+	rA, rB := c.frictionArms(c.centerCoreA, c.centerCoreB)
 	c.makeFrictionRows(stateA, stateB, rA, rB)
 
 	c.frictionImpulse = [2]float64{manifold.FrictionImpulse.Dot(c.tangents[0]), manifold.FrictionImpulse.Dot(c.tangents[1])}

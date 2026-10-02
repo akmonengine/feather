@@ -241,8 +241,8 @@ func queriesTerrain() map[string]metric {
 
 // queryScenes: the scenes of the queries
 var queryScenes = []regressionScene{
-	{"queries scattered", queriesScattered},
-	{"queries terrain", queriesTerrain},
+	{name: "queries scattered", run: queriesScattered},
+	{name: "queries terrain", run: queriesTerrain},
 }
 
 // queryCosts prints the cost of a query of each kind, from the best run of its batch, and the queries per second of

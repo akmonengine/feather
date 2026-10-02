@@ -214,7 +214,8 @@ See [ALGORITHMS.md](ALGORITHMS.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [
   Box2D v3.1 on the same scenes (the reference: Feather must do at least as well; the known gaps are followed by #821).
 - **Regressions** (`bench/`): 8 scenes (piles, pyramid, joint chain, rain on a terrain, spinning tops, locked bodies),
   2 scenes of queries and the scenes of Solver2D against a committed reference: fingerprint, quality and speed per phase
-  (`World.Profile`).
+  (`World.Profile`). The measures decided by the rounding (the depth of a pile...) are followed by their median over
+  32 variants of their scene.
 - **Queries** (`query_*_test.go`): each query against a walk of every body, on 300 bodies of every kind.
 ````
 go test ./...
@@ -258,14 +259,16 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   mass by axis, `effective_inv_mass`), Box3D & Box2D (`b3MotionLocks`, `b2MotionLocks`), PhysX 5.6
   (`PxRigidDynamicLockFlag`), Unity `Rigidbody.constraints`
   (https://docs.unity3d.com/ScriptReference/Rigidbody-constraints.html)
+- Friction center & lever arms: Box3D (`b3PrepareContacts_Mesh`: `centerA`, `leverArm`; commit 9f998c8), where Jolt 5.3
+  (`ContactConstraintManager.cpp`) and Box2D v3.1 (`src/contact_solver.c`) solve the friction at each contact point
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
 Feather is written from the publications and the documentation of these projects:
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
-- [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the queries (an origin and a translation, the ray
-  through a tree, the ray on a sphere)
+- [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the reference of the bench, the friction center and its
+  lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere)
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
   the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks)
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance)

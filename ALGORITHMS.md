@@ -242,6 +242,25 @@ friction patches of PhysX), not at each point:
 The center is the average of the points, weighted by their separation (as Box3D: 1 up to the speculative distance, 0 at
 twice). µ is the static friction when the center slides slower than 1 cm/s, the dynamic friction otherwise.
 
+The lever arm is measured between two points of the same kind: the point and the center, both on the surface of A (the
+average is the one of the points on the surface of A). A contact point is halfway between both surfaces: measured from
+it to the center on the surface of A, the lever arm of a single point was half its separation instead of 0, and a ball
+spinning on the ground lost 0.068 rad/s² without any resistance. A single point (a ball, the cap of a capsule, the
+corner of a box) is its own center: its lever arm is exactly 0, whatever the rounding of its weight, and its twist
+impulse stays 0 (`TestSinglePointHasNoLeverArm`, `TestTopKeepsItsSpinWithoutSpinningResistance`: 20 rad/s kept after
+10 s). A box spinning flat on the ground, its 4 corners at the distance `d` of the center, brakes at `µ d m g / I`
+(`TestSpinningBoxBrakesByItsLeverArms`).
+
+Box3D measures the same way, between the anchor of the point and the center of the anchors
+(`src/contact_solver.c:241-256`, the bound `:601` & `:615`, commit 9f998c8): its anchors are the contact points
+(`src/contact.c:578-579`), Feather takes the points of the surface of A, where its friction center already is. Both
+give 0 for a single point; for several points, they differ along the normal only (the half separations between the
+contact points and the surface of A).
+Jolt (v5.3.0) and Box2D (v3.1.0) have no friction center: the friction is solved at each contact point, bounded by µ
+times the normal impulse of the point (`ContactConstraintManager.cpp:57-59`, `:140-141`, `:1600`;
+`src/contact_solver.c:133-148`, `:348`), so a single point holds no twist by construction, and several points hold it
+by their own lever arms.
+
 ### Rolling & spinning resistance
 A sphere or a capsule touches by a single point: no lever arm, the friction holds neither its rolling nor its spin
 around the normal. Two angular rows are added to the contact, solved in `Relax` after the normals and before the
@@ -292,11 +311,10 @@ while it spins: it slows down at
 ````
 α = c r m g / (2/5 m r²) = c r g / (2/5 r²) = 5/2 c g / r
 ````
-12.26 rad/s² for `c = 0.05`, `r = 0.1 m` (`TestSpinningResistanceStopsTheTop`: 12.33 rad/s² measured, stopped from
-20 rad/s after 1.63 s, asleep 0.5 s later). The 0.07 rad/s² more come from the twist friction: the single point of a
-ball counts half its overlap as a lever arm, and brakes the spin by 0.068 rad/s² without any resistance. Under the
-bound, the row holds the ball still: an applied torque smaller than `c r m g` doesn't turn it
-(`TestSpinningResistanceHoldsATorque`). A capsule standing on its cap brakes at `c r m g / I`, `I` its inertia around
+12.26 rad/s² for `c = 0.05`, `r = 0.1 m` (`TestSpinningResistanceStopsTheTop`: 12.2625 rad/s² measured, stopped from
+20 rad/s after 1.63 s, asleep 0.5 s later). The resistance is the only torque around the normal: the single point of a
+ball holds no twist (see Friction). Under the bound, the row holds the ball still: an applied torque smaller than
+`c r m g` doesn't turn it (`TestSpinningResistanceHoldsATorque`). A capsule standing on its cap brakes at `c r m g / I`, `I` its inertia around
 its axis (`TestSpinningResistanceStopsAStandingCapsule`).
 
 The order of the rows is fixed by `TestRelaxSolvesTheSpinningAfterTheRolling`: for a ball the rolling and the spinning
