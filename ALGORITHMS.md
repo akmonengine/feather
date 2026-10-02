@@ -196,8 +196,9 @@ contacts turn with the bodies before each `Relax` (`turnAnchors`), when a body t
 beginning of the step: a tumbling capsule at 30 rad/s turns by 0.5 rad per step, it would otherwise be pushed at the place
 of its contact at the beginning of the step, and the solver would see the contact open while it sinks.
 The inertia turns with the body too (`I⁻¹ = ΔR I⁻¹start ΔRᵀ`).
-To our knowledge, the cores (the idea of the convex radius of Bullet & Jolt, applied to the separation) and `turnAnchors`
-are Feather's own: without them, the bodies tumbling on a slope sink by 14 cm (`TestPileLandsWithoutSinking`).
+To our knowledge, the cores (the idea of the collision margin of Bullet & of the convex radius of Jolt, applied to the
+separation) and `turnAnchors` are Feather's own: without them, the bodies tumbling on a slope sink by 14 cm
+(`TestPileLandsWithoutSinking`).
 
 ### Soft constraint
 From Erin Catto, [Soft Constraints](https://box2d.org/files/ErinCatto_SoftConstraints_GDC2011.pdf) (GDC 2011): the

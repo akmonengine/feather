@@ -261,17 +261,22 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   (https://docs.unity3d.com/ScriptReference/Rigidbody-constraints.html)
 - Friction center & lever arms: Box3D (`b3PrepareContacts_Mesh`: `centerA`, `leverArm`; commit 9f998c8), where Jolt 5.3
   (`ContactConstraintManager.cpp`) and Box2D v3.1 (`src/contact_solver.c`) solve the friction at each contact point
-- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/AdvancedCollisionDetection.html
+- Dynamic AABB tree, collision margin & conservative advancement: Bullet 3.25 (`btDbvt` & `btDbvtBroadphase`; the margin
+  of `btSphereShape` & `btCapsuleShape`, a point & a segment with their radius, added by `btGjkPairDetector`;
+  `btContinuousConvexCollision`)
+- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html
 
 ## Acknowledgements
-Feather is written from the publications and the documentation of these projects:
+Feather is written from the publications, the documentation and the source code of these projects:
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
 - [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the reference of the bench, the friction center and its
   lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere)
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
   the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks)
-- [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance)
+- [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
+  the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
+  the conservative advancement of the time of impact
 
 ## Contributing Guidelines
 
