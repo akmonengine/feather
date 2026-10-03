@@ -14,16 +14,17 @@ feather/
 ├── articulation.go     # the anchors of the trees of joints, solved together (Baraff 1996)
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
-├── collision_heightfield.go # heightfields: triangles (faces, edges), patches
+├── collision_triangles.go # heightfields & meshes: the triangles under the body (faces, edges), patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
 ├── tree.go             # broad phase: dynamic AABB trees, the pairs kept from a step to the next
 ├── filter.go           # collision filtering: layers & masks, ignored pairs, linked bodies, the filter of the queries
 ├── query.go            # queries: Raycast, RaycastAll, SyncQueries, the guard, the traversal of the trees by a segment
 ├── query_sweep.go      # Sweep: conservative advancement on the cores, against a plane, a convex body, a triangle
 ├── query_overlap.go    # Overlap
-├── query_heightfield.go# a sweep & an overlap against the triangles of a heightfield
+├── query_triangles.go  # a sweep & an overlap against the triangles of a heightfield or of a mesh
 ├── event.go            # collision, trigger & sleep events
-├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield), their CastRay
+├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield, TriangleMesh,
+│                       # ConvexHull), their CastRay; convexhull.go (quickhull), trianglemesh.go (the tree of a mesh)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
 ├── gjk/                # GJK (overlap test with margin, distance)
 ├── epa/                # EPA (penetration depth) & contact points (manifold)
@@ -52,7 +53,8 @@ Step(dt)
 | Pair | Method |
 |------|--------|
 | any shape - plane | `CollideWithPlane` of the shape |
-| any shape - heightfield | each triangle under the body, seen from above: the vertices of the body over its face, GJK + EPA for its edges; patches by normal (up to 8 manifolds) |
+| any shape - heightfield or mesh | each triangle under the body, seen from the side of its normal: the vertices of the body over its face, GJK + EPA for its edges; patches by normal (up to 8 manifolds). One generator for both surfaces (`collideTriangles`), which differ by the triangles they give: the cells of the grid, the leaves of the tree |
+| convex hull - any shape | GJK + EPA on its vertices (the support point among all of them), its faces for the contact points |
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
 | sphere / capsule - other shape | GJK distance between the core (a point, a segment) and the shape, plus the radius; EPA only if the core is inside |
 | other pairs | GJK + EPA, then clipping of the contact points |
@@ -64,8 +66,8 @@ The contacts of a pair are kept by its pair in the broad phase: no lookup.
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative speed of the bodies * dt against a
 static or a kinematic body, and for the pairs of a fast body (a body which can move more than half of its smallest
 extent during the step, `isFast`).
-Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
-(the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
+Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield or a
+mesh (the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
 
 ## Collision filtering
 `filter.go`. A pair is emitted by the broad phase (`Tree.scan`) only if it passes 2 filters, in this order:
@@ -97,9 +99,9 @@ A body of empty mask (`actor.NoLayers`) collides with nothing but keeps its leaf
 
 | Query | Planes & heightfields (in no tree) | Trees (static, then dynamic) | A body |
 |---|---|---|---|
-| `Raycast`, `RaycastAll` | each one, first | the segment against the AABB of the nodes, the closest child first | `CastRay` of its shape, in its local space |
-| `Sweep` | each one, first | the same, the AABBs enlarged by the half sizes of the shape | conservative advancement on the cores (GJK distance) |
-| `Overlap` | each one | `Tree.queryCandidates` with the AABB of the shape | GJK distance of the cores against the radii |
+| `Raycast`, `RaycastAll` | each one, first | the segment against the AABB of the nodes, the closest child first | `CastRay` of its shape, in its local space (a mesh: the same walk through its own tree) |
+| `Sweep` | each one, first | the same, the AABBs enlarged by the half sizes of the shape | conservative advancement on the cores (GJK distance); a mesh: its triangles along the path, through its tree |
+| `Overlap` | each one | `Tree.queryCandidates` with the AABB of the shape | GJK distance of the cores against the radii; a mesh: its triangles under the shape |
 
 **The trees are up to date between 2 steps.** A step updates them at its start, for its pairs, and once more at its
 end, after the continuous collision and the sleep: the AABB stored for each body then contains its AABB. The end of a
@@ -233,12 +235,18 @@ restitution, continuous collision, islands), without allocation.
 ## Current limitations
 - The broad phase is a pair of dynamic AABB trees (static and dynamic bodies), the dynamic AABBs enlarged by a margin:
   a sleeping body costs nothing (the planes & the heightfields are not in the trees, they are tested with every awake body).
-- A heightfield is a surface, without thickness: a triangle whose plane is above the center of a body is ignored (as
-  Jolt, Box3D and PhysX do). A body whose center went under the surface is not pushed up, even if it still crosses it:
-  it falls under the terrain. The continuous collision keeps the fast bodies above it; a body must not be placed with
-  its center under the terrain.
-- The contacts are computed once per step: on a rough terrain, a point of a tumbling body moves over another triangle
-  during the step, and has no contact with it before the next step. On hills folded by 18° between 2 triangles (the
+- A heightfield and a mesh are surfaces, without thickness: a triangle whose plane is above the center of a body is
+  ignored (as Jolt, Box3D and PhysX do). A body whose center went under the surface is not pushed up, even if it still
+  crosses it: it falls under the terrain, through the wall of the mesh. The continuous collision keeps the fast bodies
+  on the right side; a body must not be placed with its center under a terrain or in the solid of a mesh. A mesh is
+  static, in the static tree, and never changes: build another one.
+- A convex hull has 256 vertices at most, its support point is found among all of them (no hill climbing): a hull of
+  256 vertices against a box costs 16 µs per pair, a hull of 64 vertices 7 µs, as a box. A face of more than 8 vertices
+  gives 8 of them to the contact clipping (one out of k): a wide cylinder resting on its cap has 8 of its 16 corners as
+  candidates, 4 kept. When the vertex limit is reached, the points left out are the closest to the hull, outside it
+  (Jolt and Box3D stop the same way, PhysX expands the hull by its planes). A flat cloud is refused.
+- The contacts are computed once per step: on a rough terrain or on a mesh, a point of a tumbling body moves over
+  another triangle during the step, and has no contact with it before the next step. On hills folded by 18° between 2 triangles (the
   median of the terrain of the bench), the deepest of 60 bodies dropped alone lands 8 mm deep (the median; under
   0.3 mm on a flat terrain), and 3.7 mm with the contacts computed at each sub-step (480 Hz with 1 sub-step); at rest
   it is 0.3 mm deep. Jolt, Box3D and PhysX compute their contacts once per step too.

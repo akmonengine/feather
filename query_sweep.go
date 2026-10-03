@@ -33,23 +33,24 @@ const (
 	sweepFlatGap = 0.5e-4
 
 	// notConvex: the panic of a sweep or an overlap of a shape which is not convex
-	notConvex = "feather: a query needs a convex shape, not a plane nor a heightfield"
+	notConvex = "feather: a query needs a convex shape, not a plane, a heightfield nor a mesh"
 )
 
 // queryScratch: the buffers of a query, reused to avoid the allocations
 type queryScratch struct {
 	// mover: the moving shape as a body, for the overlaps (penetration needs bodies)
 	mover actor.RigidBody
-	// a triangle of a terrain, in world space, and its body
+	// a triangle of a surface, in world space, and its body
 	shape    triangleShape
 	triangle actor.RigidBody
 	simplex  gjk.Simplex
 	// sweep: the query of a moving shape. It points to itself (treeQuery.sweep): it cannot live on a stack
 	sweep sweepQuery
-	// buffers of Overlap: the stack and the candidates of the trees, the cells of a terrain
+	// buffers of Overlap: the stack and the candidates of the trees, the cells of a terrain, the triangles of a mesh
 	stack      []int32
 	candidates []int32
 	cells      []int32
+	triangles  []int32
 }
 
 var queryPool = sync.Pool{New: func() any {
@@ -71,10 +72,10 @@ type sweepQuery struct {
 	scratch *queryScratch
 }
 
-// mustBeConvex: a plane and a heightfield have no support point, they cannot be moved nor overlapped
+// mustBeConvex: a plane, a heightfield and a mesh have no support point, they cannot be moved nor overlapped
 func mustBeConvex(shape actor.ShapeInterface) {
 	switch shape.(type) {
-	case *actor.Plane, *actor.Heightfield:
+	case *actor.Plane, *actor.Heightfield, *actor.TriangleMesh:
 		panic(notConvex)
 	}
 }
@@ -99,14 +100,15 @@ func newSweepQuery(w *World, shape actor.ShapeInterface, start actor.Transform, 
 // without rotation, among the bodies the filter accepts. The shape stops between 0 and 1 µm from the body (0.1 mm
 // between 2 shapes without radius), never in it: Fraction is where it stops, Point the point of the body it touches,
 // Normal the direction from this point to the shape. A shape which starts in a body hits it at the fraction 0, the
-// normal against its motion, at a point in both. The top side of a heightfield only is hit.
+// normal against its motion, at a point in both. The top side of a heightfield only is hit, the side of the normal of
+// the triangles of a mesh.
 // A shape which starts in exact contact with a body, or within 1 µm of it, hits it at the fraction 0 with the normal of
 // the contact if it moves towards the body, and doesn't hit it if it moves away or along it (the back facing test of
 // the shape casts of Jolt, ConvexShape.cpp; Box3D reports an initial overlap whatever the direction). The exact
 // contact is decided by the rounding: a shape put in contact by computed coordinates can be seen in the body, and
 // stopped whatever its direction. Start from the place given by a Sweep, or keep a skin.
 // After sweepIterations the hit is given where the shape is, before the contact (Box3D gives no hit).
-// A plane or a heightfield as the moving shape panics
+// A plane, a heightfield or a mesh as the moving shape panics
 func (w *World) Sweep(shape actor.ShapeInterface, start actor.Transform, translation mgl64.Vec3, filter QueryFilter) (Hit, bool) {
 	w.guard()
 	mustBeConvex(shape)
@@ -137,6 +139,8 @@ func (q *sweepQuery) sweepBody(body *actor.RigidBody) (Hit, bool) {
 		hit, ok = q.sweepPlane(shape)
 	case *actor.Heightfield:
 		hit, ok = q.sweepHeightfield(body, shape)
+	case *actor.TriangleMesh:
+		hit, ok = q.sweepMesh(body, shape)
 	default:
 		// the exact AABB of the body, after the AABB of its leaf
 		box := body.AABB()
@@ -239,7 +243,7 @@ func (q *sweepQuery) sweepPlane(plane *actor.Plane) (Hit, bool) {
 
 // sweepTriangle: the hit of the moving shape on a triangle in world space, its vertices turning around its normal,
 // before the limit. Only the side of the normal is hit: a triangle is skipped if the shape moves along its normal (it
-// comes from behind, or leaves). The triangles of a mesh will be swept the same way
+// comes from behind, or leaves). The triangles of a heightfield and of a mesh are swept this way
 func (q *sweepQuery) sweepTriangle(vertices [3]mgl64.Vec3, limit float64) (Hit, bool) {
 	normal := vertices[1].Sub(vertices[0]).Cross(vertices[2].Sub(vertices[0]))
 	if q.translation.Dot(normal) > 0 {

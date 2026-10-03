@@ -285,7 +285,7 @@ how to tilt the foot.
 hit, ok := world.Raycast(knee, mgl64.Vec3{0, -0.8, 0}, filter)
 if ok {
 	ground := hit.Point // knee + hit.Fraction * translation
-	slope := hit.Normal // out of the ground; hit.Triangle is the triangle of a terrain (2*cell + t), else -1
+	slope := hit.Normal // out of the ground; hit.Triangle is the triangle of a terrain (2*cell + t) or of a mesh, else -1
 }
 ```
 A ray has no thickness: on stairs or on rubble, a sphere of the size of the sole gives a steadier answer.
@@ -371,6 +371,33 @@ world.UpdateHeightfield(terrain, minX, minZ, maxX, maxZ)
   512x512), the bodies slide on the flat parts without hitting the edges between the triangles.
 - `Holes[x*(zSamples-1)+z]`: a cell without triangles (a cave, a tunnel entrance).
 - `World.UpdateHeightfield` wakes up the bodies above the changed region, and computes their contacts again.
+
+### Decor meshes and convex hulls
+```go
+// the decor: the triangles of a model (indices 3 per triangle, counterclockwise seen from outside), built once
+mesh, err := actor.NewTriangleMesh(vertices, indices)
+rock := actor.NewRigidBody(actor.Transform{Position: place, Rotation: orientation}, mesh, actor.BodyTypeStatic, 0)
+world.AddBody(rock)
+
+// a dynamic object: the convex hull of the vertices of its model, 64 vertices at most
+hull, err := actor.NewConvexHull(vertices, 64)
+// the hull is centered on its center of mass: the body is there, not at the origin of the model
+crate := actor.NewRigidBody(actor.Transform{Position: place.Add(hull.CenterOfMass()), Rotation: mgl64.QuatIdent()}, hull, actor.BodyTypeDynamic, 300)
+```
+- A mesh is static, and a surface: its triangles are touched from the side of their normal (the right-hand rule on the
+  winding), a body whose center went through a wall is not pushed back. Give the triangles their outward winding, and
+  close the solids the bodies can fall into. The vertices closer than 0.1 mm are welded: a soup of triangles is fine.
+  A degenerate triangle (no area) is kept out, at its index.
+- A mesh is built outside `Step`: 100 000 triangles take 0.3 s. Build it once per model and share it between bodies (a
+  shape has no state); a mesh never changes, build another one for another decor.
+- `hit.Triangle` of a ray or a sweep on a mesh is the index of the triangle: `mesh.Triangle(hit.Triangle)` gives its
+  vertices, `mesh.Indices[3*hit.Triangle:]` its vertices in the model, for a material per triangle on your side.
+- A hull is a convex volume: the mass and the inertia come from its volume and the density. Its local space is
+  centered on its center of mass, `hull.CenterOfMass()` is the offset from the origin of the points. The limit of
+  vertices (256 at most) bounds the cost of a contact (a hull of 64 vertices costs as a box, 256 twice as much); when it
+  is reached, the hull is the one of the vertices the furthest out, the points left out are the closest to it. A
+  flat cloud (a quad, a line) has no hull: use a Box.
+- A hull slides, rolls and rests on a mesh or a terrain as the other shapes, with the same edges rules.
 
 ### Moving a body
 A shape has no state: several bodies can share the same shape. Each body keeps its AABB: after moving a body by hand

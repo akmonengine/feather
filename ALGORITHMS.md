@@ -509,12 +509,24 @@ joint (as in PhysX).
   point. Angular: the twist row, the cone if both swings are limited, else 1 row per swing
   (`atan2(-p.z, p.x)` around Y, `atan2(p.y, p.x)` around Z), all locked = the 3 angular rows.
 
-## Heightfield
+## Heightfield and triangle mesh
+A heightfield and a mesh are surfaces of triangles. They differ by the triangles they give under the AABB of a body (the
+cells of a grid, the leaves of a tree) and by nothing else: one generator of contacts per triangle (`collideTriangle`)
+and one grouping in patches (`collideTriangles`, `collision_triangles.go`) serve both, as `b3ComputeMeshManifolds` of
+Box3D takes its triangles from `b3QueryMeshTriangles` or `b3QueryHeightFieldTriangles` (`src/mesh_contact.c:51-73`),
+`CollideConvexVsTriangles` of Jolt is the visitor of its `MeshShape` and of its `HeightFieldShape`, and
+`PCMConvexVsMeshContactGeneration` of PhysX serves its mesh and its height field. The sweeps (`sweepTriangle`), the
+overlaps (`overlapsTriangle`) and the continuous collision (`triangleImpact`) share their test of a triangle the same
+way. The edges of a mesh are classified as the ones of the heightfield (active, convex), by the triangles sharing them.
+No interface of "source of triangles": the enumeration of the triangles is a `switch` on the shape, the loop over the
+cells or over the leaves writes in the buffers of the scratch (an interface or a closure per triangle would cost an
+indirect call per triangle, and could allocate).
+
 The terrain is a grid of heights, split in 2 triangles per cell (along the diagonal from (x, z) to (x+1, z+1)).
 The body is tested against the triangles under its AABB, one by one: the grid is cut in blocks of 16x16 cells with
 their lowest and highest heights, to skip the blocks far from the body. Jolt keeps a hierarchy of such blocks
 (`HeightFieldShape`, `RangeBlock`), PhysX and Box3D a flat grid (`b3QueryHeightField`); none uses a tree of triangles
-for a terrain.
+for a terrain. The mesh is described below (Triangle mesh).
 
 **Edges** (`Heightfield.cellEdges`). An edge is *convex* if the triangle on its other side bends down, or if there is
 none (a border, a hole), and *active* if it is convex by more than 5° (`ActiveEdges::IsEdgeActive` of Jolt with
@@ -610,6 +622,122 @@ per step, as Jolt, Box3D and PhysX compute them (see the limitations in ARCHITEC
 moves over another triangle during the step, and has no contact with it before the next step. With the contacts
 computed at each of the 8 sub-steps, the deepest of 60 bodies dropped alone lands at 3.7 mm instead of 8.1 mm, and
 no sphere deeper than 1 mm.
+
+## Convex hull
+`actor.ConvexHull`, `actor/convexhull.go`. Sources read: Jolt v5.3.0 (`Geometry/ConvexHullBuilder.cpp`,
+`Physics/Collision/Shape/ConvexHullShape.cpp`), Box3D (commit `9f998c8`, `src/hull.c`), PhysX (`main`, 5.11.0,
+`GuCookingQuickHullConvexHullLib.cpp`, `PxConvexMeshDesc.h`), Bullet 3.25 (`btConvexHullComputer`), Barber, Dobkin &
+Huhdanpaa (1996), Dirk Gregorius, "Implementing QuickHull" (GDC 2014).
+
+**Quickhull** (`hullBuilder`). The points are taken around the center of their bounds (Box3D shifts them to an origin
+too, `b3HullBuilder_Construct`). The tolerance is the rounding error of the distance of a point to a plane, from the
+size of the cloud: `3 (|x| + |y| + |z|)max ε` (Gregorius; `DetermineCoplanarDistance` of Jolt, `ConvexHullBuilder.cpp:240`;
+`b3HullBuilder_ComputeTolerance` of Box3D, `hull.c:632`), with the ε of a float64 where both use the one of a float. A
+point is out of the hull if it is further than 8 tolerances in front of a face (`minOutside` of Box3D, `hull.c:644-645`),
+a face is seen by a point if the point is more than 4 tolerances in front of its plane (`minRadius`, `hull.c:868`).
+1. **The initial tetrahedron**: the 2 points the furthest apart along the axis of the largest extent, the point the
+   furthest from their line, the point the furthest from their plane (`b3HullBuilder_BuildInitialHull`, `hull.c:649`;
+   `QuickHull::findSimplex` of PhysX). Fewer than 4 points, a line or a plane: `ErrHullDegenerate` (Jolt builds a flat
+   hull of 2 faces, `ConvexHullBuilder2D`; Box3D fails as Feather). A hull is a volume: a flat one has no mass.
+2. **The outside sets** (Barber et al.; the conflict lists of Jolt and Box3D): each point out of the hull is given to the
+   face it is the furthest in front of, the furthest point of a face last (`AssignPointToFace`, `ConvexHullBuilder.cpp:196`).
+3. **A point at a time**: the furthest point of the face with the furthest point (`b3HullBuilder_NextConflictVertex`,
+   `hull.c:782`). The faces which see it, from its face through their neighbors (the horizon of Barber et al.,
+   `b3HullBuilder_BuildHorizon`, `hull.c:839`), are removed, a cone of triangles is built from the horizon to the point
+   (`b3HullBuilder_BuildCone`, `hull.c:881`; `AddPoint` of Jolt, `:622`), and the points of the removed faces are given to
+   the cone. The horizon must be a loop, each vertex starting one edge: if the rounding breaks it, `ErrHullFailed`
+   (Jolt returns an error when the hull is inconsistent, `ConvexHullShape.cpp:60-78`).
+4. **The vertex limit**: the construction stops at `maxVertices` (`MaxHullVertices` = 256 at most, `cMaxPointsInHull` of
+   Jolt, `B3_HULL_MAX_COUNT` of Box3D; 255 in PhysX, `PxConvexMeshDesc::vertexLimit`). The points left out are then
+   outside the hull, the closest to it: the furthest were added first. Jolt accepts a hull stopped this way
+   (`MaxVerticesReached`, `ConvexHullShape.cpp:61`), Box3D runs on a budget (`hull.c:1450-1458`); PhysX expands the
+   hull by its planes instead (`expandHull`, plane shifting). Measured: 32 vertices out of a cloud of 500 points on a
+   sphere keep 83 % of its volume.
+5. **The faces**: once the triangulation is complete, 2 triangles across an edge are merged when the edge is not convex:
+   the centroid of one is not behind the plane of the other by more than the tolerance (coplanar, or bent inwards by the
+   rounding: `b3IsEdgeConvex` of Box3D, `hull.c:466`, both ways as `MergeCoplanarOrConcaveFaces` of Jolt, `:975`). The
+   boundary of each group of triangles is chained in a polygon, its vertices on the segment of their neighbors within
+   the tolerance are dropped (`b3HullBuilder_ResolveVertices`, `RemoveInvalidEdges` of Jolt), and its plane is Newell's
+   normal through its centroid (`b3NewellPlane`, `hull.c:529`). Jolt and Box3D merge after each cone, on a hull still
+   growing; Feather merges once, at the end: the triangulation is the quickhull of Barber et al. as it is, the merge a
+   pass over it. The face of a cube is 1 polygon of 4 vertices: a cube resting on the ground has the manifold of the Box
+   (4 corners), where 2 triangles would give 3.
+
+**Mass properties** (`massProperties`): the volume and the center of mass are the sum of the tetrahedra between the
+faces (fans of triangles) and a point inside (the mean of the vertices), as `GetCenterOfMassAndVolume` of Jolt
+(`ConvexHullBuilder.cpp:1258`); the inertia is the covariance of the canonical tetrahedron carried by each tetrahedron
+from the center of mass (Jolt, `ConvexHullShape.cpp:84-121`, after Blow & Binstock), for a density of 1, scaled to the
+mass. The points are then translated so that the center of mass is at the origin of the hull: a body is at its center
+of mass, `CenterOfMass()` gives it in the space of the points (Jolt centers its shapes the same way,
+`mCenterOfMass`). Measured: the hull of the corners of a box has its mass and its inertia within 1e-6, its center of
+mass within 1e-12.
+
+**The shape**: the support point is the vertex the furthest along the direction, among all of them
+(`HullNoConvex::GetSupport` of Jolt, `b3FindHullSupportVertex` of Box3D, `hull.c:1644`); the contact feature is the face
+the most aligned with the direction (`GetSupportingFace` of Jolt, `ConvexHullShape.cpp:674`; `b3FindHullSupportFace`),
+8 vertices at most, one out of k on a larger face (Jolt skips vertices the same way, `:703-706`); against a plane, the
+vertices of this face, as the Box; the AABB is the one of the 8 corners of the local bounds (`b3ComputeHullAABB`,
+`hull.c:2614`; the local bounds of Jolt), not of the vertices; the ray is clipped by the planes of the faces, in the hull
+between the last plane it enters and the first one it leaves (`b3RayCastHull`, `hull.c:2641`; `CastRayHelper` of Jolt,
+`:883`). Measured (a hull against a box, per pair, `Collide`): 8 vertices 5.1 µs, 32 vertices 6.9 µs, 64 vertices
+7.3 µs, 256 vertices 16.3 µs; a box against a box 6.7 µs, the hull of a cube 7.2 µs. The build of a hull of 4000
+points takes 0.5 ms.
+
+## Triangle mesh
+`actor.TriangleMesh`, `actor/trianglemesh.go`. Sources read: Box3D (`src/mesh.c`, `src/mesh_contact.c`), Jolt v5.3.0
+(`MeshShape.cpp`, `AABBTree/AABBTreeBuilder.cpp`, `TriangleSplitter/TriangleSplitterBinning.cpp`, `Geometry/Indexify.h`,
+`Geometry/RayTriangle.h`, `Physics/Collision/ActiveEdges.h`), PhysX (`GuBV4Build.h`, `GuEdgeList.cpp`), Bullet 3.25
+(`btQuantizedBvh.cpp`), Ericson 6.2.1.
+
+**Build** (`NewTriangleMesh`, outside `Step`; 100 000 triangles take 0.3 s). The vertices closer than 0.1 mm are
+welded (`MeshWeldDistance`: the weld distance of `Indexify` of Jolt, `Indexify.h:14`; `weldTolerance` of `b3MeshDef`), in
+a grid of cells of this size: a mesh exported as a soup of triangles has its edges shared again, else every edge would be
+a border, and active. The triangles under 0.01 LinearSlop² of area are degenerate (`minArea` of `b3CreateMesh`,
+`mesh.c:1590`): kept in `Indices` (the indices of the game don't move), out of the tree, without edge. The triangles
+are counterclockwise seen from outside, the right-hand rule: the side of the normal is the side a body touches (Box3D
+and Jolt take the same winding).
+
+**Edges** (`findEdges`): each edge is looked up by its 2 vertices in a map (`b3IdentifyEdges`, `mesh.c:1065`;
+`sFindActiveEdges` of Jolt, `MeshShape.cpp:248`). An edge of 1 triangle (a border) is convex and active; an edge of 2
+triangles is convex if the opposite vertex of the other triangle is under the plane, and active if it is convex and bent
+by more than 5° (the rule of the heightfield, `cellEdges`), or if the 2 triangles are back to back, closer than 1° to
+opposite (`ActiveEdges::IsEdgeActive`, `ActiveEdges.h:21`: a sheet); an edge of 3 triangles or more is active (Jolt,
+`MeshShape.cpp:313-319`). Bits per triangle as the heightfield: active, then convex.
+
+**Tree** (`buildNode`, `sahSplit`): a binary tree of AABBs built top-down, the triangles of a node split in 2 by the
+surface area heuristic over binned centroids (`b3SplitBinnedSah`, `mesh.c:570`; `TriangleSplitterBinning` of Jolt;
+the `BV4_SAH` strategy of PhysX, `GuBV4Build.h:62-67`, whose default splits at the center): on each axis the centroids
+of the triangles fall in 8 bins (`B3_BIN_COUNT`), and the cost of a split after a bin is the count of the triangles on
+each side times the area of their AABB; the cheapest split of the 3 axes wins. A leaf holds 4 triangles at most when a
+split is found (`B3_DESIRED_TRIANGLES_PER_LEAF`; 8 in Jolt), 8 when none separates them (the centroids are the same,
+`B3_MAXIMUM_TRIANGLES_PER_LEAF`), halves above. Added to Box3D: a split leaving less than a third of the triangles on a
+side is replaced by the median along its axis, the rule of `btQuantizedBvh::sortAndCalcSplittingIndex` of Bullet
+("if the splitIndex causes unbalanced trees, fix this by using the center"): the height of the tree is then bounded by
+`log(triangles) / log(1.5)`, 52 for 2^31 triangles, and the traversals keep their nodes in an array of 64 on the stack
+(`meshStackSize`; Box3D keeps 256 and asserts). The nodes are in depth-first order, the left child follows its parent;
+the triangles of a leaf are contiguous in `order`. Not taken: the quantized nodes of Jolt (`NodeCodecQuadTreeHalfFloat`)
+and of Bullet, the 4-wide nodes of PhysX (BV4): less memory and SIMD, for another day. Measured: 20 000 triangles of
+hills give 12 053 nodes, 6 027 leaves, a height of 14 (bound 26).
+
+**Queries** (`OverlapTriangles`, `Cast`, `MeshCast`): the triangles whose AABB overlaps a box, by the nodes it overlaps
+(`b3QueryMesh`, `mesh.c:2416`); the triangles a moving box meets, in the order of its motion: the segment of its center
+against the AABBs of the nodes enlarged by its half sizes, by slabs, the closest child first, the nodes entered after
+the limit dropped (`b3ShapeCastMesh`, `mesh.c:2070`, which orders the children by the axis of the split; the ray through
+the trees of the broad phase of Feather, `aabbTree.cast`). `MeshCast` is an iterator with its stack inside, as `CellWalk`
+of the heightfield: the sweeps and the rays run it without a callback.
+
+**Ray** (`CastRay`): `MeshCast` without size, Möller-Trumbore on each triangle (`RayTriangle.h` of Jolt,
+`b3RayCastMesh` of Box3D), the side of the normal only (the determinant positive), a point up to `footprintSlack` out
+of its triangle in barycentric coordinates so that a ray on an edge hits the triangles on both sides, and at the very
+same fraction the triangle of the lowest index, as the heightfield. Measured on 100 352 triangles of hills: 1.2 µs per
+ray (100 000 slanted rays, 96 % hits), 0.85 µs for vertical rays, against the 5 µs asked.
+
+**Collisions**: the triangles under the AABB of the body come from `OverlapTriangles`, then the generator of the
+heightfield (above). Measured: 150 bodies (boxes, spheres, capsules) falling on the same hills as a heightfield of 41x41
+samples and as a mesh of 3 200 triangles: the narrow phase takes 2.5 ms per step on the heightfield, 2.4 ms on the mesh
+(the step 6.9 and 6.5 ms). A sphere rolls on a tilted grid mesh within 3 µm of a sphere on a plane; a cube on a tread of
+a staircase mesh, a cube overhanging the edge of a tread and a plank lying on the edges of 3 treads (active edges alone)
+rest for 10 s without drifting by a micrometer, and sleep.
 
 ## Continuous collision
 Sources read: Box2D v3.1.0 (`src/solver.c`, `docs/simulation.md`, `src/constants.h`), Box3D (commit `9f998c8`,
@@ -801,15 +929,17 @@ should. Box3D gives no hit then (`distance.c:1044-1172`).
   whole AABB of the motion; the walk ends when the band enters cells after the best hit. A triangle is skipped if the
   shape moves along its normal: it comes from behind, or leaves (`b3ShapeCastHeightField` skips the triangles whose
   plane is over the center of the shape instead).
+- **Mesh**: the triangles of the leaves of `MeshCast`, the nodes entered after the best hit dropped
+  (`b3ShapeCastMesh`); the same test of a triangle.
 - **Not taken**: the GJK ray cast of van den Bergen, of Jolt (`GJKClosestPoint.h:506`) and PhysX (`GuGJKRaycast.h:55`):
   one loop instead of a GJK per iteration, faster, but a new algorithm in `gjk/`.
 
 **Overlap** (`World.Overlap`): the candidates of the trees for the AABB of the shape, then the distance of the cores by
-GJK against the sum of the radii; a plane by the lowest point of the shape; a heightfield by its triangles under the
-shape, from any side. The contact counts.
+GJK against the sum of the radii; a plane by the lowest point of the shape; a heightfield or a mesh by its triangles
+under the shape, from any side. The contact counts.
 
-**Order.** At the same fraction, the body of the lowest index in `World.Bodies` is hit, and on a heightfield the
-triangle of the lowest index; `RaycastAll` is sorted by
+**Order.** At the same fraction, the body of the lowest index in `World.Bodies` is hit, and on a heightfield or a mesh
+the triangle of the lowest index; `RaycastAll` is sorted by
 fraction then by index, `Overlap` by index (Unity: "the order of the results is undefined"). The results don't depend
 on the shape of the trees, nor on `Workers`.
 

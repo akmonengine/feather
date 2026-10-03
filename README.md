@@ -20,8 +20,23 @@ All shapes live in the `actor` package and implement `actor.ShapeInterface`.
 | `Plane` | `Normal`, `Distance` (static only) | analytic |
 | `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; its segment against the other shapes (GJK distance + radius) |
 | `Heightfield` | a grid of heights (static only), 2 triangles per cell | GJK/EPA against each triangle under the body |
+| `TriangleMesh` | triangles with a tree of AABBs (static only), for the decor: `NewTriangleMesh(vertices, indices)` | GJK/EPA against each triangle under the body, as the heightfield |
+| `ConvexHull` | the convex hull of a cloud of points, by quickhull: `NewConvexHull(points, maxVertices)`, 256 vertices at most | GJK/EPA, its faces for the contact points; dynamic, with the mass and the inertia of its volume |
 
 Each shape also casts a ray on itself, in its local space (`CastRay`): the world queries are built on it.
+
+```go
+// the decor: a mesh of triangles, counterclockwise seen from outside, built once (outside Step)
+mesh, err := actor.NewTriangleMesh(vertices, indices) // vertices []mgl64.Vec3, indices []int32, 3 per triangle
+rock := actor.NewRigidBody(actor.Transform{Rotation: mgl64.QuatIdent()}, mesh, actor.BodyTypeStatic, 0)
+
+// a dynamic object: the hull of the vertices of its mesh, centered on its center of mass
+hull, err := actor.NewConvexHull(vertices, 64)
+crate := actor.NewRigidBody(actor.Transform{Position: hull.CenterOfMass(), Rotation: mgl64.QuatIdent()}, hull, actor.BodyTypeDynamic, 300)
+```
+A mesh and a heightfield are surfaces: their triangles are seen from the side of their normal, a body whose center went
+through is not pushed back. See the [physics guide](PHYSICS_GUIDE.md#decor-meshes-and-convex-hulls) and the
+[algorithms](ALGORITHMS.md#convex-hull).
 
 ```go
 body := actor.NewRigidBody(
@@ -92,7 +107,8 @@ world.SyncQueries() // after the game added, moved or reshaped bodies, if a quer
 - A ray is exact on each shape. A moving shape (a sphere, a capsule, a box) stops within 1 µm of the body it hits
   (0.1 mm between 2 boxes), never in it.
 - A ray or a shape which starts in a body hits it at the fraction 0, the normal against its direction.
-- The top side of a heightfield only is hit; a hole is not.
+- The top side of a heightfield only is hit; a hole is not. The side of the normal of the triangles of a mesh; its
+  `hit.Triangle` is the index of the triangle.
 - At the same fraction, the body of the lowest index in `World.Bodies` is hit: the results don't depend on the workers
   nor on the shape of the trees.
 - No allocation, no write: any number of goroutines can run queries together while nothing writes the world. A query
@@ -302,6 +318,19 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   `src/solver.c`; the bullets of `docs/simulation.md`), Box3D (`b3SolveContinuous`, `safetyFactor`), Jolt 5.3
   (`EMotionQuality::LinearCast`, `JobFindCCDContacts` & `JobResolveCCDContacts` in `PhysicsSystem.cpp`,
   `mLinearCastThreshold`), PhysX 5.6 (the sweep-based CCD of `PxsCCD.cpp`, the guide Advanced Collision Detection)
+- Convex hull: Barber, Dobkin & Huhdanpaa, The Quickhull Algorithm for Convex Hulls (ACM TOMS, 1996); Dirk
+  Gregorius, Implementing QuickHull (GDC 2014: the tolerance, the merging of the faces); Jolt 5.3
+  (`ConvexHullBuilder`, `ConvexHullShape`: the inertia by the covariance of the tetrahedra, `GetSupportingFace`), Box3D
+  (`b3CreateHull`, `src/hull.c`: the initial tetrahedron, the thresholds, `b3RayCastHull`, commit 9f998c8), PhysX
+  (`QuickHullConvexHullLib`, `PxConvexMeshDesc::vertexLimit`), Bullet 3.25 (`btConvexHullComputer`); Jonathan Blow &
+  Atman Binstock, How to find the inertia tensor (or other mass properties) of a 3D solid body represented by a triangle
+  mesh (the covariance of the canonical tetrahedron)
+- Triangle mesh: Box3D (`b3CreateMesh`, `b3SplitBinnedSah`, `b3IdentifyEdges`, `b3RayCastMesh`, `b3ShapeCastMesh`,
+  `b3QueryMesh`, `src/mesh.c`; `b3ComputeMeshManifolds`, `src/mesh_contact.c`), Jolt 5.3 (`MeshShape`,
+  `AABBTreeBuilder`, `TriangleSplitterBinning`, `ActiveEdges`, `Indexify`, `RayTriangle.h`), PhysX (`BV4_AABBTree`,
+  `EdgeList::computeActiveEdges`, `PCMConvexVsMeshContactGeneration`), Bullet 3.25 (`btQuantizedBvh::buildTree`: the
+  balance of the split), Ericson 6.2.1 (top-down construction of a bounding volume hierarchy), Möller & Trumbore, Fast,
+  Minimum Storage Ray/Triangle Intersection (1997)
 - Kinematic bodies: PhysX 5.6 (`PxRigidDynamic::setKinematicTarget`, `Sc::BodySim::calculateKinematicVelocity` &
   `updateKinematicPose` in `ScKinematics.cpp`, the guide Rigid Body Dynamics > Kinematic Actors,
   https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyDynamics.html), Jolt 5.3 (`Body::MoveKinematic`,
@@ -314,15 +343,18 @@ Feather is written from the publications, the documentation and the source code 
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
 - [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the reference of the bench, the friction center and its
-  lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere)
-- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
-  the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks), the cast of a fast body
-  against every body and the relative cast of two fast bodies
+  lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere), the thresholds of
+  quickhull and the ray on a hull, the tree of a mesh (the binned surface area heuristic, the leaves of 4 triangles,
+  the casts through it) and one generator of contacts for the meshes and the height fields
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains and of
+  the meshes, the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks), the cast of a
+  fast body against every body and the relative cast of two fast bodies, the hull centered on its center of mass with
+  the inertia of its volume, the supporting face of a hull, the weld of the vertices of a mesh
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
   the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
-  the conservative advancement of the time of impact
+  the conservative advancement of the time of impact, the balance of the splits of the tree of a mesh
 - [PhysX](https://github.com/NVIDIA-Omniverse/PhysX), by NVIDIA: the speculative CCD, the kinematic actors (a target
-  per step, reached at the end of the step, no velocity without target)
+  per step, reached at the end of the step, no velocity without target), the vertex limit of a convex hull
 
 ## Contributing Guidelines
 

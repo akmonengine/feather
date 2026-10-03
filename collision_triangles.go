@@ -41,7 +41,7 @@ const (
 	maxClipVertices = 11
 )
 
-// triangleShape is a triangle of a heightfield, in world space: its body has the identity transform
+// triangleShape is a triangle of a surface (a heightfield, a mesh), in world space: its body has the identity transform
 type triangleShape struct {
 	vertices [3]mgl64.Vec3
 	aabb     actor.AABB
@@ -80,12 +80,12 @@ func (t *triangleShape) CollideWithPlane(planeNormal mgl64.Vec3, planeDistance f
 	return contacts
 }
 
-// CastRay: a ray is cast on the heightfield, not on its triangles
+// CastRay: a ray is cast on the surface, not on its triangles
 func (t *triangleShape) CastRay(origin, translation mgl64.Vec3, maxFraction float64) (actor.RayHit, bool) {
 	return actor.RayHit{}, false
 }
 
-// triangleContact: points of a triangle, in heightfieldScratch.points, with their normal (from the terrain to the
+// triangleContact: points of a triangle, in triangleScratch.points, with their normal (from the surface to the
 // body) and the separation of the deepest one
 type triangleContact struct {
 	normal     mgl64.Vec3
@@ -98,58 +98,81 @@ type triangleContact struct {
 	closest bool
 }
 
-// heightfieldScratch: the buffers of a collision with a heightfield, reused to avoid the allocations
-type heightfieldScratch struct {
+// triangleScratch: the buffers of a collision with a surface of triangles, reused to avoid the allocations
+type triangleScratch struct {
 	shape    triangleShape
 	triangle actor.RigidBody
 	simplex  gjk.Simplex
-	cells    []int32
-	plane    actor.PlaneContact
-	contacts []triangleContact
-	points   []constraint.ContactPoint
-	patches  [MaxManifoldsPerPair][]constraint.ContactPoint
-	clip     [2][maxClipVertices]mgl64.Vec3
+	// the cells of a heightfield, the triangles of a mesh, under the body
+	cells     []int32
+	triangles []int32
+	plane     actor.PlaneContact
+	contacts  []triangleContact
+	points    []constraint.ContactPoint
+	patches   [MaxManifoldsPerPair][]constraint.ContactPoint
+	clip      [2][maxClipVertices]mgl64.Vec3
 	// sides: the sides of the triangle each vertex of clip was cut on (bit e), 0 for a vertex of the body
 	sides [2][maxClipVertices]uint8
 }
 
-var heightfieldPool = sync.Pool{New: func() any {
-	s := &heightfieldScratch{}
+var trianglePool = sync.Pool{New: func() any {
+	s := &triangleScratch{}
 	s.triangle = actor.RigidBody{Transform: actor.NewTransform(), BodyType: actor.BodyTypeStatic, Shape: &s.shape}
 	return s
 }}
 
-// collideHeightfield writes in out the patches of contact between the terrain and the body, and returns their count.
-// Each triangle under the body, seen from above, is tested with GJK/EPA (collideTriangle): it gives the vertices of the
-// body over its face, and the points of the body on its edges (a ridge in the face of a box, an active edge).
+// isSurface: the body is a heightfield or a triangle mesh: a static surface of triangles, which a body touches with
+// several normals (MaxManifoldsPerPair manifolds)
+func isSurface(body *actor.RigidBody) bool {
+	switch body.Shape.(type) {
+	case *actor.Heightfield, *actor.TriangleMesh:
+		return true
+	}
+	return false
+}
+
+// collideTriangles writes in out the patches of contact between the surface (a heightfield or a triangle mesh, the
+// shape of surface) and the body, and returns their count. The surfaces differ by the triangles they give under the
+// AABB of the body (the cells of a heightfield, the leaves of the tree of a mesh) and by nothing else: one generator of
+// contacts per triangle (collideTriangle) and one grouping in patches serve both, as b3ComputeMeshManifolds of Box3D
+// takes the triangles of b3QueryMeshTriangles or of b3QueryHeightFieldTriangles (src/mesh_contact.c:51-73), as
+// CollideConvexVsTriangles of Jolt is the visitor of its mesh and of its height field, and PCMConvexVsMeshContactGeneration
+// of PhysX serves its mesh and its height field.
+// Each triangle under the body, seen from the side of its normal, is tested with GJK/EPA (collideTriangle): it gives
+// the vertices of the body over its face, and the points of the body on its edges (a ridge in the face of a box, an
+// active edge).
 // The contacts are then grouped by normal: one patch (a manifold of 4 points) per normal, for the vertices of the body,
-// and one for the edges of the terrain. On a flat terrain a body has the manifold it has on a plane: its vertices.
+// and one for the edges of the surface. On a flat surface a body has the manifold it has on a plane: its vertices.
 // Jolt and Box3D group by normal alone, and keep 4 points out of all of them (PruneContactPoints, b3ReduceCluster).
-// In one manifold of 4 points, the points on the edges of the terrain take the place of a corner of the body: a plate
+// In one manifold of 4 points, the points on the edges of the surface take the place of a corner of the body: a plate
 // resting flat lost 2 corners to 2 points of its face over an edge of the grid, and sank by 10 mm on this side while
 // the pair cache kept its contact.
-// The order of the pair is kept: if the terrain is B, the normals point from the body to the terrain
-func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, object *actor.RigidBody, margin float64, terrainIsB bool, out []constraint.Manifold) int {
-	s := heightfieldPool.Get().(*heightfieldScratch)
-	defer heightfieldPool.Put(s)
+// The order of the pair is kept: if the surface is B, the normals point from the body to the surface
+func collideTriangles(surface, object *actor.RigidBody, margin float64, surfaceIsB bool, out []constraint.Manifold) int {
+	s := trianglePool.Get().(*triangleScratch)
+	defer trianglePool.Put(s)
 
 	bounds := object.AABB()
 	bounds = actor.AABB{Min: bounds.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: bounds.Max.Add(mgl64.Vec3{margin, margin, margin})}
-	s.cells = field.OverlapCells(localBounds(terrain.Transform, bounds), s.cells[:0])
+	local := localBounds(surface.Transform, bounds)
 	s.contacts, s.points = s.contacts[:0], s.points[:0]
 
-	cellsZ := field.ZSamples - 1
-	for _, cell := range s.cells {
-		x, z := int(cell)/cellsZ, int(cell)%cellsZ
-		for t := 0; t < 2; t++ {
-			local, edges := field.Triangle(x, z, t)
-			for i := range local {
-				s.shape.vertices[i] = terrain.Transform.ToWorld(local[i])
+	switch shape := surface.Shape.(type) {
+	case *actor.Heightfield:
+		s.cells = shape.OverlapCells(local, s.cells[:0])
+		cellsZ := shape.ZSamples - 1
+		for _, cell := range s.cells {
+			x, z := int(cell)/cellsZ, int(cell)%cellsZ
+			for t := 0; t < 2; t++ {
+				vertices, edges := shape.Triangle(x, z, t)
+				s.collideLocalTriangle(surface, object, vertices, edges, bounds, margin)
 			}
-			s.shape.aabb = triangleAABB(s.shape.vertices)
-			if s.shape.aabb.Overlaps(bounds) {
-				s.collideTriangle(object, edges&0b111, edges>>3, margin)
-			}
+		}
+	case *actor.TriangleMesh:
+		s.triangles = shape.OverlapTriangles(local, s.triangles[:0])
+		for _, t := range s.triangles {
+			vertices, edges := shape.Triangle(t)
+			s.collideLocalTriangle(surface, object, vertices, edges, bounds, margin)
 		}
 	}
 	if len(s.contacts) == 0 {
@@ -219,15 +242,27 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 
 	for k := 0; k < patches; k++ {
 		m := &out[k]
-		m.Reset(terrain, object)
+		m.Reset(surface, object)
 		m.Normal = normals[k]
-		if terrainIsB {
-			m.Reset(object, terrain)
+		if surfaceIsB {
+			m.Reset(object, surface)
 			m.Normal = normals[k].Mul(-1)
 		}
 		reducePatch(s.patches[k], normals[k], m)
 	}
 	return patches
+}
+
+// collideLocalTriangle: the triangle of the surface, given in its local space with its edges (bit e active, bit 3+e
+// convex), is taken to world space and tested if its AABB overlaps the bounds of the body
+func (s *triangleScratch) collideLocalTriangle(surface, object *actor.RigidBody, vertices [3]mgl64.Vec3, edges uint8, bounds actor.AABB, margin float64) {
+	for i := range vertices {
+		s.shape.vertices[i] = surface.Transform.ToWorld(vertices[i])
+	}
+	s.shape.aabb = triangleAABB(s.shape.vertices)
+	if s.shape.aabb.Overlaps(bounds) {
+		s.collideTriangle(object, edges&0b111, edges>>3, margin)
+	}
 }
 
 // collideTriangle adds the contacts of the body with the triangle of s.shape:
@@ -249,7 +284,7 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 //
 // Every separation is measured along the normal of its contact.
 // activeEdges, convexEdges: bit e for the edge from the vertex e to the vertex e+1
-func (s *heightfieldScratch) collideTriangle(object *actor.RigidBody, activeEdges, convexEdges uint8, margin float64) {
+func (s *triangleScratch) collideTriangle(object *actor.RigidBody, activeEdges, convexEdges uint8, margin float64) {
 	vertices := &s.shape.vertices
 	faceNormal := vertices[1].Sub(vertices[0]).Cross(vertices[2].Sub(vertices[0])).Normalize()
 	if faceNormal.Dot(object.Transform.Position.Sub(vertices[0])) < 0 {
@@ -306,7 +341,7 @@ func (s *heightfieldScratch) collideTriangle(object *actor.RigidBody, activeEdge
 
 // addContact: the points from first to the end of s.points are a contact. Returns the separation of its deepest point,
 // +Inf without point
-func (s *heightfieldScratch) addContact(normal mgl64.Vec3, first int, edge, closest bool) float64 {
+func (s *triangleScratch) addContact(normal mgl64.Vec3, first int, edge, closest bool) float64 {
 	deepest := math.Inf(1)
 	for _, point := range s.points[first:] {
 		deepest = math.Min(deepest, point.Separation)
@@ -389,7 +424,7 @@ func contactNormal(faceNormal mgl64.Vec3, activeEdges, touched uint8, normal mgl
 // e+1): a ridge of the terrain in the face of a box, across the side of a capsule, is found where it crosses them.
 // Jolt keeps all the points of the polygon. The points cut on a flat edge are between vertices of the body, on the
 // same plane: they say nothing more, and take the place of a corner among the 4 points of a manifold
-func (s *heightfieldScratch) clipFace(object *actor.RigidBody, normal, faceNormal mgl64.Vec3, bodyVertices bool, cutSides uint8, margin float64) {
+func (s *triangleScratch) clipFace(object *actor.RigidBody, normal, faceNormal mgl64.Vec3, bodyVertices bool, cutSides uint8, margin float64) {
 	vertices := &s.shape.vertices
 	alignment := normal.Dot(faceNormal)
 	if alignment <= 0 {

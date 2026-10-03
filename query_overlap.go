@@ -15,8 +15,8 @@ import (
 
 // Overlap appends to bodies the bodies which overlap the convex shape (a sphere, a capsule, a box) at the transform,
 // among the bodies the filter accepts, in the order of World.Bodies, and returns the slice: no allocation if its
-// capacity is enough. A body in contact with the shape overlaps it. A heightfield overlaps the shape when one of its
-// triangles does, from any side. A plane or a heightfield as the shape panics
+// capacity is enough. A body in contact with the shape overlaps it. A heightfield or a mesh overlaps the shape when one
+// of its triangles does, from any side. A plane, a heightfield or a mesh as the shape panics
 func (w *World) Overlap(shape actor.ShapeInterface, at actor.Transform, filter QueryFilter, bodies []*actor.RigidBody) []*actor.RigidBody {
 	w.guard()
 	mustBeConvex(shape)
@@ -43,6 +43,8 @@ func (w *World) Overlap(shape actor.ShapeInterface, at actor.Transform, filter Q
 			overlaps = lowest.Dot(other.Normal)+other.Distance <= 0
 		case *actor.Heightfield:
 			overlaps = scratch.overlapsHeightfield(&core, radius, bounds, body, other)
+		case *actor.TriangleMesh:
+			overlaps = scratch.overlapsMesh(&core, radius, bounds, body, other)
 		default:
 			otherCore, otherRadius := gjk.NewCoreProxy(body)
 			overlaps = coresOverlap(&core, radius, &otherCore, otherRadius)

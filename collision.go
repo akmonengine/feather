@@ -60,17 +60,12 @@ func narrowPhase(pairs []Pair, workersCount int, margin func(a, b *actor.RigidBo
 	return compactManifolds(manifolds, offsets, counts)
 }
 
-// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a heightfield
+// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a surface (a heightfield, a mesh)
 func manifoldsOf(pair Pair) int {
-	if isHeightfield(pair.BodyA) || isHeightfield(pair.BodyB) {
+	if isSurface(pair.BodyA) || isSurface(pair.BodyB) {
 		return MaxManifoldsPerPair
 	}
 	return 1
-}
-
-func isHeightfield(body *actor.RigidBody) bool {
-	_, ok := body.Shape.(*actor.Heightfield)
-	return ok
 }
 
 // collidePair: triggers keep only the real overlaps
@@ -167,8 +162,8 @@ func compactManifolds(manifolds []constraint.Manifold, offsets, counts []int) []
 // - spheres & capsules: closest points of their segments (collision_capsule.go)
 // - other shapes: GJK/EPA, then the contact points are clipped (epa/manifold.go)
 //
-// Against a heightfield, a body can touch the terrain with several normals: Collide keeps the deepest patch,
-// CollideAll returns all of them
+// Against a surface (a heightfield, a triangle mesh), a body can touch it with several normals: Collide keeps the
+// deepest patch, CollideAll returns all of them
 func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
 	var manifolds [1]constraint.Manifold
 	found := CollideAll(a, b, margin, manifolds[:]) > 0
@@ -184,11 +179,12 @@ func CollideAll(a, b *actor.RigidBody, margin float64, manifolds []constraint.Ma
 	m := &manifolds[0]
 	m.Reset(a, b)
 
-	if field, ok := a.Shape.(*actor.Heightfield); ok {
-		return collideHeightfield(a, field, b, margin, false, manifolds)
+	// a surface against a surface never meets: both are static
+	if isSurface(a) {
+		return collideTriangles(a, b, margin, false, manifolds)
 	}
-	if field, ok := b.Shape.(*actor.Heightfield); ok {
-		return collideHeightfield(b, field, a, margin, true, manifolds)
+	if isSurface(b) {
+		return collideTriangles(b, a, margin, true, manifolds)
 	}
 	if collide(a, b, margin, m) {
 		return 1

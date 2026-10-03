@@ -77,6 +77,7 @@ type ccdScratch struct {
 	stack      []int32
 	candidates []int32
 	cells      []int32
+	triangles  []int32
 	shape      triangleShape
 	core       actor.Sphere
 	// fast: the fast bodies of the step, in the order of the states; fastOf[state] is the index of a state in fast, -1
@@ -244,8 +245,8 @@ func (w *World) findImpact(s *solver, k int, scratch *ccdScratch) {
 		switch shape := other.Shape.(type) {
 		case *actor.Plane:
 			fast.fraction = math.Min(fast.fraction, impact(body.Shape, motion, fast.radius, nil, shape, fast.fraction, scratch))
-		case *actor.Heightfield:
-			fast.fraction = math.Min(fast.fraction, w.heightfieldImpact(body.Shape, motion, fast.radius, other, shape, swept, fast.fraction, scratch))
+		case *actor.Heightfield, *actor.TriangleMesh:
+			fast.fraction = math.Min(fast.fraction, surfaceImpact(body.Shape, motion, fast.radius, other, swept, fast.fraction, scratch))
 		default:
 			proxy := gjk.NewProxy(other)
 			fast.fraction = math.Min(fast.fraction, impact(body.Shape, motion, fast.radius, &proxy, nil, fast.fraction, scratch))
@@ -339,26 +340,41 @@ func timeOfImpact(shape actor.ShapeInterface, motion *sweep, radius float64, oth
 	return t
 }
 
-// heightfieldImpact: the first impact with the triangles under the motion
-func (w *World) heightfieldImpact(shape actor.ShapeInterface, motion *sweep, radius float64, terrain *actor.RigidBody, field *actor.Heightfield, swept actor.AABB, maxFraction float64, scratch *ccdScratch) float64 {
-	scratch.cells = field.OverlapCells(localBounds(terrain.Transform, swept), scratch.cells[:0])
+// surfaceImpact: the first impact with the triangles of the surface (a heightfield, a mesh) under the motion
+func surfaceImpact(shape actor.ShapeInterface, motion *sweep, radius float64, surface *actor.RigidBody, swept actor.AABB, maxFraction float64, scratch *ccdScratch) float64 {
+	local := localBounds(surface.Transform, swept)
 	fraction := maxFraction
-	cellsZ := field.ZSamples - 1
-	for _, cell := range scratch.cells {
-		x, z := int(cell)/cellsZ, int(cell)%cellsZ
-		for t := 0; t < 2; t++ {
-			local, _ := field.Triangle(x, z, t)
-			for i := range local {
-				scratch.shape.vertices[i] = terrain.Transform.ToWorld(local[i])
+	switch other := surface.Shape.(type) {
+	case *actor.Heightfield:
+		scratch.cells = other.OverlapCells(local, scratch.cells[:0])
+		cellsZ := other.ZSamples - 1
+		for _, cell := range scratch.cells {
+			x, z := int(cell)/cellsZ, int(cell)%cellsZ
+			for t := 0; t < 2; t++ {
+				vertices, _ := other.Triangle(x, z, t)
+				fraction = triangleImpact(shape, motion, radius, surface, vertices, swept, fraction, scratch)
 			}
-			if !triangleAABB(scratch.shape.vertices).Overlaps(swept) {
-				continue
-			}
-			proxy := gjk.NewProxyAt(actor.NewTransform(), &scratch.shape)
-			fraction = math.Min(fraction, impact(shape, motion, radius, &proxy, nil, fraction, scratch))
+		}
+	case *actor.TriangleMesh:
+		scratch.triangles = other.OverlapTriangles(local, scratch.triangles[:0])
+		for _, t := range scratch.triangles {
+			vertices, _ := other.Triangle(t)
+			fraction = triangleImpact(shape, motion, radius, surface, vertices, swept, fraction, scratch)
 		}
 	}
 	return fraction
+}
+
+// triangleImpact: the impact with the triangle of the surface, given in its local space, before the fraction
+func triangleImpact(shape actor.ShapeInterface, motion *sweep, radius float64, surface *actor.RigidBody, vertices [3]mgl64.Vec3, swept actor.AABB, fraction float64, scratch *ccdScratch) float64 {
+	for i := range vertices {
+		scratch.shape.vertices[i] = surface.Transform.ToWorld(vertices[i])
+	}
+	if !triangleAABB(scratch.shape.vertices).Overlaps(swept) {
+		return fraction
+	}
+	proxy := gjk.NewProxyAt(actor.NewTransform(), &scratch.shape)
+	return math.Min(fraction, impact(shape, motion, radius, &proxy, nil, fraction, scratch))
 }
 
 // isFast: the body can move more than half of its smallest extent during the step, from its velocities at the start
