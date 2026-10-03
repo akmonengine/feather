@@ -1,6 +1,7 @@
 package actor
 
 import (
+	"errors"
 	"math"
 	"sync/atomic"
 
@@ -18,6 +19,13 @@ const (
 	// BodyTypeStatic bodies are immovable and have infinite mass
 	// They are not affected by forces or gravity (e.g., ground, walls)
 	BodyTypeStatic
+
+	// BodyTypeKinematic bodies go where the game puts them (SetKinematicTarget: a pose per step), with the velocity
+	// of this motion, and push the dynamic bodies they meet: infinite mass for the solver, no force, no gravity (a
+	// moving platform, a character, the animated bones of a creature). They don't collide with the static and the
+	// kinematic bodies. World.SetBodyType changes a body between kinematic and dynamic, World.Teleport places it
+	// without velocity
+	BodyTypeKinematic
 )
 
 const (
@@ -111,13 +119,18 @@ type RigidBody struct {
 	aabb  AABB
 	// serial: a unique number, given by NewRigidBody
 	serial uint64
+
+	// target: the pose a kinematic body reaches at the end of the next step (SetKinematicTarget), if targeted
+	target   Transform
+	targeted bool
 }
 
 // serials of the bodies created by NewRigidBody
 var serials atomic.Uint64
 
 // NewRigidBody creates a new rigid body with the given properties
-// density is used to calculate mass for dynamic bodies (ignored for static)
+// density is used to calculate mass for dynamic and kinematic bodies (ignored for static): a kinematic body keeps the
+// mass of its shape for the day it becomes dynamic (World.SetBodyType), the solver never reads it
 func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, density float64) *RigidBody {
 	transform.Rotation = transform.Rotation.Normalize()
 	rb := &RigidBody{
@@ -140,7 +153,7 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 			DynamicFriction: 0.0,
 		}
 	} else {
-		// Dynamic bodies compute mass from shape and density
+		// Dynamic and kinematic bodies compute mass from shape and density
 		rb.Material = Material{
 			Density:         density,
 			mass:            shape.ComputeMass(density),
@@ -152,7 +165,8 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 		}
 	}
 
-	// a static body has no inertia (its inverse inertia is 0, it never turns)
+	// a static body has no inertia (its inverse inertia is 0, it never turns); a kinematic body keeps the one of its
+	// shape for a switch to dynamic (GetInverseInertiaWorld gives 0 while it is kinematic)
 	if bodyType != BodyTypeStatic {
 		rb.InertiaLocal = shape.ComputeInertia(rb.Material.mass)
 		rb.InverseInertiaLocal = rb.InertiaLocal.Inv()
@@ -177,8 +191,9 @@ func (rb *RigidBody) UpdateAABB() {
 	rb.aabb = rb.Shape.ComputeAABB(rb.Transform)
 }
 
+// InverseMass: 1 / mass for a dynamic body, 0 for a static or a kinematic body (nothing moves them)
 func (rb *RigidBody) InverseMass() float64 {
-	if rb.BodyType == BodyTypeStatic {
+	if rb.BodyType != BodyTypeDynamic {
 		return 0
 	}
 	return 1 / rb.Material.mass
@@ -191,13 +206,17 @@ func (rb *RigidBody) InverseMassAxes() mgl64.Vec3 {
 }
 
 // SetLocks changes the locked axes of a dynamic body: its velocities along the locked axes are cleared, and it wakes
-// up (a body freed in the air must fall). A static body never moves: it has no lock
+// up (a body freed in the air must fall). A static body never moves: it has no lock. A kinematic body goes where its
+// target is: it keeps the locks for the day it becomes dynamic (World.SetBodyType)
 func (rb *RigidBody) SetLocks(linear, angular Axes) {
 	linear, angular = linear&AllAxes, angular&AllAxes
 	if rb.BodyType == BodyTypeStatic || (linear == rb.LinearLock && angular == rb.AngularLock) {
 		return
 	}
 	rb.LinearLock, rb.AngularLock = linear, angular
+	if rb.BodyType != BodyTypeDynamic {
+		return
+	}
 	rb.Velocity = linear.LockVector(rb.Velocity)
 	rb.AngularVelocity = angular.LockVector(rb.AngularVelocity)
 	rb.WakeUp()
@@ -218,9 +237,10 @@ func (rb *RigidBody) WakeUp() {
 	rb.SleepTimer = 0.0
 }
 
-// AddForce in N, during the next step
+// AddForce in N, during the next step. A static or a kinematic body ignores the forces, the torques and the impulses
+// (PhysX refuses them on a kinematic actor, Jolt drops them: "Cancel forces" in Body::SetMotionType)
 func (rb *RigidBody) AddForce(force mgl64.Vec3) {
-	if rb.BodyType != BodyTypeStatic {
+	if rb.BodyType == BodyTypeDynamic {
 		rb.WakeUp()
 		rb.accumulatedForce = rb.accumulatedForce.Add(force)
 	}
@@ -228,7 +248,7 @@ func (rb *RigidBody) AddForce(force mgl64.Vec3) {
 
 // AddTorque in N·m (world space), during the next step
 func (rb *RigidBody) AddTorque(torque mgl64.Vec3) {
-	if rb.BodyType != BodyTypeStatic {
+	if rb.BodyType == BodyTypeDynamic {
 		rb.WakeUp()
 		rb.accumulatedTorque = rb.accumulatedTorque.Add(torque)
 	}
@@ -242,7 +262,7 @@ func (rb *RigidBody) AddForceAtPoint(force mgl64.Vec3, point mgl64.Vec3) {
 
 // AddImpulse in N·s: the velocity changes immediately (a hit, a jump)
 func (rb *RigidBody) AddImpulse(impulse mgl64.Vec3) {
-	if rb.BodyType != BodyTypeStatic {
+	if rb.BodyType == BodyTypeDynamic {
 		rb.WakeUp()
 		rb.Velocity = rb.LinearLock.LockVector(rb.Velocity.Add(impulse.Mul(rb.InverseMass())))
 	}
@@ -256,7 +276,7 @@ func (rb *RigidBody) AddImpulseAtPoint(impulse mgl64.Vec3, point mgl64.Vec3) {
 
 // AddAngularImpulse in N·m·s (world space): the angular velocity changes immediately
 func (rb *RigidBody) AddAngularImpulse(impulse mgl64.Vec3) {
-	if rb.BodyType != BodyTypeStatic {
+	if rb.BodyType == BodyTypeDynamic {
 		rb.WakeUp()
 		rb.AngularVelocity = rb.AngularVelocity.Add(rb.GetInverseInertiaWorld().Mul3x1(impulse))
 	}
@@ -294,9 +314,10 @@ func (rb *RigidBody) GetInverseInertiaWorld() mgl64.Mat3 {
 	return inverseInertia
 }
 
-// GetFreeInverseInertiaWorld: the inverse inertia in world space of the body without its locks
+// GetFreeInverseInertiaWorld: the inverse inertia in world space of the body without its locks, 0 for a static or a
+// kinematic body
 func (rb *RigidBody) GetFreeInverseInertiaWorld() mgl64.Mat3 {
-	if rb.BodyType == BodyTypeStatic {
+	if rb.BodyType != BodyTypeDynamic {
 		return mgl64.Mat3{}
 	}
 	// the rotation matrix of mgl64 (Quat.Mat4), and R I⁻¹ Rᵀ without copying the matrices: the same arithmetic
@@ -310,4 +331,36 @@ func (rb *RigidBody) GetFreeInverseInertiaWorld() mgl64.Mat3 {
 	ri := Mul3(&r, &rb.InverseInertiaLocal)
 	rt := Transpose3(&r)
 	return Mul3(&ri, &rt)
+}
+
+// ErrNotKinematic: SetKinematicTarget was called on a body which is not kinematic. The target is not stored
+var ErrNotKinematic = errors.New("actor: SetKinematicTarget on a body which is not kinematic")
+
+// SetKinematicTarget: the pose a kinematic body reaches at the end of the next step. The step brings it there over its
+// sub-steps (its position linearly, its rotation along the shortest arc), with the velocity of this motion, and drops
+// the target: give one per step to move the body along a path, as PxRigidDynamic::setKinematicTarget of PhysX. Without
+// target the body stays, with no velocity. A target away from the pose of the body wakes it up, with its island at the
+// step. On a body which is not kinematic the target is refused: ErrNotKinematic, the only error (PhysX refuses it too,
+// "Body must be kinematic"); the call allocates nothing. To place the body without pushing anything, see World.Teleport
+func (rb *RigidBody) SetKinematicTarget(target Transform) error {
+	if rb.BodyType != BodyTypeKinematic {
+		return ErrNotKinematic
+	}
+	target.Rotation = target.Rotation.Normalize()
+	rb.target, rb.targeted = target, true
+	if target != rb.Transform {
+		rb.WakeUp()
+	}
+	return nil
+}
+
+// KinematicTarget: the target of the next step, if the body has one (the step drops it once reached)
+func (rb *RigidBody) KinematicTarget() (Transform, bool) {
+	return rb.target, rb.targeted
+}
+
+// ClearKinematicTarget: the body has no target anymore, it stays where it is at the next step. The World calls it when
+// the body reaches its target, and when the body is teleported or changes type
+func (rb *RigidBody) ClearKinematicTarget() {
+	rb.target, rb.targeted = Transform{}, false
 }

@@ -173,8 +173,8 @@ func TestSolveFrictionBoundsTheTwistByTheLeverArms(t *testing.T) {
 	normal := mgl64.Vec3{0, 1, 0}
 	bodyA, bodyB := &actor.RigidBody{}, &actor.RigidBody{}
 	newStates := func(spinA, spinB float64) (*bodyState, *bodyState) {
-		return &bodyState{body: bodyA, angularVelocity: mgl64.Vec3{0.3, spinA, 0}, inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})},
-			&bodyState{body: bodyB, angularVelocity: mgl64.Vec3{0, spinB, -0.7}, inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
+		return &bodyState{body: bodyA, dynamic: true, angularVelocity: mgl64.Vec3{0.3, spinA, 0}, inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})},
+			&bodyState{body: bodyB, dynamic: true, angularVelocity: mgl64.Vec3{0, spinB, -0.7}, inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
 	}
 	// the tangent rows have no mass here: the twist alone is solved
 	newConstraint := func(friction float64) *contactConstraint {

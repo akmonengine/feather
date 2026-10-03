@@ -152,6 +152,55 @@ body.SetLocks(actor.NoAxes, actor.AxisX|actor.AxisZ)            // later: it cle
   leaning by 45° which only turns around Y is as heavy to spin as it looks). Jolt, Rapier, PhysX and Box3D make it
   lighter than it is; see the [algorithms](ALGORITHMS.md#axis-locks).
 
+### Kinematic bodies
+A kinematic body is moved by the game, not by the forces: a lift, a moving platform, a door, a character, the bones of
+a creature which follow its animation while its tail is simulated. It pushes the dynamic bodies it meets with the
+velocity of its motion, carries what rests on it, and nothing pushes it back. It is the kinematic body of PhysX
+(`setKinematicTarget`), Unity (`isKinematic` + `MovePosition`), Jolt (`MoveKinematic`) and Unreal.
+
+```go
+lift := actor.NewRigidBody(actor.Transform{Position: start, Rotation: mgl64.QuatIdent()}, &actor.Box{HalfExtents: mgl64.Vec3{1, 0.1, 1}}, actor.BodyTypeKinematic, 500)
+lift.Material.StaticFriction, lift.Material.DynamicFriction = 0.6, 0.6 // the friction of its surface, for the riders
+world.AddBody(lift)
+
+// each frame, before Step: where the lift is at the end of the step
+next := lift.Transform
+next.Position = next.Position.Add(mgl64.Vec3{0, 0.5, 0}.Mul(dt))
+lift.SetKinematicTarget(next)
+world.Step(dt)
+```
+- **One target per step.** `SetKinematicTarget` gives the pose the body reaches at the end of the next step: the body
+  goes there over the sub-steps (position linearly, rotation along the shortest arc), its velocity is the one of this
+  motion (`Velocity`, `AngularVelocity`: (target - pose) / dt, read after the step), and the target is dropped. Give one
+  before each step to move the body along a path; without target the body stays where it is, with no velocity. A
+  velocity written on a kinematic body is ignored: move it by its target.
+- **What it carries follows it.** A body resting on a platform moves with it, by friction (give the platform a
+  friction); a body it meets is pushed at its speed. The contact exists before they touch, from the speed of the
+  kinematic body: a leg at 5 m/s doesn't enter the tail on its path. A kinematic body pushing a body against a wall
+  squeezes it: the body enters the wall, as in every engine.
+- **No contact with the static and the kinematic bodies**: a kinematic body in the ground, through a wall or through
+  another kinematic body is not pushed out, and sends no event. The collision and trigger events are sent with the
+  dynamic bodies.
+- **Sleep.** On its way, a kinematic body keeps awake the bodies it touches, however slowly it goes. Stopped (no
+  target), it falls asleep with them half a second later; its next target wakes them all up.
+- **Teleport.** `world.Teleport(body, transform)` places a body without any velocity: a kinematic body brought there by
+  a target pushes what is on its path, a teleported one goes through it (it overlaps it, and the contact pushes them
+  apart at the next steps). For a cut scene, a respawn; `Teleport` works on every body, and wakes the sleeping bodies at
+  the new place.
+- **Forces, torques and impulses** are ignored, so is the gravity. The locks (`LinearLock`, `AngularLock`) are kept for
+  the day the body becomes dynamic.
+- **The animated bones of a creature.** Each bone is a kinematic body: at each step, give it the pose of its bone in the
+  animation. The simulated parts (a tail, a bag, hair) are dynamic bodies linked by joints, which hit the kinematic
+  bones and are pushed by them.
+- **Ragdoll.** `world.SetBodyType(bone, actor.BodyTypeDynamic)`: the bone falls with the velocity of its last motion,
+  and keeps its contacts, its joints, its layers and the pairs it ignores; `SetBodyType(bone, actor.BodyTypeKinematic)`
+  stops it and gives it back to the animation. Create the bones with their density: a body without mass can't become
+  dynamic (`SetBodyType` panics). A static body stays static (it panics too): it is the shape of the world.
+- **The continuous collision** never stops a kinematic body, and a fast dynamic body is not stopped by a kinematic body
+  unless it is a bullet (`IsBullet`): its speculative contact holds it. A thin moving wall is a kinematic body pushing
+  slow bodies, or stops bullets.
+- A plane or a heightfield stays static: a moving terrain is not supported.
+
 ### Collision filtering
 Who collides with whom is decided by 3 things, tested in the broad phase before any contact is computed.
 
@@ -382,3 +431,6 @@ Call `World.Close()` when the world is not used anymore, to stop its workers.
 | No bounce | Restitution on both bodies, impact faster than 1 m/s |
 | A body does not move | It may be asleep: call `WakeUp`. It may be locked along this axis: `LinearLock`, `AngularLock` |
 | A character falls over | Lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |
+| A kinematic body doesn't move | Give it a target before each step: `SetKinematicTarget`. A velocity written on it is ignored |
+| A kinematic body goes through the bodies | It was teleported or placed by hand: move it by `SetKinematicTarget`, which pushes with the velocity of the motion |
+| A platform falls asleep with its riders | It had no target: a kinematic body without target rests. Give it a target each step while it must move |

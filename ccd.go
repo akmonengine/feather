@@ -74,7 +74,8 @@ func (w *World) continuous(s *solver, dt float64) {
 		for i := range s.states {
 			state := &s.states[i]
 			body := state.body
-			if body.IsBullet != bullets || body.IsTrigger {
+			// a kinematic body is never stopped ("Kinematic bodies cannot be stopped", Jolt PhysicsSystem.cpp:1564)
+			if !state.dynamic || body.IsBullet != bullets || body.IsTrigger {
 				continue
 			}
 			minExtent, maxExtent := shapeExtents(body.Shape)

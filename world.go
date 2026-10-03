@@ -231,6 +231,7 @@ func (w *World) Step(dt float64) {
 
 	start := time.Now()
 	w.profile = Profile{}
+	w.moveKinematics(dt)
 	w.wakeTouchedBodies()
 	pool := w.workerPool()
 	parallelFrom := w.parallelFrom
@@ -260,7 +261,8 @@ func (w *World) Step(dt float64) {
 	s.joints = w.activeJoints()
 	s.prepare(w.Bodies, manifolds, dt, substeps, contactHertz, pool)
 	mark = w.lap(&w.profile.Prepare, mark)
-	for range substeps {
+	for k := range substeps {
+		s.substep = k + 1
 		s.integrateVelocities(w.Gravity)
 		s.warmStart()
 		s.push()
@@ -368,16 +370,16 @@ func (w *World) syncMoved() {
 	}
 }
 
-// wakeTouched: a sleeping body touched by an awake dynamic body wakes up with its island (as in Box2D & Jolt).
-// Returns true if a body woke up: its contacts must be found in this step
+// wakeTouched: a sleeping body touched by an awake dynamic or kinematic body wakes up with its island (as in Box2D &
+// Jolt). Returns true if a body woke up: its contacts must be found in this step
 func (w *World) wakeTouched(manifolds []constraint.Manifold) bool {
 	woke := false
 	for i := range manifolds {
 		a, b := manifolds[i].BodyA, manifolds[i].BodyB
-		if a.IsSleeping && isAwakeDynamic(b) {
+		if a.IsSleeping && isAwakeMover(b) {
 			w.islands.wake(a)
 			woke = true
-		} else if b.IsSleeping && isAwakeDynamic(a) {
+		} else if b.IsSleeping && isAwakeMover(a) {
 			w.islands.wake(b)
 			woke = true
 		}
@@ -414,12 +416,13 @@ func (w *World) collide(i int) {
 	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
 	margin := 0.0
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
-		// against a static body, the contact exists before the body touches it, from its speed (the speculative CCD of
-		// PhysX): it doesn't sink into the ground. Between 2 dynamic bodies, only within SpeculativeDistance (as in
-		// Box2D v3): a fast impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one
-		// substep would throw the lighter body and turn both
+		// against a static or a kinematic body, the contact exists before the body touches it, from their relative speed
+		// (the speculative CCD of PhysX, legal on its kinematic actors): it doesn't sink into the ground, a leg at 5 m/s
+		// doesn't enter the tail it meets. Between 2 dynamic bodies, only within SpeculativeDistance (as in Box2D v3): a
+		// fast impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one substep
+		// would throw the lighter body and turn both
 		margin = SpeculativeDistance
-		if pair.BodyA.BodyType == actor.BodyTypeStatic || pair.BodyB.BodyType == actor.BodyTypeStatic {
+		if pair.BodyA.BodyType != actor.BodyTypeDynamic || pair.BodyB.BodyType != actor.BodyTypeDynamic {
 			margin += relativeSpeed(pair.BodyA, pair.BodyB) * w.dt
 		}
 
@@ -491,7 +494,8 @@ func (w *World) isChanged(pair Pair) bool {
 	return false
 }
 
-// reach is the distance a body can travel during dt, plus the speculative distance
+// reach is the distance a body can travel during dt, plus the speculative distance. A kinematic body travels at the
+// velocity of the motion to its target
 func reach(body *actor.RigidBody, aabb actor.AABB, dt float64) float64 {
 	if body.BodyType == actor.BodyTypeStatic || body.IsSleeping {
 		return SpeculativeDistance
@@ -558,15 +562,15 @@ func warmStartPair(manifolds, previous []constraint.Manifold) {
 	}
 }
 
-// wakeTouchedBodies: a sleeping body touched by a moving body wakes up with its island,
-// otherwise it would be pushed without moving
+// wakeTouchedBodies: a sleeping body touched by a moving body (dynamic, or a kinematic body on its way to a target)
+// wakes up with its island, otherwise it would be pushed without moving
 func (w *World) wakeTouchedBodies() {
 	w.islands.wakeWoken()
 	for _, joint := range w.Joints {
 		base := joint.base()
-		if base.BodyA.IsSleeping && isAwakeDynamic(base.BodyB) {
+		if base.BodyA.IsSleeping && (isAwakeDynamic(base.BodyB) || isMoving(base.BodyB)) {
 			w.islands.wake(base.BodyA)
-		} else if base.BodyB.IsSleeping && isAwakeDynamic(base.BodyA) {
+		} else if base.BodyB.IsSleeping && (isAwakeDynamic(base.BodyA) || isMoving(base.BodyA)) {
 			w.islands.wake(base.BodyB)
 		}
 	}
@@ -578,11 +582,6 @@ func (w *World) wakeTouchedBodies() {
 			w.islands.wake(bodyB)
 		}
 	}
-}
-
-func isMoving(body *actor.RigidBody) bool {
-	return isAwakeDynamic(body) &&
-		(body.Velocity.Len() >= actor.DefaultSleepSpeed || body.AngularVelocity.Len() >= actor.DefaultSleepSpeed)
 }
 
 // parallelFor calls fn(i) for each i in [0, n), split between the workers.

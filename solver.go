@@ -108,13 +108,17 @@ func skewTerm(inertia *mgl64.Mat3, rX, rY mgl64.Vec3) mgl64.Mat3 {
 	return actor.Mul3(&t, &sy)
 }
 
-// bodyState is the copy of a dynamic body used by the solver during a step
+// bodyState is the copy of a body of the solver during a step: an awake dynamic body, or an awake kinematic body (it
+// moves, the contacts read its velocity and its motion, but it has no mass: no row writes it)
 type bodyState struct {
 	// the impulses read and write these 64 bytes: a cache line
 	body            *actor.RigidBody
 	velocity        mgl64.Vec3
 	angularVelocity mgl64.Vec3
 	invMass         float64 // without its locks: see linearMass
+	// dynamic: the rows write the body (an impulse changes its velocities). False for the shared static state and for a
+	// kinematic body: the rows of a kinematic body read it only, so they can share a color (graph.go)
+	dynamic bool
 
 	// the locked world axes of the body: it has no inverse mass along linearLock (invMassAxes), no inverse inertia around
 	// angularLock (inverseInertia)
@@ -231,6 +235,8 @@ type solver struct {
 	indices map[*actor.RigidBody]int
 	h       float64
 	invH    float64
+	// substep: the current sub-step, from 1 to substeps (the kinematic bodies interpolate their motion on it)
+	substep, substeps int
 	// locked: an awake body has a locked axis (the mass matrix of the joints can be singular: lockedInverse)
 	locked bool
 
@@ -293,10 +299,12 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	s.initJobs()
 	s.h = dt / float64(substeps)
 	s.invH = 1 / s.h
+	s.substeps = substeps
 	s.static = bodyState{deltaRotation: mgl64.QuatIdent(), deltaMatrix: mgl64.Ident3()}
 
 	// ========== 1. Body states ==========
-	// the awake dynamic bodies get a state, numbered in the order of the World; the states are filled in parallel
+	// the awake dynamic and kinematic bodies get a state, numbered in the order of the World; the states are filled in
+	// parallel
 	if s.indices == nil {
 		s.indices = make(map[*actor.RigidBody]int)
 	}
@@ -313,11 +321,11 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	s.locked = false
 	for i, body := range bodies {
 		s.stateIndex[i] = -1
-		if !isAwakeDynamic(body) {
+		if !isAwakeMover(body) {
 			continue
 		}
 		s.stateIndex[i] = int32(len(s.stateBody))
-		s.locked = s.locked || body.LinearLock|body.AngularLock != actor.NoAxes
+		s.locked = s.locked || (body.BodyType == actor.BodyTypeDynamic && body.LinearLock|body.AngularLock != actor.NoAxes)
 		if len(s.indices) > 0 {
 			if _, ok := s.indices[body]; ok {
 				s.indices[body] = len(s.stateBody)
@@ -354,13 +362,16 @@ func (s *solver) prepare(bodies []*actor.RigidBody, manifolds []constraint.Manif
 	s.buildArticulations()
 
 	// ========== 4. Graph coloring: the contacts, then the joints ==========
+	// a kinematic body counts as a static one: its rows read it and never write it, they can share a color. Box2D v3
+	// colors it as a dynamic body, because its SIMD solver scatters every body of a constraint, written or not
+	// (constraint_graph.c:20-23, v3.1.0); the rows of Feather only write the bodies which answer (bodyState.dynamic)
 	s.items = s.items[:0]
 	for i := range s.constraints {
-		s.items = append(s.items, graphItem{s.constraints[i].indexA, s.constraints[i].indexB})
+		s.items = append(s.items, graphItem{s.dynamicIndex(s.constraints[i].indexA), s.dynamicIndex(s.constraints[i].indexB)})
 	}
 	for _, joint := range s.joints {
 		base := joint.base()
-		s.items = append(s.items, graphItem{base.indexA, base.indexB})
+		s.items = append(s.items, graphItem{s.dynamicIndex(base.indexA), s.dynamicIndex(base.indexB)})
 	}
 	s.graph.color(s.items, len(s.states))
 }
@@ -382,12 +393,15 @@ func (s *solver) prepareConstraint(i int) {
 		normal:      manifold.Normal,
 		pointsCount: manifold.Count,
 	}
-	if c.indexA < 0 && c.indexB < 0 {
-		// nothing to solve
+	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
+	if !stateA.dynamic && !stateB.dynamic {
+		// nothing to solve (no pair gives 2 bodies without mass, but a step must not rely on it)
 		c.pointsCount = 0
 		return
 	}
 
+	// the contacts with a static body are stiffer, not the ones with a kinematic body: as Box2D v3.1 (contact_solver.c:1514,
+	// the softness of a static body is for a body without solver state) and Box3D (b3_contactStaticFlag, contact.c:241)
 	c.spring = s.contactSpring
 	if c.indexA < 0 || c.indexB < 0 {
 		c.spring = s.staticSpring
@@ -397,7 +411,6 @@ func (s *solver) prepareConstraint(i int) {
 	staticFriction := constraint.ComputeStaticFriction(manifold.BodyA.Material, manifold.BodyB.Material)
 	dynamicFriction := constraint.ComputeDynamicFriction(manifold.BodyA.Material, manifold.BodyB.Material)
 
-	stateA, stateB := s.state(c.indexA), s.state(c.indexB)
 	radiusA, radiusB := shapeRadius(manifold.BodyA.Shape), shapeRadius(manifold.BodyB.Shape)
 	c.radiusA, c.radiusB = radiusA, radiusB
 	c.rollingResistance = constraint.ComputeRollingResistance(manifold.BodyA.Material, manifold.BodyB.Material, radiusA, radiusB)
@@ -529,10 +542,10 @@ func shapeRadius(shape actor.ShapeInterface) float64 {
 
 // applyRolling applies the rolling impulses λ around both tangents: -λ on A, +λ on B
 func (c *contactConstraint) applyRolling(stateA, stateB *bodyState, lambda [2]float64) {
-	if stateA.body != nil {
+	if stateA.dynamic {
 		stateA.angularVelocity = stateA.angularVelocity.Sub(c.rollingA[0].Mul(lambda[0])).Sub(c.rollingA[1].Mul(lambda[1]))
 	}
-	if stateB.body != nil {
+	if stateB.dynamic {
 		stateB.angularVelocity = stateB.angularVelocity.Add(c.rollingB[0].Mul(lambda[0])).Add(c.rollingB[1].Mul(lambda[1]))
 	}
 }
@@ -545,16 +558,29 @@ func (s *solver) indexOf(body *actor.RigidBody) int {
 	return -1
 }
 
-// stateOf fills the state of the body i
+// stateOf fills the state of the body i. A kinematic body has its velocities and its motion (moveKinematic), no mass,
+// no inertia and no lock
 func (s *solver) stateOf(i int) {
 	body := s.bodies[s.stateBody[i]]
+	state := &s.states[i]
+	if body.BodyType == actor.BodyTypeKinematic {
+		s.starts[i] = bodyStart{rotation: body.Transform.Rotation}
+		*state = bodyState{
+			body:            body,
+			velocity:        body.Velocity,
+			angularVelocity: body.AngularVelocity,
+			deltaRotation:   mgl64.QuatIdent(),
+			deltaMatrix:     mgl64.Ident3(),
+		}
+		return
+	}
 	inverseInertia := body.GetFreeInverseInertiaWorld()
 	s.starts[i] = bodyStart{inertia: inverseInertia, rotation: body.Transform.Rotation}
-	state := &s.states[i]
 	*state = bodyState{
 		body:            body,
 		velocity:        body.Velocity,
 		angularVelocity: body.AngularVelocity,
+		dynamic:         true,
 		deltaRotation:   mgl64.QuatIdent(),
 		deltaMatrix:     mgl64.Ident3(),
 		invMass:         body.InverseMass(),
@@ -587,16 +613,17 @@ func (j *jacobian) velocity(stateA, stateB *bodyState, direction mgl64.Vec3) flo
 }
 
 // apply the impulse λ along the direction: -λ on A, +λ on B.
-// The static state is shared by all the static bodies: it is never written (it has no mass anyway).
+// Only a dynamic body is written: the static state is shared by all the static bodies, and a kinematic body has no
+// mass (writing it would be a data race between the colors, Box2D colors it as a dynamic body for this reason).
 // The inverse mass is the one of each axis: a locked axis keeps its velocity.
 // The components are written out: the vector methods go through the stack
 func (j *jacobian) apply(stateA, stateB *bodyState, direction mgl64.Vec3, lambda float64) {
-	if stateA.body != nil {
+	if stateA.dynamic {
 		v, w, m := &stateA.velocity, &stateA.angularVelocity, &stateA.invMassAxes
 		v[0], v[1], v[2] = v[0]-direction[0]*(lambda*m[0]), v[1]-direction[1]*(lambda*m[1]), v[2]-direction[2]*(lambda*m[2])
 		w[0], w[1], w[2] = w[0]-j.impulseA[0]*lambda, w[1]-j.impulseA[1]*lambda, w[2]-j.impulseA[2]*lambda
 	}
-	if stateB.body != nil {
+	if stateB.dynamic {
 		v, w, m := &stateB.velocity, &stateB.angularVelocity, &stateB.invMassAxes
 		v[0], v[1], v[2] = v[0]+direction[0]*(lambda*m[0]), v[1]+direction[1]*(lambda*m[1]), v[2]+direction[2]*(lambda*m[2])
 		w[0], w[1], w[2] = w[0]+j.impulseB[0]*lambda, w[1]+j.impulseB[1]*lambda, w[2]+j.impulseB[2]*lambda
@@ -614,7 +641,7 @@ func relativeVelocity(stateA, stateB *bodyState, rA, rB mgl64.Vec3) mgl64.Vec3 {
 }
 
 // currentSeparation: the contact points are not computed again during the sub-steps,
-// the separation is updated from the motion of both bodies
+// the separation is updated from the motion of both bodies (a kinematic body moves: its delta is its interpolation)
 func currentSeparation(stateA, stateB *bodyState, cp *contactPoint, normal mgl64.Vec3) float64 {
 	// a static body doesn't move: its core stays (its delta is the identity)
 	coreA := cp.coreA
@@ -704,6 +731,11 @@ func (s *solver) integrateVelocities(gravity mgl64.Vec3) {
 func (s *solver) integrateVelocity(i int) {
 	h, gravity := s.h, s.gravity
 	state := &s.states[i]
+	if !state.dynamic {
+		// a kinematic body has the velocity of its motion: no gravity, no force, no damping ("Gravity scale will be zero
+		// for kinematic bodies", Box2D solver.c:94), and no clamping (Jolt, PhysicsSystem.cpp:1531)
+		return
+	}
 	body := state.body
 
 	linearDamping := 1 / (1 + h*body.Material.LinearDamping)
@@ -763,6 +795,10 @@ func (s *solver) integratePositions(dt float64) {
 func (s *solver) integratePosition(i int) {
 	h, maxAngularSpeed := s.h, s.maxAngularSpeed
 	state := &s.states[i]
+	if !state.dynamic {
+		s.moveKinematic(i)
+		return
+	}
 	if state.velocity.LenSqr() > MaxLinearSpeed*MaxLinearSpeed {
 		state.velocity = state.velocity.Mul(MaxLinearSpeed / state.velocity.Len())
 	}
@@ -1157,13 +1193,13 @@ func (c *contactConstraint) solveFriction(stateA, stateB *bodyState) {
 // applyTwist: the angular impulse around the normal, -λ on A, +λ on B
 func (c *contactConstraint) applyTwist(stateA, stateB *bodyState, lambda float64) {
 	t := [3]float64{c.normal[0] * lambda, c.normal[1] * lambda, c.normal[2] * lambda}
-	if stateA.body != nil {
+	if stateA.dynamic {
 		w, m := &stateA.angularVelocity, &stateA.inverseInertia
 		w[0] -= m[0]*t[0] + m[3]*t[1] + m[6]*t[2]
 		w[1] -= m[1]*t[0] + m[4]*t[1] + m[7]*t[2]
 		w[2] -= m[2]*t[0] + m[5]*t[1] + m[8]*t[2]
 	}
-	if stateB.body != nil {
+	if stateB.dynamic {
 		w, m := &stateB.angularVelocity, &stateB.inverseInertia
 		w[0] += m[0]*t[0] + m[3]*t[1] + m[6]*t[2]
 		w[1] += m[1]*t[0] + m[4]*t[1] + m[7]*t[2]
@@ -1244,7 +1280,9 @@ func (s *solver) storeImpulsesConstraint(i int) {
 	c.manifold.TwistImpulse = c.twistImpulse
 }
 
-// finalize writes the new transform and velocities into the bodies
+// finalize writes the new transform and velocities into the bodies. A kinematic body is put on its target, bit for
+// bit, and the target is dropped (PhysX, updateKinematicPose): the game gives the next one. It keeps the velocity of
+// its motion
 func (s *solver) finalize() {
 	s.forEachBody(s.jobs.finalize)
 }
@@ -1252,6 +1290,14 @@ func (s *solver) finalize() {
 func (s *solver) finalizeBody(i int) {
 	state := &s.states[i]
 	body := state.body
+	if !state.dynamic {
+		if target, ok := body.KinematicTarget(); ok {
+			body.Transform = target
+			body.ClearKinematicTarget()
+			body.UpdateAABB()
+		}
+		return
+	}
 	body.Transform.Position = body.Transform.Position.Add(state.deltaPosition)
 	body.Transform.Rotation = state.deltaRotation.Mul(s.starts[i].rotation).Normalize()
 	body.Velocity = state.velocity

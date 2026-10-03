@@ -1002,7 +1002,7 @@ func TestLockedInverse2(t *testing.T) {
 // tangents by the locked axis. frictionMass is the inverse of K = Tᵀ (MA⁻¹ + MB⁻¹) T (the bodies don't turn here)
 func TestLockedFrictionMass(t *testing.T) {
 	const inverseMass = 0.25
-	locked := bodyState{body: &actor.RigidBody{}, invMass: inverseMass, invMassAxes: mgl64.Vec3{inverseMass, inverseMass, 0}, linearLock: actor.AxisZ}
+	locked := bodyState{body: &actor.RigidBody{}, dynamic: true, invMass: inverseMass, invMassAxes: mgl64.Vec3{inverseMass, inverseMass, 0}, linearLock: actor.AxisZ}
 	static := bodyState{}
 	for _, normal := range []mgl64.Vec3{{0.3, 0.8, 0.52}, {0.7, 0.1, -0.7}, {0, 1, 0}} {
 		for _, order := range [][2]*bodyState{{&locked, &static}, {&static, &locked}} {

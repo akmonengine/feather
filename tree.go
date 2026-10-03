@@ -10,10 +10,11 @@ import (
 // ========== BROAD PHASE ==========
 // The broad phase is a pair of dynamic AABB trees (Catto, "Dynamic Bounding Volume Hierarchies", GDC 2019; the
 // b2DynamicTree of Box2D, the btDbvt of Bullet), one per kind of body as the trees of Box2D v3: one for the static
-// bodies, updated when a body is added, removed or moved by the game, one for the dynamic bodies, awake or asleep.
-// A dynamic body is stored with its AABB enlarged by AABBMargin: a body which moves inside its enlarged AABB doesn't
-// touch the tree, a sleeping body never does. The planes and the heightfields are not in the trees: they are tested
-// against every awake body.
+// bodies, updated when a body is added, removed or moved by the game, one for the dynamic and the kinematic bodies,
+// awake or asleep (Box2D v3 gives the kinematic bodies a third tree, so that a kinematic proxy never queries the static
+// tree: here its proxy knows it, Tree.query). A dynamic or kinematic body is stored with its AABB enlarged by
+// AABBMargin: a body which moves inside its enlarged AABB doesn't touch the tree, a sleeping body never does. The
+// planes and the heightfields are not in the trees: they are tested against every awake dynamic body.
 //
 // The pairs of overlapping stored AABBs are kept from a step to the next (see findPairs): only a body put back in a
 // tree queries it. The pairs of the step are those whose exact AABBs overlap, sorted by the index of the first body,
@@ -322,7 +323,8 @@ type proxyKind uint8
 const (
 	proxyDynamic proxyKind = iota
 	proxyStatic
-	proxyLarge // planes & heightfields: tested against every awake body
+	proxyLarge     // planes & heightfields: tested against every awake dynamic body
+	proxyKinematic // in the tree of the dynamic bodies, but it only pairs with them: it never queries the static bodies
 )
 
 type proxy struct {
@@ -386,8 +388,11 @@ func kindOf(body *actor.RigidBody) proxyKind {
 	if isLarge(body) {
 		return proxyLarge
 	}
-	if body.BodyType == actor.BodyTypeDynamic {
+	switch body.BodyType {
+	case actor.BodyTypeDynamic:
 		return proxyDynamic
+	case actor.BodyTypeKinematic:
+		return proxyKinematic
 	}
 	return proxyStatic
 }
@@ -459,7 +464,7 @@ func (t *Tree) place(i int32, body *actor.RigidBody, aabb actor.AABB) {
 	p := &t.proxies[i]
 	p.kind = kindOf(body)
 	switch p.kind {
-	case proxyDynamic:
+	case proxyDynamic, proxyKinematic:
 		p.aabb = enlarged(aabb)
 		p.node = t.dynamics.insert(p.aabb, i)
 		t.moved = append(t.moved, i)
@@ -478,7 +483,7 @@ func (t *Tree) place(i int32, body *actor.RigidBody, aabb actor.AABB) {
 func (t *Tree) unplace(i int32) {
 	p := &t.proxies[i]
 	switch p.kind {
-	case proxyDynamic:
+	case proxyDynamic, proxyKinematic:
 		t.dynamics.remove(p.node)
 	case proxyStatic:
 		t.statics.remove(p.node)
@@ -499,7 +504,7 @@ func (t *Tree) update(i int32, body *actor.RigidBody, aabb actor.AABB) {
 		return
 	}
 	switch kind {
-	case proxyDynamic:
+	case proxyDynamic, proxyKinematic:
 		if !contains(p.aabb, aabb) {
 			t.dynamics.remove(p.node)
 			p.aabb = enlarged(aabb)
@@ -533,10 +538,10 @@ func (t *Tree) removed(k int) {
 	for i := k; i < len(t.proxies); i++ {
 		p := &t.proxies[i]
 		if p.node != nullNode {
-			if p.kind == proxyDynamic {
-				t.dynamics.nodes[p.node].body = int32(i)
-			} else {
+			if p.kind == proxyStatic {
 				t.statics.nodes[p.node].body = int32(i)
+			} else {
+				t.dynamics.nodes[p.node].body = int32(i)
 			}
 		}
 	}
@@ -683,7 +688,8 @@ const (
 )
 
 // query: the chunk c of the moved proxies finds its pairs (a pair of static bodies never needs solving, nor a static
-// body against a plane)
+// body against a plane; a kinematic body only pairs with the bodies of the dynamic tree: it has no contact with the
+// static bodies, the planes and the heightfields, as the kinematic proxies of Box2D v3 only query its dynamic tree)
 func (t *Tree) query(c int) {
 	chunk := &t.chunks[c]
 	chunk.found = chunk.found[:0]
@@ -795,9 +801,10 @@ func pairBefore(a, b Pair) bool {
 	return a.second < b.second
 }
 
-// needsSolving - At least one body must be dynamic and awake
+// needsSolving: a dynamic body, and an awake body which moves (dynamic or kinematic): a pair of a kinematic body with a
+// static or a kinematic body has no contact, a sleeping dynamic body is woken up by the kinematic body which reaches it
 func needsSolving(a, b *actor.RigidBody) bool {
-	return isAwakeDynamic(a) || isAwakeDynamic(b)
+	return (isAwakeMover(a) || isAwakeMover(b)) && (a.BodyType == actor.BodyTypeDynamic || b.BodyType == actor.BodyTypeDynamic)
 }
 
 func isAwakeDynamic(body *actor.RigidBody) bool {

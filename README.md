@@ -115,6 +115,38 @@ a locked body has its exact inertia, the one of a body on an axle. A body withou
 before. See the [physics guide](PHYSICS_GUIDE.md#axis-locks) and the
 [algorithms](ALGORITHMS.md#axis-locks).
 
+## Kinematic bodies
+A kinematic body goes where the game puts it and pushes the dynamic bodies it meets; nothing pushes it back: a moving
+platform, a character, the bones of a creature which follow its animation while its tail is simulated. It is the
+kinematic body of PhysX, Jolt, Box2D, Unity and Unreal.
+
+```go
+platform := actor.NewRigidBody(transform, &actor.Box{HalfExtents: mgl64.Vec3{2, 0.1, 2}}, actor.BodyTypeKinematic, 500)
+world.AddBody(platform)
+
+// each step: the pose the platform reaches at the end of the step; it goes there over the sub-steps
+next := platform.Transform
+next.Position = next.Position.Add(mgl64.Vec3{1, 0, 0}.Mul(dt))
+err := platform.SetKinematicTarget(next)      // actor.ErrNotKinematic on a body which is not kinematic
+world.Step(dt)                                   // the platform is at next, bit for bit; platform.Velocity is (next - previous) / dt
+
+world.Teleport(platform, start)                  // placed without velocity: it pushes nothing
+err = world.SetBodyType(bone, actor.BodyTypeDynamic)   // a ragdoll: the bone falls, with its contacts, its joints and its island
+err = world.SetBodyType(bone, actor.BodyTypeKinematic) // and follows its targets again; ErrStaticBody, ErrMasslessBody refuse
+```
+- One target per step: it is reached at the end of the step and dropped. Without target the body stays, with no
+  velocity (the kinematic actors of PhysX). Its velocity is the one of its motion: the contacts push with it.
+- Infinite mass for the solver: no force, no gravity, no impulse, no contact moves it. A dynamic body it meets takes its
+  velocity, friction included (a stack rides a platform, a leg pushes a tail). The contact exists before they touch,
+  from the speed of the kinematic body: a leg at 5 m/s doesn't enter the resting body on its path.
+- No contact between a kinematic body and a static or a kinematic body: no narrow phase, no event. The collision and
+  trigger events are sent with the dynamic bodies.
+- On its way, a kinematic body keeps awake the bodies it touches; stopped, it sleeps with them; its next target wakes
+  them all up.
+- The planes and the heightfields stay static.
+
+See the [physics guide](PHYSICS_GUIDE.md#kinematic-bodies) and the [algorithms](ALGORITHMS.md#kinematic-bodies).
+
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
 It is made of substeps, soft constraints, warm starting and relaxation:
@@ -265,6 +297,12 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   of `btSphereShape` & `btCapsuleShape`, a point & a segment with their radius, added by `btGjkPairDetector`;
   `btContinuousConvexCollision`)
 - PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html
+- Kinematic bodies: PhysX 5.6 (`PxRigidDynamic::setKinematicTarget`, `Sc::BodySim::calculateKinematicVelocity` &
+  `updateKinematicPose` in `ScKinematics.cpp`, the guide Rigid Body Dynamics > Kinematic Actors,
+  https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyDynamics.html), Jolt 5.3 (`Body::MoveKinematic`,
+  `Body::SetMotionType`, `Body::sFindCollidingPairsCanCollide`, `MotionProperties::MoveKinematic`), Box2D v3.1 & Box3D
+  (`b2Body_SetTargetTransform`, `b2Body_SetType`, the kinematic tree of `broad_phase.c`, the kinematic bodies of
+  `constraint_graph.c`, the sleep of `b2FinalizeBodiesTask`)
 
 ## Acknowledgements
 Feather is written from the publications, the documentation and the source code of these projects:
@@ -277,6 +315,8 @@ Feather is written from the publications, the documentation and the source code 
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
   the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
   the conservative advancement of the time of impact
+- [PhysX](https://github.com/NVIDIA-Omniverse/PhysX), by NVIDIA: the speculative CCD, the kinematic actors (a target
+  per step, reached at the end of the step, no velocity without target)
 
 ## Contributing Guidelines
 

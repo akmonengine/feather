@@ -8,6 +8,7 @@
 6. [Heightfield](#heightfield)
 7. [Continuous collision](#continuous-collision)
 8. [Queries](#queries)
+9. [Kinematic bodies](#kinematic-bodies)
 
 ## Broad phase
 
@@ -763,3 +764,115 @@ Box2D and Box3D a sensor is a shape filtered by its category.
 **Concurrency.** No lock: several readers or one writer, as the queries without lock of Jolt
 (`GetNarrowPhaseQueryNoLock`, `PhysicsSystem.h:124-125`). A query during a step panics, as Box3D refuses a locked
 world (`b3GetUnlockedWorldFromId`, `src/physics_world.c:95-109`).
+
+## Kinematic bodies
+
+A kinematic body goes where the game puts it, with the velocity of this motion, and pushes the dynamic bodies it meets;
+nothing pushes it back. `kinematic.go`.
+
+**A target per step.** `RigidBody.SetKinematicTarget` stores the pose the body reaches at the end of the next step. At
+the start of the step, the body takes the velocity of the motion to its target (`World.moveKinematics`):
+````
+v = (target.position - position) / dt
+ω = axis * angle / dt            // of the rotation target ⊗ rotation⁻¹, on the shortest arc (W ≥ 0)
+````
+It is the model of PhysX (`Sc::BodySim::calculateKinematicVelocity`, `ScKinematics.cpp:44-99`, 5.6.1: the same two
+formulas, "we simply determine the distance moved since the last simulation frame and assign the appropriate delta to
+the velocity. This vel will be used to shove dynamic objects in the solver"), whose kinematic actor has no velocity for
+a step without target (`:97-98`) and is put on its target at the end of the step (`updateKinematicPose`, `:193-217`;
+`PxRigidDynamic::setKinematicTarget`: "After the move is carried out during a single time step, the velocity is
+returned to zero. Thus, you must continuously call this in every time step"). Jolt (`Body::MoveKinematic`,
+`Body.cpp:81-95`, `MotionProperties::MoveKinematic`, `MotionProperties.inl:9-24`, v5.3.0) and Box2D
+(`b2Body_SetTargetTransform`, `body.c:808-852`, v3.1.0) compute the same velocities, then keep them from a step to the
+next and integrate the body with them: without a new call the body goes on, and a first order integration of the
+rotation doesn't land exactly on the target. Feather follows PhysX: the target is dropped once reached, a body without
+target stays, and the last sub-step writes the target bit for bit (`solver.finalizeBody`). A target on a body which is
+not kinematic is refused with `actor.ErrNotKinematic`, never ignored (PhysX asserts "Body must be kinematic").
+
+**Interpolation over the sub-steps.** The contacts are solved at each sub-step, and read the position of the body
+(`currentSeparation`, from its `deltaPosition` and `deltaRotation`): at the sub-step k of n, the body is at
+````
+Δp = (target.position - position) * k / n
+Δq = slerp(identity, target ⊗ rotation⁻¹, k / n) = rotation of angle * k / n around the axis
+````
+(`solver.moveKinematic`, `rotationFraction`). The slerp from the identity turns at a constant angular velocity: the
+velocity ω the rows read is the velocity of the motion at every sub-step, and the body sweeps exactly the arc its
+velocity says. The last sub-step takes the target itself, not the interpolation at k = n (cos and sin don't give the
+quaternion back bit for bit). A body without target doesn't move: its deltas stay the identity.
+
+**No mass.** The state of a kinematic body in the solver (`bodyState`, `dynamic` false) has no inverse mass, no inverse
+inertia and no lock: an impulse changes its velocity by λ M⁻¹ d = 0 ("Static and kinematic sims have zero mass", Box2D
+`body.c:535-536`; "static or kinematic bodies have infinite mass so should be treated as 1 / mass = 0",
+`MotionProperties.h:94-95` of Jolt). The rows read its velocity and its motion (a contact against it is a contact
+against a moving wall, a joint to it pulls the other body with it), and never write it: `jacobian.apply`,
+`applyTwist`, `applyRolling`, `applyLinear` and `applyAngular` write a body only if it is dynamic, where they wrote
+every body with a state before. Nothing else changes for a dynamic body: the arithmetic of a world without kinematic
+bodies is the same bit for bit (the fingerprints of `bench/baseline.json` are unchanged).
+
+Not written, a kinematic body can be shared by the rows of a color: the graph coloring takes it as a static body
+(`solver.dynamicIndex`). Box2D v3 colors it as a dynamic body, for a reason Feather doesn't have: "Unlike static bodies,
+we cannot use a dummy solver body for kinematic bodies. We cannot access a kinematic body from multiple threads
+efficiently because the SIMD solver body scatter would write to the same kinematic body from multiple threads"
+(`constraint_graph.c:20-23`, v3.1.0, the same in Box3D). A kinematic body touching 200 bodies would otherwise put its
+200 contacts in 200 colors, 16 colors and the overflow here.
+
+The trees of joints (`articulation.go`) take it as a static body too: a joint to a kinematic body is a leaf, and two
+chains hanging from the same kinematic body are two trees (the kinematic body couples nothing: its mass terms are 0).
+The contacts with a kinematic body keep the softness of the contacts between dynamic bodies, as Box2D v3.1
+(`contact_solver.c:1514`: the stiffer softness is for a body without solver state) and Box3D (`b3_contactStaticFlag`,
+`contact.c:241`, for a static body only).
+
+**Pairs.** A kinematic body has no contact with a static or a kinematic body, as in every engine (Jolt
+`Body::sFindCollidingPairsCanCollide`, `Body.inl:36-44`: "One of the bodies must be dynamic to collide"; Box2D
+`simulation.md`: "A shape on a kinematic body can only collide with a dynamic body"; PhysX `PxRigidBody.h:56`:
+"Kinematics will not collide with static or other kinematic objects"). The broad phase keeps it in the tree of the
+dynamic bodies, with a proxy of its own kind (`proxyKinematic`): moved, it queries the dynamic tree only, never the
+static tree nor the planes and the heightfields, and a pair is emitted if it has a dynamic body and an awake body which
+moves (`needsSolving`). Box2D v3 gives the kinematic bodies a third tree for the same rule ("Only dynamic proxies
+collide with kinematic and static proxies", `broad_phase.c:351`); two trees and a kind on the proxy do the same job
+here, and a body which changes type (below) keeps its leaf, its pairs and their contacts.
+
+**Speculative contacts from its speed.** The margin of a contact against a static body follows the relative speed of
+the bodies (the speculative CCD of PhysX, see Continuous collision); the margin against a kinematic body does the same
+(`World.collide`), where the pairs of dynamic bodies keep the 2 cm of Box2D. PhysX: "unlike the sweep-based CCD, it is
+legal to enable speculative CCD on kinematic actors" (the guide, Advanced Collision Detection). A leg at 5 m/s moves
+8 cm per step at 60 Hz: without it, the leg enters the tail it meets by 6 cm before the contact exists, and the spring
+of the contact throws the tail. With it, the contact exists a step ahead, the speculative row brings the tail to the
+speed of the leg within the sub-step they touch, and the leg enters it by 0.25 mm (`TestFastKinematicDoesNotGoThroughARestingBody`,
+capsules and boxes). The kinematic body itself is never stopped by the continuous collision ("Kinematic bodies cannot be
+stopped", Jolt `PhysicsSystem.cpp:1564`), and only the bullets are stopped by it (Box2D `solver.c:440-446`: the fast
+bodies query the static tree, the bullets the kinematic and dynamic trees too).
+
+**Sleep.** A kinematic body is in the island of the bodies it touches, as in Box2D ("dynamic and kinematic bodies that
+are enabled need a island", `body.c:313-317`) and Jolt (`IslandBuilder::LinkBodies` for every contact constraint,
+`PhysicsSystem.cpp:1278`). It rests when its velocity is exactly 0: no target, or a target at its pose. On its way it
+keeps its island awake, however slowly it goes; stopped, its timer runs like the others and the island sleeps together;
+a target away from its pose wakes it up (`SetKinematicTarget`), and the island with it at the step. Box2D and Jolt apply
+their sleep threshold to the kinematic bodies too (`b2FinalizeBodiesTask`, `solver.c:617-651`;
+`MotionProperties::AccumulateSleepTime`): a platform slower than 5 cm/s falls asleep with its riders, and stops, since
+their kinematic body is moved by a velocity. With a target per step, the platform would wake up at the next step: a
+sleep and a wake event at every half second, and the riders losing their velocity. PhysX keeps a kinematic actor
+awake as long as a target is set ("A kinematic actor is asleep unless a target pose has been set",
+`PxRigidDynamic.h:150-152`): so does Feather.
+
+**SetBodyType**, between kinematic and dynamic, in place: the body keeps its index, its leaf in the tree (the proxy
+changes kind at the next step, the pairs and their contacts stay), its joints, its filters and its island; it wakes up
+with its island. It is `Body::SetMotionType` of Jolt (`Body.cpp:37-77`: the forces dropped for a kinematic body, the
+velocities for a static one), which needs `mAllowDynamicOrKinematic` at the creation to switch a static body; PhysX
+toggles `PxRigidBodyFlag::eKINEMATIC` on a `PxRigidDynamic`, a static actor being another class ("you do need to
+provide a mass for the kinematic actor"); Box2D `b2Body_SetType` destroys the contacts of the body and recreates its
+proxies (`body.c:1023-1260`). Feather refuses the static bodies (`ErrStaticBody`): a static body is the shape of the world. To
+dynamic, the body keeps the velocity of its last motion (the ragdoll of a creature thrown by its animation) and needs
+the mass of its shape (`ErrMasslessBody` without it): a kinematic body created with a density keeps it (`NewRigidBody`),
+the solver never reads it while it is kinematic. To kinematic, the body stops and drops its forces; its locks wait for its next dynamic life.
+
+**Teleport** places any body without velocity (`World.Teleport`): the target is dropped, a kinematic body stops, a
+dynamic body keeps its velocity; the body and the sleeping bodies at the new place wake up, and the trees take it at
+the next step or at `SyncQueries`. A kinematic body teleported against a resting body pushes nothing
+(`TestTeleportGivesNoVelocity`), brought there by a target it pushes. PhysX on `setGlobalPose`: "the kinematic actor
+would not push away other dynamic actors in its path, instead it would go right through them. The setGlobalPose()
+function can still be used though, if one simply wants to teleport a kinematic actor to a new position".
+
+**Measured** (`TestKinematicPushesABox`, `TestFastKinematicDoesNotGoThroughARestingBody`, 60 Hz, 8 sub-steps): a cube
+pushed at 1 m/s on the ground (µ = 0.6) stays against the pusher within 0.00 mm, 0.12 mm deep at worst, at 1.000 m/s; a
+leg at 5 m/s enters a resting capsule by 0.25 mm at worst, a box by 0.22 mm, and never goes through.

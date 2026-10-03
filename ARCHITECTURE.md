@@ -8,6 +8,7 @@ feather/
 ├── graph.go            # graph coloring of the contacts and the joints, for the parallel solver
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
+├── kinematic.go        # kinematic bodies: the motion to their target, SetBodyType, Teleport
 ├── joint.go            # joints: distance, ball, hinge, fixed
 ├── joint_configurable.go # configurable joint: each axis locked, limited or free
 ├── articulation.go     # the anchors of the trees of joints, solved together (Baraff 1996)
@@ -32,7 +33,8 @@ feather/
 ## World.Step
 ```
 Step(dt)
-├── wake the sleeping bodies touched by a moving body
+├── the kinematic bodies take the velocity of the motion to their target
+├── wake the sleeping bodies touched by a moving body (dynamic, or a kinematic body on its way)
 ├── Phase 1: collision detection (once per step)
 │   ├── AABBs enlarged by the distance each body can travel during dt
 │   ├── broad phase: pairs of overlapping AABBs (AABB trees) which pass the collision filters
@@ -40,7 +42,8 @@ Step(dt)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
 │   ├── events: pairs touching or overlapping (triggers are not solved)
 │   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
-├── Phase 2: solver (substeps: articulations, then contacts and joints by color), then restitution
+├── Phase 2: solver (substeps: articulations, then contacts and joints by color; the kinematic bodies interpolated to
+│   their target), then restitution
 ├── continuous collision: the fast bodies are moved back to their first impact (with the bodies they collide with)
 └── Phase 3: sleep islands, the trees updated for the queries, then the events
 ```
@@ -59,7 +62,7 @@ points were computed, the previous contact points are moved with the bodies, the
 The contacts of a pair are kept by its pair in the broad phase: no lookup.
 
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative speed of the bodies * dt against a
-static body.
+static or a kinematic body.
 Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
 (the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
 
@@ -115,9 +118,28 @@ care"). A query started while `Step` runs panics with `feather: query during Ste
 refuses a locked world the same way). The listeners of the events run after the trees are updated and the guard is
 lifted, on the goroutine of `Step`: they can run queries, and see the end of the step.
 
+## Kinematic bodies
+`kinematic.go`, see [ALGORITHMS.md](ALGORITHMS.md#kinematic-bodies). A kinematic body (`actor.BodyTypeKinematic`) is
+moved by a target pose per step (`RigidBody.SetKinematicTarget`), reached at the end of the step; its velocity is the
+one of this motion. Where it appears:
+
+| Where | What |
+|-------|------|
+| start of the step | `World.moveKinematics`: the velocity of the motion to the target, 0 without target |
+| broad phase | in the tree of the dynamic bodies, with a proxy of its own kind: it never queries the static tree nor the planes. A pair needs a dynamic body and an awake body which moves (`needsSolving`): no pair with a static or a kinematic body |
+| narrow phase | the speculative margin of its pairs follows the relative speed, as against a static body |
+| solver | a `bodyState` without mass (`dynamic` false): the rows read its velocity and its motion, never write it; colored as a static body |
+| sub-steps | `solver.moveKinematic`: position interpolated linearly, rotation along the shortest arc; the last sub-step is the target, bit for bit |
+| islands & sleep | in the island of the bodies it touches; resting when its velocity is exactly 0 (no target, or a target at its pose) |
+| continuous collision | never stopped; a bullet is stopped by it, a fast body which is not a bullet is not (as Box2D) |
+| events, queries | the collision and trigger events with the dynamic bodies; seen by the queries like any body |
+| `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
+| `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
+
 ## Solver
-See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dynamic bodies (`bodyState`):
-the static and sleeping bodies share a state with no mass.
+See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the awake dynamic and kinematic bodies
+(`bodyState`): the static and sleeping bodies share a state with no mass; a kinematic body has its own state, read by
+the rows (its velocity, its motion) and never written (no mass).
 
 The axis locks (`actor.Axes`, `RigidBody.LinearLock` & `AngularLock`) live in the state too: its inverse mass by axis
 is null along the locked axes, its inverse inertia in world space is the one of the body held around them (`lock.go`, see
@@ -225,7 +247,11 @@ restitution, continuous collision, islands), without allocation.
 - The restitution is applied once per step, with the approach velocity of the impact: a body not round (box,
   capsule), bouncy (`e` over 0.5) and spinning fast (10-20 rad/s) can bounce higher than it fell. Measured at 60 Hz
   with 8 substeps: up to +21 % of energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
-- No kinematic bodies (moving platforms): a body is static or dynamic.
+- A kinematic body is moved by a target per step: a velocity written on it is overwritten by the step (Box2D and Jolt
+  move theirs by their velocity). A kinematic body pushing a dynamic body against a static body squeezes it, as in every
+  engine (PhysX documents it). A fast dynamic body which is not a bullet is not stopped by a kinematic body by the
+  continuous collision (as Box2D: its speculative contact, from their relative speed, holds it). The planes and the
+  heightfields stay static.
 - The queries test every plane and every heightfield of the world: they are in no tree. A terrain cut in dozens of
   heightfields would need one.
 - `SyncQueries` costs a test per body, even for a static body which never moves: Feather doesn't know what the game
