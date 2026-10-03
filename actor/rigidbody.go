@@ -92,10 +92,7 @@ type RigidBody struct {
 	accumulatedForce  mgl64.Vec3
 	accumulatedTorque mgl64.Vec3
 
-	IsTrigger bool
-	// IsBullet: a fast body is stopped at its first impact with the dynamic bodies too, not only with the static ones
-	// (continuous collision). For small fast bodies: projectiles
-	IsBullet   bool
+	IsTrigger  bool
 	IsSleeping bool
 	SleepTimer float64
 

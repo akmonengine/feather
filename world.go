@@ -40,6 +40,9 @@ type World struct {
 	contacts []constraint.Manifold
 	previous []constraint.Manifold
 	aabbs    []actor.AABB
+	// fast: the body i can move more than half of its smallest extent during the step (isFast): its pairs get the
+	// speculative margin of its speed
+	fast []bool
 	// step: the count of steps, the stamp of the contacts kept by the pairs of the broad phase
 	step  uint32
 	shift []int32 // buffer of RemoveBody
@@ -275,7 +278,7 @@ func (w *World) Step(dt float64) {
 	s.finalize()
 	pool.end()
 	mark = w.lap(&w.profile.Restitution, mark)
-	w.continuous(s, dt)
+	w.continuous(s, manifolds, dt)
 
 	w.contacts = manifolds
 	w.recordContacts()
@@ -347,8 +350,9 @@ func (w *World) detectCollision(dt float64, pool *workerPool) []constraint.Manif
 func (w *World) syncTrees(pool *workerPool) {
 	if cap(w.aabbs) < len(w.Bodies) {
 		w.aabbs = make([]actor.AABB, len(w.Bodies))
+		w.fast = make([]bool, len(w.Bodies))
 	}
-	w.aabbs = w.aabbs[:len(w.Bodies)]
+	w.aabbs, w.fast = w.aabbs[:len(w.Bodies)], w.fast[:len(w.Bodies)]
 	if w.aabbJob == nil {
 		w.aabbJob = w.computeAABB
 	}
@@ -399,9 +403,10 @@ func (w *World) activeJoints() []Joint {
 	return w.solverJoints
 }
 
-// computeAABB of the body i, enlarged by the distance it can travel during the step
+// computeAABB of the body i, enlarged by the distance it can travel during the step; and whether the body is fast
 func (w *World) computeAABB(i int) {
 	body := w.Bodies[i]
+	w.fast[i] = isFast(body, w.dt)
 	aabb := body.AABB()
 	if _, isPlane := body.Shape.(*actor.Plane); !isPlane {
 		margin := reach(body, aabb, w.dt)
@@ -418,11 +423,13 @@ func (w *World) collide(i int) {
 	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
 		// against a static or a kinematic body, the contact exists before the body touches it, from their relative speed
 		// (the speculative CCD of PhysX, legal on its kinematic actors): it doesn't sink into the ground, a leg at 5 m/s
-		// doesn't enter the tail it meets. Between 2 dynamic bodies, only within SpeculativeDistance (as in Box2D v3): a
-		// fast impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one substep
-		// would throw the lighter body and turn both
+		// doesn't enter the tail it meets. The pairs of a fast dynamic body (isFast) get the same margin: 2 fast spheres
+		// don't go through each other. Between 2 dynamic bodies which are not fast, only within SpeculativeDistance (as in
+		// Box2D v3): an impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one
+		// substep would throw the lighter body and turn both
 		margin = SpeculativeDistance
-		if pair.BodyA.BodyType != actor.BodyTypeDynamic || pair.BodyB.BodyType != actor.BodyTypeDynamic {
+		if pair.BodyA.BodyType != actor.BodyTypeDynamic || pair.BodyB.BodyType != actor.BodyTypeDynamic ||
+			w.fast[pair.IndexA] || w.fast[pair.IndexB] {
 			margin += relativeSpeed(pair.BodyA, pair.BodyB) * w.dt
 		}
 

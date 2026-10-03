@@ -296,7 +296,12 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
 - Dynamic AABB tree, collision margin & conservative advancement: Bullet 3.25 (`btDbvt` & `btDbvtBroadphase`; the margin
   of `btSphereShape` & `btCapsuleShape`, a point & a segment with their radius, added by `btGjkPairDetector`;
   `btContinuousConvexCollision`)
-- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html
+- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html,
+  PhysX 5.6 (`Sc::BodySim::updateContactDistance` in `ScCCD.cpp`, `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`)
+- Continuous collision of the fast bodies: Box2D v3.1 (`b2SolveContinuous`, the fast body of `b2FinalizeBodiesTask`,
+  `src/solver.c`; the bullets of `docs/simulation.md`), Box3D (`b3SolveContinuous`, `safetyFactor`), Jolt 5.3
+  (`EMotionQuality::LinearCast`, `JobFindCCDContacts` & `JobResolveCCDContacts` in `PhysicsSystem.cpp`,
+  `mLinearCastThreshold`), PhysX 5.6 (the sweep-based CCD of `PxsCCD.cpp`, the guide Advanced Collision Detection)
 - Kinematic bodies: PhysX 5.6 (`PxRigidDynamic::setKinematicTarget`, `Sc::BodySim::calculateKinematicVelocity` &
   `updateKinematicPose` in `ScKinematics.cpp`, the guide Rigid Body Dynamics > Kinematic Actors,
   https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyDynamics.html), Jolt 5.3 (`Body::MoveKinematic`,
@@ -311,7 +316,8 @@ Feather is written from the publications, the documentation and the source code 
 - [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the reference of the bench, the friction center and its
   lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere)
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
-  the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks)
+  the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks), the cast of a fast body
+  against every body and the relative cast of two fast bodies
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
   the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
   the conservative advancement of the time of impact

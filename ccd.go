@@ -5,16 +5,24 @@ import (
 	"sync"
 
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/constraint"
 	"github.com/akmonengine/feather/gjk"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
 // ========== CONTINUOUS COLLISION ==========
 // The speculative contacts stop most of the fast bodies. They can miss a body accelerated by the solver during the step:
-// as in Box2D v3, after the solver, a fast body is moved back to its first impact with a static body (or with any body
-// for a bullet), found along its motion. Its velocity is kept: the contact of the next step stops it. A body is only
-// stopped by the bodies it collides with (World.ShouldCollide, as the continuous collision of Box2D skips the filtered
-// shapes and bodies).
+// after the solver, a fast body is moved back to its first impact with any body, found along its motion (the time of
+// impact of Box2D v3, against every body as the LinearCast motion quality of Jolt). Its velocity is kept: the contact of
+// the next step stops it. A body is only stopped by the bodies it collides with (World.ShouldCollide, as the continuous
+// collision of Box2D skips the filtered shapes and bodies).
+//
+// A static or a kinematic body, and a dynamic body which is not fast, are where the step left them: the fast body is
+// swept against their final pose (Box2D, Jolt: "Body has already moved"). Two fast bodies are swept once, by their
+// relative motion against the start pose of the other (Jolt: the cast of a body against a body which casts too takes
+// "the relative movement of these two bodies", PhysicsSystem.cpp:1884), and both are stopped at the fraction found
+// (Jolt: "the other body will shorten its distance traveled", :2054-2060). The fractions are all found before a body
+// moves: the result doesn't depend on the order of the bodies.
 
 const (
 	// continuousSafetyFactor: a body is fast when it moves more than half of its smallest extent during a step (Box2D)
@@ -54,6 +62,16 @@ func (s *sweep) at(t float64) actor.Transform {
 	}
 }
 
+// fastBody: a body which moved more than half of its smallest extent during the step, to be stopped at its first impact
+type fastBody struct {
+	// index of its state in the solver
+	state  int32
+	motion sweep
+	// the distance of the farthest point of the body from its center (m), and the fraction of its motion kept (1: all)
+	radius   float64
+	fraction float64
+}
+
 // ccdScratch: the buffers of the continuous collision, reused to avoid the allocations
 type ccdScratch struct {
 	stack      []int32
@@ -61,58 +79,163 @@ type ccdScratch struct {
 	cells      []int32
 	shape      triangleShape
 	core       actor.Sphere
+	// fast: the fast bodies of the step, in the order of the states; fastOf[state] is the index of a state in fast, -1
+	// if the body is not fast
+	fast   []fastBody
+	fastOf []int32
+	// the bodies in contact with each fast body this step: partners[offsets[k]:offsets[k+1]] for the fast body k;
+	// touched[body] is k+1 while the fast body k is swept
+	offsets  []int32
+	partners []int32
+	touched  []int32
 }
 
 var ccdPool = sync.Pool{New: func() any { return &ccdScratch{} }}
 
-// continuous collision of the fast bodies: first the bodies against the static bodies, then the bullets against all
-// the bodies (at their final position). The result doesn't depend on the order of the bodies
-func (w *World) continuous(s *solver, dt float64) {
+// continuous collision of the fast bodies: their fractions are all found first, against the bodies where the step left
+// them (the start pose of another fast body), then the bodies are moved. The result doesn't depend on the order of the
+// bodies. The manifolds are the contacts of the step
+func (w *World) continuous(s *solver, manifolds []constraint.Manifold, dt float64) {
 	scratch := ccdPool.Get().(*ccdScratch)
 	defer ccdPool.Put(scratch)
-	for _, bullets := range [2]bool{false, true} {
-		for i := range s.states {
-			state := &s.states[i]
-			body := state.body
-			// a kinematic body is never stopped ("Kinematic bodies cannot be stopped", Jolt PhysicsSystem.cpp:1564)
-			if !state.dynamic || body.IsBullet != bullets || body.IsTrigger {
-				continue
+	scratch.fast = scratch.fast[:0]
+	if cap(scratch.fastOf) < len(s.states) {
+		scratch.fastOf = make([]int32, len(s.states))
+	}
+	scratch.fastOf = scratch.fastOf[:len(s.states)]
+	for i := range s.states {
+		scratch.fastOf[i] = -1
+		state := &s.states[i]
+		body := state.body
+		// a kinematic body is never stopped ("Kinematic bodies cannot be stopped", Jolt PhysicsSystem.cpp:1564)
+		if !state.dynamic || body.IsTrigger {
+			continue
+		}
+		minExtent, maxExtent := shapeExtents(body.Shape)
+		motion := sweep{
+			start: actor.Transform{Position: body.Transform.Position.Sub(state.deltaPosition), Rotation: s.starts[i].rotation},
+			end:   body.Transform,
+		}
+		motion.angle = rotationAngle(state.deltaRotation)
+		// the farthest point of the body moves at most by the translation + the rotation * its extent
+		if state.deltaPosition.Len()+motion.angle*maxExtent <= continuousSafetyFactor*minExtent {
+			continue
+		}
+		scratch.fastOf[i] = int32(len(scratch.fast))
+		scratch.fast = append(scratch.fast, fastBody{state: int32(i), motion: motion, radius: maxExtent, fraction: 1})
+	}
+	if len(scratch.fast) == 0 {
+		return
+	}
+	w.contactPartners(s, manifolds, scratch)
+	for k := range scratch.fast {
+		fast := &scratch.fast[k]
+		scratch.core.Radius = coreFraction * shapeMinExtent(s.states[fast.state].body.Shape)
+		w.findImpact(s, k, scratch)
+	}
+	for k := range scratch.fast {
+		fast := &scratch.fast[k]
+		if fast.fraction < 1 {
+			body := s.states[fast.state].body
+			body.Transform = fast.motion.at(fast.fraction)
+			if body.AngularLock == actor.AllAxes {
+				// it didn't turn: the interpolation of 2 equal rotations is not the rotation bit for bit
+				body.Transform.Rotation = fast.motion.end.Rotation
 			}
-			minExtent, maxExtent := shapeExtents(body.Shape)
-			motion := sweep{
-				start: actor.Transform{Position: body.Transform.Position.Sub(state.deltaPosition), Rotation: s.starts[i].rotation},
-				end:   body.Transform,
-			}
-			motion.angle = rotationAngle(state.deltaRotation)
-			// the farthest point of the body moves at most by the translation + the rotation * its extent
-			if state.deltaPosition.Len()+motion.angle*maxExtent <= continuousSafetyFactor*minExtent {
-				continue
-			}
-			scratch.core.Radius = coreFraction * minExtent
-			w.stopAtImpact(body, &motion, maxExtent, scratch)
+			body.UpdateAABB()
 		}
 	}
 }
 
-// stopAtImpact moves the body back to its first impact during its motion
-func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float64, scratch *ccdScratch) {
-	// the bodies around the motion
-	swept := body.Shape.ComputeAABB(motion.start)
-	end := body.Shape.ComputeAABB(motion.end)
-	for k := 0; k < 3; k++ {
-		swept.Min[k] = math.Min(swept.Min[k], end.Min[k])
-		swept.Max[k] = math.Max(swept.Max[k], end.Max[k])
+// contactPartners lists, for each fast body, the bodies it has a contact with this step (the manifolds of the pair, found
+// by the narrow phase up to the speculative margin)
+func (w *World) contactPartners(s *solver, manifolds []constraint.Manifold, scratch *ccdScratch) {
+	if cap(scratch.offsets) < len(scratch.fast)+1 {
+		scratch.offsets = make([]int32, len(scratch.fast)+1)
 	}
-	scratch.stack, scratch.candidates = w.tree.queryCandidates(swept, scratch.stack, scratch.candidates[:0])
+	scratch.offsets = scratch.offsets[:len(scratch.fast)+1]
+	clear(scratch.offsets)
+	fastOfBody := func(index int32) int32 {
+		if state := s.stateIndex[index]; state >= 0 {
+			return scratch.fastOf[state]
+		}
+		return -1
+	}
+	// the count of partners of each fast body, then the offsets
+	for i := range manifolds {
+		m := &manifolds[i]
+		if k := fastOfBody(m.IndexA); k >= 0 {
+			scratch.offsets[k+1]++
+		}
+		if k := fastOfBody(m.IndexB); k >= 0 {
+			scratch.offsets[k+1]++
+		}
+	}
+	for k := 1; k < len(scratch.offsets); k++ {
+		scratch.offsets[k] += scratch.offsets[k-1]
+	}
+	total := int(scratch.offsets[len(scratch.offsets)-1])
+	if cap(scratch.partners) < total {
+		scratch.partners = make([]int32, total)
+	}
+	scratch.partners = scratch.partners[:total]
+	if cap(scratch.touched) < len(w.Bodies) {
+		scratch.touched = make([]int32, len(w.Bodies))
+	}
+	scratch.touched = scratch.touched[:len(w.Bodies)]
+	clear(scratch.touched)
+	// the partners, each fast body filling its range from its offset
+	for i := range manifolds {
+		m := &manifolds[i]
+		if k := fastOfBody(m.IndexA); k >= 0 {
+			scratch.partners[scratch.offsets[k]] = m.IndexB
+			scratch.offsets[k]++
+		}
+		if k := fastOfBody(m.IndexB); k >= 0 {
+			scratch.partners[scratch.offsets[k]] = m.IndexA
+			scratch.offsets[k]++
+		}
+	}
+	// the offsets are back to the start of each range
+	for k := len(scratch.offsets) - 1; k > 0; k-- {
+		scratch.offsets[k] = scratch.offsets[k-1]
+	}
+	scratch.offsets[0] = 0
+}
 
-	fraction := 1.0
+// findImpact finds the first impact of the fast body k during its motion, with every body it collides with, and
+// shortens its fraction (and the one of another fast body it meets). A dynamic or a kinematic body the fast body has
+// a contact with this step is left to the solver: the contact already holds them apart, and the sweep would undo the
+// overlap the soft contact allows
+func (w *World) findImpact(s *solver, k int, scratch *ccdScratch) {
+	fast := &scratch.fast[k]
+	body := s.states[fast.state].body
+	motion := &fast.motion
+	// the bodies around the motion
+	swept := sweptAABB(body.Shape, motion)
+	scratch.stack, scratch.candidates = w.tree.queryCandidates(swept, scratch.stack, scratch.candidates[:0])
+	for _, partner := range scratch.partners[scratch.offsets[k]:scratch.offsets[k+1]] {
+		scratch.touched[partner] = int32(k + 1)
+	}
+
 	for _, index := range scratch.candidates {
 		other := w.Bodies[index]
 		if other == body || other.IsTrigger || !w.ShouldCollide(body, other) {
 			continue
 		}
-		// the bullets against all the bodies, the other bodies against the static bodies only
-		if other.BodyType != actor.BodyTypeStatic && (!body.IsBullet || other.IsBullet) {
+		if other.BodyType != actor.BodyTypeStatic && scratch.touched[index] == int32(k+1) {
+			continue
+		}
+		otherFast := -1
+		if state := s.stateIndex[index]; state >= 0 {
+			otherFast = int(scratch.fastOf[state])
+		}
+		if otherFast >= 0 {
+			// 2 fast bodies are swept once, by the one with the smallest index
+			if otherFast < k {
+				continue
+			}
+			w.fastPairImpact(s, k, otherFast, scratch)
 			continue
 		}
 		if !swept.Overlaps(other.AABB()) {
@@ -120,23 +243,49 @@ func (w *World) stopAtImpact(body *actor.RigidBody, motion *sweep, radius float6
 		}
 		switch shape := other.Shape.(type) {
 		case *actor.Plane:
-			fraction = math.Min(fraction, impact(body.Shape, motion, radius, nil, shape, fraction, scratch))
+			fast.fraction = math.Min(fast.fraction, impact(body.Shape, motion, fast.radius, nil, shape, fast.fraction, scratch))
 		case *actor.Heightfield:
-			fraction = math.Min(fraction, w.heightfieldImpact(body.Shape, motion, radius, other, shape, swept, fraction, scratch))
+			fast.fraction = math.Min(fast.fraction, w.heightfieldImpact(body.Shape, motion, fast.radius, other, shape, swept, fast.fraction, scratch))
 		default:
 			proxy := gjk.NewProxy(other)
-			fraction = math.Min(fraction, impact(body.Shape, motion, radius, &proxy, nil, fraction, scratch))
+			fast.fraction = math.Min(fast.fraction, impact(body.Shape, motion, fast.radius, &proxy, nil, fast.fraction, scratch))
 		}
 	}
+}
 
-	if fraction < 1 {
-		body.Transform = motion.at(fraction)
-		if body.AngularLock == actor.AllAxes {
-			// it didn't turn: the interpolation of 2 equal rotations is not the rotation bit for bit
-			body.Transform.Rotation = motion.end.Rotation
-		}
+// fastPairImpact: the first impact of 2 fast bodies, found by sweeping the body k with their relative motion against
+// the start pose of the body j, as Jolt (PhysicsSystem.cpp:1884). The fraction is given to both, so that both are
+// stopped where they meet (Jolt, :2054-2060)
+func (w *World) fastPairImpact(s *solver, k, j int, scratch *ccdScratch) {
+	fast, other := &scratch.fast[k], &scratch.fast[j]
+	bodyA, bodyB := s.states[fast.state].body, s.states[other.state].body
+	relative := sweep{
+		start: fast.motion.start,
+		end: actor.Transform{
+			Position: fast.motion.end.Position.Sub(other.motion.end.Position.Sub(other.motion.start.Position)),
+			Rotation: fast.motion.end.Rotation,
+		},
+		angle: fast.motion.angle,
 	}
-	body.UpdateAABB()
+	if !sweptAABB(bodyA.Shape, &relative).Overlaps(bodyB.Shape.ComputeAABB(other.motion.start)) {
+		return
+	}
+	proxy := gjk.NewProxyAt(other.motion.start, bodyB.Shape)
+	maxFraction := math.Max(fast.fraction, other.fraction)
+	fraction := impact(bodyA.Shape, &relative, fast.radius, &proxy, nil, maxFraction, scratch)
+	fast.fraction = math.Min(fast.fraction, fraction)
+	other.fraction = math.Min(other.fraction, fraction)
+}
+
+// sweptAABB: the AABB of the shape at the start and at the end of the motion
+func sweptAABB(shape actor.ShapeInterface, motion *sweep) actor.AABB {
+	swept := shape.ComputeAABB(motion.start)
+	end := shape.ComputeAABB(motion.end)
+	for k := 0; k < 3; k++ {
+		swept.Min[k] = math.Min(swept.Min[k], end.Min[k])
+		swept.Max[k] = math.Max(swept.Max[k], end.Max[k])
+	}
+	return swept
 }
 
 // impact: the fraction of the motion at the first impact with the convex shape or the plane, 1 if there is none.
@@ -212,6 +361,18 @@ func (w *World) heightfieldImpact(shape actor.ShapeInterface, motion *sweep, rad
 	return fraction
 }
 
+// isFast: the body can move more than half of its smallest extent during the step, from its velocities at the start
+// of the step (the fast body of Box2D v3: maxVelocity * timeStep > 0.5 * minExtent, with the velocity of the farthest
+// point of the body, src/solver.c:584 & :622). The narrow phase gives the pairs of a fast body the speculative margin
+// of its speed; the continuous collision judges the motion the step made
+func isFast(body *actor.RigidBody, dt float64) bool {
+	if body.BodyType != actor.BodyTypeDynamic || body.IsSleeping {
+		return false
+	}
+	minExtent, maxExtent := shapeExtents(body.Shape)
+	return (body.Velocity.Len()+body.AngularVelocity.Len()*maxExtent)*dt > continuousSafetyFactor*minExtent
+}
+
 // shapeExtents: the smallest half size of the shape, and the distance of its farthest point from its center
 func shapeExtents(shape actor.ShapeInterface) (float64, float64) {
 	switch shape := shape.(type) {
@@ -226,6 +387,12 @@ func shapeExtents(shape actor.ShapeInterface) (float64, float64) {
 	aabb := shape.ComputeAABB(actor.NewTransform())
 	size := aabb.Max.Sub(aabb.Min).Mul(0.5)
 	return math.Min(size.X(), math.Min(size.Y(), size.Z())), size.Len()
+}
+
+// shapeMinExtent: the smallest half size of the shape
+func shapeMinExtent(shape actor.ShapeInterface) float64 {
+	minExtent, _ := shapeExtents(shape)
+	return minExtent
 }
 
 // rotationAngle of a unit quaternion (rad)

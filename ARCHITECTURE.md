@@ -62,7 +62,8 @@ points were computed, the previous contact points are moved with the bodies, the
 The contacts of a pair are kept by its pair in the broad phase: no lookup.
 
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative speed of the bodies * dt against a
-static or a kinematic body.
+static or a kinematic body, and for the pairs of a fast body (a body which can move more than half of its smallest
+extent during the step, `isFast`).
 Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
 (the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
 
@@ -83,7 +84,7 @@ in the records of the broad phase (its stored AABBs still overlap) and is emitte
 |-------|----------------------|
 | broad phase | a filtered pair is not emitted: no narrow phase, no manifold, no contact |
 | triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event |
-| continuous collision | `stopAtImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
+| continuous collision | `findImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
 | sleep | a filtered pair has no contact: it wakes nobody up and links no island. `RemoveBody` and `UpdateHeightfield` only wake the sleeping bodies which collide with the body |
 | queries | `QueryFilter{Mask, Excluded}.Accepts(body)`: the layer of the body is in the mask of the query, and the body is not excluded. The mask of the body is not read |
 
@@ -131,7 +132,7 @@ one of this motion. Where it appears:
 | solver | a `bodyState` without mass (`dynamic` false): the rows read its velocity and its motion, never write it; colored as a static body |
 | sub-steps | `solver.moveKinematic`: position interpolated linearly, rotation along the shortest arc; the last sub-step is the target, bit for bit |
 | islands & sleep | in the island of the bodies it touches; resting when its velocity is exactly 0 (no target, or a target at its pose) |
-| continuous collision | never stopped; a bullet is stopped by it, a fast body which is not a bullet is not (as Box2D) |
+| continuous collision | never stopped; a fast dynamic body meeting it is held by their speculative contact, and stopped by the time of impact when they had none |
 | events, queries | the collision and trigger events with the dynamic bodies; seen by the queries like any body |
 | `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
 | `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
@@ -249,9 +250,7 @@ restitution, continuous collision, islands), without allocation.
   with 8 substeps: up to +21 % of energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
 - A kinematic body is moved by a target per step: a velocity written on it is overwritten by the step (Box2D and Jolt
   move theirs by their velocity). A kinematic body pushing a dynamic body against a static body squeezes it, as in every
-  engine (PhysX documents it). A fast dynamic body which is not a bullet is not stopped by a kinematic body by the
-  continuous collision (as Box2D: its speculative contact, from their relative speed, holds it). The planes and the
-  heightfields stay static.
+  engine (PhysX documents it). The planes and the heightfields stay static.
 - The queries test every plane and every heightfield of the world: they are in no tree. A terrain cut in dozens of
   heightfields would need one.
 - `SyncQueries` costs a test per body, even for a static body which never moves: Feather doesn't know what the game
@@ -260,7 +259,18 @@ restitution, continuous collision, islands), without allocation.
   the pile is asleep.
 - A sweep doesn't turn the shape, gives its first hit only, and no depth when the shape starts in a body. The back
   side of a heightfield is never hit.
-- A fast body which is not a bullet goes through a dynamic body with all its axes locked: the continuous collision of
-  the other bodies only looks at the static ones.
-- The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
-  not the other pairs: 2 fast dynamic bodies rely on their speculative contacts (2 cm) and on the spring of the contact.
+- The continuous collision leaves to the solver the dynamic and kinematic bodies the fast body has a contact with:
+  along the normal of the contact the speculative row holds them, but a fast body whose closest feature changes during
+  the step (a corner passed, a body which turns) can slip past its contact, as with every speculative contact. The
+  static bodies are always swept.
+- A fast body stopped by the continuous collision keeps its velocity and loses the rest of its step: it seems slower
+  for a step (the time stealing Jolt documents for its `LinearCast`), and its joints see the position it was moved to.
+  The impact of 2 fast bodies is found with the rotation of the other body ignored, and both are stopped there even if
+  one of them is stopped earlier by a third body (the other then stops short of a body which never came, as in Jolt).
+- A fast body changes the shocks: its contacts with the dynamic bodies are speculative up to its speed * dt, and stop
+  it in the substep it touches, where a slower body enters the other by up to its speed * dt and is pushed out by the
+  spring of the contact. Measured on the bench: the slab of `high mass ratio 2` (28 cm per step, fast) bounces at
+  1.97 m/s instead of 2.04 and its cubes drift by 17.8 mm instead of 16.5; a swinging chain of 20 capsules stretches by
+  9 mm instead of 24. Many fast bodies close to each other cost: their speculative contacts double the narrow phase of
+  a scene of 200 bodies where 42 are fast at every step (the step from 1.8 to 2.4 ms); a pile without a fast body
+  pays nothing measurable.

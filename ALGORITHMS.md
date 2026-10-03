@@ -436,9 +436,8 @@ wherever the ball is). A box which can't turn nor move along X still rubs along 
 (`TestFullyLockedBodyStaysDynamic`). It is the behaviour of Unity (`RigidbodyConstraints.FreezeAll`), of PhysX and of
 Box3D; Jolt forbids it ("No degrees of freedom are allowed. Note that this is not valid and will crash. Use a static
 body instead", `AllowedDOFs.h:12`; the assertion of `MotionProperties::SetMassProperties`, `MotionProperties.cpp:60`).
-One limit: it is not a static body for the continuous collision. A fast body which is not a bullet is only stopped by
-the static bodies (`stopAtImpact`): a ball of 5 cm at 80 m/s goes through a wall of 4 cm with all its axes locked, and
-stops on the same static wall. A wall is a static body; otherwise the fast body is a bullet (`IsBullet`).
+It is a dynamic body for the continuous collision: a fast body is stopped by it as by any body (`findImpact`), from
+their speculative contact when they had one, from the time of impact otherwise (`TestFastBodyStopsOnEveryBody`).
 
 **Setting the locks.** `RigidBody.SetLocks` clears the velocities along the new locked axes (`b3Body_SetMotionLocks`,
 `box3d/src/body.c:2379-2408`), returns at once without change (`:2362-2365`), and wakes the body up.
@@ -613,19 +612,75 @@ computed at each of the 8 sub-steps, the deepest of 60 bodies dropped alone land
 no sphere deeper than 1 mm.
 
 ## Continuous collision
-**Speculative contacts**: against a static body, the contacts are created up to `SpeculativeDistance` + the relative
-speed of the bodies * dt (the speculative CCD of PhysX, the "Continuous Speculative" mode of Unity): the solver stops the
-bodies before they touch. Between 2 dynamic bodies, only up to `SpeculativeDistance` (as Box2D v3): a fast impact is
-absorbed by the spring of the contact over a few substeps. A rigid stop in one substep throws the light body of a
-sandwich (a heavy body falling on a light one resting on the ground) and turns both bodies. Their known limits: a contact can be found by a body which will not touch it (a ghost contact), and a body
-accelerated by the solver during the step can go further than its margin.
+Sources read: Box2D v3.1.0 (`src/solver.c`, `docs/simulation.md`, `src/constants.h`), Box3D (commit `9f998c8`,
+`src/solver.c`, `include/box3d/types.h`), Jolt v5.3.0 (`Physics/PhysicsSystem.cpp`, `PhysicsSettings.h`,
+`Body/MotionQuality.h`, `Docs/Architecture.md`), PhysX 5.6.0 (`ScCCD.cpp`, `PxsCCD.cpp`, `PxRigidBody.h`,
+`PxSceneDesc.h`, the guide Advanced Collision Detection).
 
-**Time of impact** (as in Box2D v3): after the solver, a body which moved more than half of its smallest extent is moved
-back to its first impact with a static body (a plane, a terrain...) along its motion, its velocity is kept. A bullet
-(`IsBullet`) is also stopped by the dynamic bodies. The time of impact is found by conservative advancement
-(Mirtich, as in Bullet): the body moves forward by its distance to the other body (GJK) divided by the fastest approach
-of its points, until it is `LinearSlop` away. If it already touches at the start, only its core (a sphere of 1/4 of its
-smallest extent, as in Box2D) is stopped.
+**Speculative contacts**: against a static or a kinematic body, and for every pair of a fast body (below), the contacts
+are created up to `SpeculativeDistance` + the relative speed of the bodies * dt: the solver stops the bodies before they
+touch. It is the speculative CCD of PhysX, where the contact distance of a body is its linear speed * dt + its contact
+offset + its angular speed * dt * the radius of its bounds (`Sc::BodySim::updateContactDistance`, `ScCCD.cpp:64-96`),
+and the "Continuous Speculative" mode of Unity. PhysX applies it to the bodies flagged `eENABLE_SPECULATIVE_CCD`
+(`PxRigidBody.h:99-105`); Feather to the static and kinematic bodies, and to the fast bodies, without a flag. Between 2
+dynamic bodies which are not fast, only up to `SpeculativeDistance` (as Box2D v3: `B2_SPECULATIVE_DISTANCE`, 4 linear
+slops for every pair, `constants.h:38`): an impact is absorbed by the spring of the contact over a few substeps, where a
+speculative row stops the bodies rigidly in the substep they touch. Their known limits: a contact can be found by a body
+which will not touch it (a ghost contact), and a body accelerated by the solver during the step can go further than its
+margin (PhysX documents it: "if the constraint solver accelerates an actor [...] such that the actor passes entirely
+through objects during that time-step, speculative CCD can result in tunneling").
+
+**Fast body**: a body which moves more than half of its smallest extent during the step, by the speed of its farthest
+point (translation + rotation * its extent): the fast body of Box2D v3 (`maxVelocity * timeStep > 0.5f *
+sim->minExtent`, `solver.c:584` & `:622`), of Box3D with its `safetyFactor` of 0.5 by default (`types.h:316-318`,
+`solver.c:780`); Jolt casts a body which moves more than 0.75 of its inner radius (`mLinearCastThreshold`,
+`PhysicsSettings.h:53`, `PhysicsSystem.cpp:1572-1573`). Feather judges it twice: from the velocities at the start of
+the step for the margin of the narrow phase (`isFast`), from the motion the step made for the time of impact (as Box2D,
+from its velocity at the end of the step).
+
+**Time of impact**: after the solver, a fast body is moved back to its first impact along its motion, its velocity is
+kept: the contact of the next step stops it (Box2D v3, `b2SolveContinuous`; Jolt applies an impulse at the impact at
+once, `sSolveCCDContact`, `PhysicsSystem.cpp:2093`, not followed: the solver of the next step has the contact, with its
+friction and its restitution). The time of impact is found by conservative advancement (Mirtich, as in Bullet): the body
+moves forward by its distance to the other body (GJK) divided by the fastest approach of its points, until it is
+`LinearSlop` away. If it already touches at the start, only its core (a sphere of 1/4 of its smallest extent, as in
+Box2D) is stopped. The fast body is swept against every body it collides with: the static bodies (Box2D), the kinematic
+and the dynamic bodies too (the `LinearCast` motion quality of Jolt casts against every body; Box2D only for its
+bullets, "Bullets will perform CCD with all body types, but not other bullets", `simulation.md:377-378`), where they
+are at the end of the step (Jolt: "Body has already moved", `PhysicsSystem.cpp:1724`). A dynamic or a kinematic body
+the fast body has a contact with this step is left to the solver: the speculative row holds the pair where they touch,
+and a sweep of a solved pair would lift the fast body off the overlap the soft contact allows, every step. Measured:
+swept too, the links of a swinging chain of 20 capsules (`joint chain` of the bench) stretched its joints by 214 mm
+instead of 9 mm, the small cubes under the slab of `high mass ratio 2` drifted by 34 mm instead of 18. A static body
+is always swept (Box2D), its speculative contact being the one of the start of the step: a resting body touches it at
+the start and is only stopped by its core. **Two fast bodies** are swept once, by the one with the smallest state
+index, with their relative motion against the start pose of the other (Jolt: "Get relative movement of these two
+bodies", `direction = mShapeCast.mDirection - sCalculateBodyMotion(body2, ...)`, `PhysicsSystem.cpp:1884`), the
+rotation of the other during the step ignored (as the linear cast of Jolt); both are stopped at the fraction found
+(Jolt: "the other body will shorten its distance traveled", `:2054-2060`). The fractions of all the fast bodies are
+found before any body moves: the result doesn't depend on the order of the bodies (Jolt sorts its CCD bodies by
+fraction for the same reason, `:2017`). Feather has no bullet flag (`IsBullet` removed): every fast body is stopped by
+every body, as the motion quality of Jolt stops the bodies which have it; Box2D keeps `isBullet` because its continuous
+collision is against the static bodies by default.
+
+Measured (`TestFastSpheresFaceToFaceBounce`, `TestFastPlateNeverCrossesARestingPlate`,
+`TestKickedBodyIsStoppedByTheContinuousCollision`): before, 2 spheres of 10 cm went through each other from 7.5 m/s of
+relative speed (12.5 cm per step at 60 Hz: their diameter + the margin of 2 cm), 2 plates of 1 cm from 2.4 m/s (4 cm
+per step: twice their thickness + the margin). With the margin of the fast pairs, 2 spheres at 20 m/s each come within
+0.07 mm and bounce back at 10 m/s each (restitution 0.5), a plate at 30 m/s pushes the resting plate at 15 m/s without
+overlap. The margin follows the speed of the start of the step: a light plate kicked at 40 m/s by a heavy ball during
+the step goes through the plate 30 cm behind it (their pair had the margin of 2 resting bodies); the time of impact
+stops it 0.8 mm from it. Cost: nothing measurable on the falling pile of 2 000 bodies of `BenchmarkWorldStep` (no body
+of it is fast: 380 ms for 60 steps before and after, 1 worker, A/B interleaved); on the mixed scene of the determinism
+tests (200 bodies, 42 of them fast at every step, bouncing in a pile), the step goes from 1.80 to 2.43 ms: the narrow
+phase doubles (331 to 695 µs, the speculative contacts of the fast pairs), the continuous collision goes from 58 to
+89 µs, the solver takes the rest (more contacts). PhysX documents the same price for its CCD: "As the objects'
+velocities increase, the CCD overhead will increase, especially if there are a lot of high-speed objects in close
+proximity". On the bench, the fingerprints of 13 scenes change (slope pile, terrain piles, rain on terrain, joint
+chain, locked bodies, and card house, double domino, far chain, far stack, high mass ratio 2 and 3, joint grid, rush
+of Solver2D): the worst stretch of the joint chain goes from 23.7 to 9.1 mm and the small cubes of high mass ratio 2
+and 3 sink 12 mm less into the ground, while they drift by 17.8 mm instead of 16.5 and the least push of the locked
+bodies goes from -0.054 to -0.051 m, accepted; the reference was regenerated machine at rest.
 
 **GJK distance**: the distance and the closest points of 2 convex shapes. The simplex is reduced to its feature closest
 to the origin (Voronoi regions, Ericson 5.1 & 9.5).
@@ -840,8 +895,9 @@ legal to enable speculative CCD on kinematic actors" (the guide, Advanced Collis
 of the contact throws the tail. With it, the contact exists a step ahead, the speculative row brings the tail to the
 speed of the leg within the sub-step they touch, and the leg enters it by 0.25 mm (`TestFastKinematicDoesNotGoThroughARestingBody`,
 capsules and boxes). The kinematic body itself is never stopped by the continuous collision ("Kinematic bodies cannot be
-stopped", Jolt `PhysicsSystem.cpp:1564`), and only the bullets are stopped by it (Box2D `solver.c:440-446`: the fast
-bodies query the static tree, the bullets the kinematic and dynamic trees too).
+stopped", Jolt `PhysicsSystem.cpp:1564`); a fast dynamic body meeting it is held by their speculative contact, and
+stopped by the time of impact when they had none (see Continuous collision; Box2D sweeps its bullets only against the
+kinematic bodies, `solver.c:440-446`).
 
 **Sleep.** A kinematic body is in the island of the bodies it touches, as in Box2D ("dynamic and kinematic bodies that
 are enabled need a island", `body.c:313-317`) and Jolt (`IslandBuilder::LinkBodies` for every contact constraint,

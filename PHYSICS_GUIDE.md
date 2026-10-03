@@ -140,8 +140,8 @@ body.SetLocks(actor.NoAxes, actor.AxisX|actor.AxisZ)            // later: it cle
 - `SetLocks` wakes the body up: a body freed in the air falls. Writing the fields of a sleeping body doesn't.
 - A body with all its axes locked stays dynamic: it never moves, carries what rests on it, sleeps and wakes up, and
   collides with the static bodies (events). A static body costs less: prefer it for what never moves.
-- A fast body which is not a bullet goes through a body with all its axes locked: its continuous collision only looks
-  at the static bodies. A thin wall is a static body, or what is thrown at it is a bullet (`IsBullet`).
+- A fast body is stopped by a body with all its axes locked as by any body (speculative contact, then time of impact).
+  A static body still costs less for a wall which never moves.
 - A static body has no lock: `SetLocks` does nothing on it.
 - A joint which needs a locked axis can't be satisfied: its other rows are still solved (a body which only turns around
   Y, held by a fixed joint, doesn't turn), the impossible ones are left out. Nothing explodes.
@@ -196,9 +196,9 @@ world.Step(dt)
   and keeps its contacts, its joints, its layers and the pairs it ignores; `SetBodyType(bone, actor.BodyTypeKinematic)`
   stops it and gives it back to the animation. Create the bones with their density: a body without mass can't become
   dynamic (`SetBodyType` panics). A static body stays static (it panics too): it is the shape of the world.
-- **The continuous collision** never stops a kinematic body, and a fast dynamic body is not stopped by a kinematic body
-  unless it is a bullet (`IsBullet`): its speculative contact holds it. A thin moving wall is a kinematic body pushing
-  slow bodies, or stops bullets.
+- **The continuous collision** never stops a kinematic body. A fast dynamic body meeting it is held by their speculative
+  contact (from their relative speed), and stopped by the time of impact when they had none: a thin moving wall is a
+  kinematic body.
 - A plane or a heightfield stays static: a moving terrain is not supported.
 
 ### Collision filtering
@@ -403,12 +403,14 @@ With 8 substeps at 60 Hz, a stack of 10 boxes of 50 cm sinks by ~32 mm (Box2D v3
 more.
 
 ### Fast bodies
-The contacts with a static body are created before the body touches it (speculative contacts), from the distance it can
-travel during the step. Between 2 dynamic bodies, from 2 cm only: a fast body can enter another one during a step, the
-spring of the contact pushes it out.
-A fast body is also moved back to its first impact with a static body (continuous collision). Set `IsBullet` on a small
-fast body (a projectile) to stop it on the dynamic bodies too.
-A ball at 40 m/s does not go through a 4 cm wall at 60 Hz (nor at 80 m/s).
+The contacts with a static or a kinematic body are created before the body touches it (speculative contacts), from the
+distance it can travel during the step; so are the contacts of a fast body (a body which can move more than half of its
+smallest extent during the step) with every body. Between 2 slower dynamic bodies, from 2 cm only: a body can enter
+another one by what it moves in a step, the spring of the contact pushes it out.
+A fast body is also moved back to its first impact with any body it had no contact with (continuous collision):
+nothing marks a projectile, there is no bullet flag.
+A ball at 40 m/s does not go through a 4 cm wall at 60 Hz (nor at 80 m/s); 2 balls of 10 cm thrown at 20 m/s each
+bounce off each other; a plate of 1 cm at 30 m/s pushes the resting plate it meets.
 
 ### Sleep
 The bodies touching each other form an island. An island resting for 0.5 s (all its bodies under 0.05 m/s and 0.05 rad/s)
