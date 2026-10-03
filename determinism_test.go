@@ -262,7 +262,8 @@ func compareRuns(t *testing.T, steps int, scene func(workers int) (*World, func(
 }
 
 // 200 bodies (a pile bouncing on chains and on linked boxes), 1000 steps: the state after every step is the same bit for
-// bit between two runs, and with 1, 4 and 8 workers
+// bit between two runs, and with 1, 4 and 8 workers. The scene covers the sleep: some bodies fall asleep during the run
+// (and some wake up again: the fast bodies of the scene hit them)
 func TestMixedSceneIsDeterministic(t *testing.T) {
 	steps := determinismSteps
 	if raceEnabled {
@@ -274,22 +275,28 @@ func TestMixedSceneIsDeterministic(t *testing.T) {
 		if len(w.Bodies) != determinismBodies || len(w.Joints) == 0 {
 			t.Fatalf("%d bodies & %d joints, want %d bodies and joints", len(w.Bodies), len(w.Joints), determinismBodies)
 		}
+		if workers == determinismWorkers[0] {
+			asleep, moving = 0, 0
+		}
 		return w, func(step int) {
-			if step != steps-1 {
+			if workers != determinismWorkers[0] {
 				return
 			}
-			// read before the last step
-			asleep, moving = 0, 0
+			// the most bodies asleep at the start of a step, over the run
+			sleeping, awake := 0, 0
 			for _, body := range w.Bodies {
 				if body.IsSleeping {
-					asleep++
+					sleeping++
 				} else if body.BodyType == actor.BodyTypeDynamic {
-					moving++
+					awake++
 				}
+			}
+			if sleeping > asleep {
+				asleep, moving = sleeping, awake
 			}
 		}
 	})
-	t.Logf("at the end: %d bodies asleep, %d dynamic bodies awake", asleep, moving)
+	t.Logf("at most %d bodies asleep at a step, %d dynamic bodies awake then", asleep, moving)
 	if asleep == 0 {
 		t.Error("no body fell asleep: the scene doesn't cover the sleep")
 	}
