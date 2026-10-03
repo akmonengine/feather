@@ -99,18 +99,23 @@ func bruteForcePairs(bodies []*actor.RigidBody, boxes []actor.AABB) []Pair {
 			continue
 		}
 		for j, b := range bodies {
-			if isLarge(b) && needsSolving(a, b) && boxes[i].Overlaps(boxes[j]) {
+			if isLarge(b) && emitted(a, b) && boxes[i].Overlaps(boxes[j]) {
 				pairs = append(pairs, Pair{BodyA: b, BodyB: a})
 			}
 		}
 		for j := i + 1; j < len(bodies); j++ {
 			b := bodies[j]
-			if !isLarge(b) && needsSolving(a, b) && boxes[i].Overlaps(boxes[j]) {
+			if !isLarge(b) && emitted(a, b) && boxes[i].Overlaps(boxes[j]) {
 				pairs = append(pairs, Pair{BodyA: a, BodyB: b})
 			}
 		}
 	}
 	return pairs
+}
+
+// emitted: the pair of the bodies is one of the step, to solve or a trigger
+func emitted(a, b *actor.RigidBody) bool {
+	return needsSolving(a, b) || detectsTrigger(a, b)
 }
 
 func samePairs(t *testing.T, got, want []Pair, what string) {
@@ -167,6 +172,50 @@ func TestTreePairsAsBruteForce(t *testing.T) {
 		}
 		if asleep == 0 {
 			t.Errorf("workers %d: no sleeping body after 2 s, the test doesn't cover the sleeping pairs", workers)
+		}
+	}
+}
+
+// The pairs of a body with hundreds of pairs (a static zone with 400 crates in it, asleep or awake, kinematic cubes
+// moving in it, and a kinematic trigger) are those of the brute force, in the same order, with 1 and 8 workers
+func TestTreePairsOfAZoneAsBruteForce(t *testing.T) {
+	for _, workers := range []int{1, 8} {
+		w := newScene(workers)
+		addGround(w, 0.6)
+		zone := addBody(w, mgl64.Vec3{0, 1, 0}, mgl64.QuatIdent(), &actor.Box{HalfExtents: mgl64.Vec3{10, 1, 10}}, actor.BodyTypeStatic, 0, 0)
+		zone.IsTrigger = true
+		for k := 0; k < 400; k++ {
+			addBody(w, mgl64.Vec3{float64(k%20)*0.8 - 8, 0.3 + float64(k%3), float64(k/20)*0.8 - 8}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.6, 0)
+		}
+		var movers []*actor.RigidBody
+		for k := 0; k < 8; k++ {
+			movers = append(movers, kinematicBox(w, mgl64.Vec3{float64(k)*2 - 8, 2.5, 0}, cube().HalfExtents))
+		}
+		movers[0].IsTrigger = true
+		for step := 0; step < 240; step++ {
+			for _, mover := range movers {
+				moveTo(mover, translated(mover.Transform, mgl64.Vec3{0, 0, kinematicSpeed}))
+			}
+			w.Step(sceneDt)
+			if step%40 == 39 {
+				pool := w.workerPool()
+				pool.begin(workers)
+				got := w.tree.findPairs(w.Bodies, w.aabbs, pool)
+				pool.end()
+				samePairs(t, got, bruteForcePairs(w.Bodies, w.aabbs), "zone")
+				zonePairs := 0
+				for _, pair := range got {
+					if pair.BodyA == zone || pair.BodyB == zone {
+						zonePairs++
+					}
+				}
+				if zonePairs < 400 {
+					t.Fatalf("workers %d: %d pairs of the zone, the test doesn't cover a body with hundreds of pairs", workers, zonePairs)
+				}
+			}
+		}
+		if !slices.ContainsFunc(w.Bodies, func(b *actor.RigidBody) bool { return b.IsSleeping && b.BodyType == actor.BodyTypeDynamic }) {
+			t.Errorf("workers %d: no crate asleep, the test doesn't cover the pairs at rest", workers)
 		}
 	}
 }
