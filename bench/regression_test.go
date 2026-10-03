@@ -7,6 +7,9 @@ import (
 	"math/rand"
 	"slices"
 	"testing"
+
+	"github.com/akmonengine/feather/actor"
+	"github.com/go-gl/mathgl/mgl64"
 )
 
 // The draw of an ensemble: its median, its worst variant, and a tolerance of 3 standard deviations of the median,
@@ -176,5 +179,81 @@ func TestCompareDraws(t *testing.T) {
 	old.Scenes["slope pile"] = sceneResult{Quality: map[string]metric{"resting depth": {2, "mm"}}}
 	if compare(old, reference) {
 		t.Error("the reference holds one value of a measure which is now a draw: want a regression")
+	}
+}
+
+// ridgeField: a ridge along Z at x = 0 and y = 0, both slopes going down by the angle, 9x9 samples every 0.5 m
+func ridgeField(angle float64) *actor.Heightfield {
+	const samples = 9
+	heights := make([]float32, samples*samples)
+	for x := 0; x < samples; x++ {
+		for z := 0; z < samples; z++ {
+			heights[x*samples+z] = float32(-math.Abs(float64(x)-4) * 0.5 * math.Tan(angle))
+		}
+	}
+	return actor.NewHeightfield(samples, samples, heights, mgl64.Vec3{0.5, 1, 0.5})
+}
+
+// The depth of a box in a terrain counts the terrain in its faces: a ridge 10 mm in the bottom face of a box, its 8
+// corners above the slopes. Between 2 rows of samples no sample is in the box: the ridge is an edge of the triangles
+func TestUnderTerrainSeesTheTerrainInTheFacesOfABox(t *testing.T) {
+	field := ridgeField(10 * math.Pi / 180)
+	box := &actor.Box{HalfExtents: mgl64.Vec3{0.25, 0.15, 0.15}}
+	for _, c := range []struct {
+		name     string
+		position mgl64.Vec3
+		rotation mgl64.Quat
+		want     float64
+	}{
+		{"across the ridge, between 2 rows of samples", mgl64.Vec3{0, 0.14, 0.25}, mgl64.QuatIdent(), 0.010},
+		{"turned around the vertical", mgl64.Vec3{0, 0.14, 0.25}, mgl64.QuatRotate(0.5, mgl64.Vec3{0, 1, 0}), 0.010},
+		{"over a sample of the ridge", mgl64.Vec3{0, 0.147, 0.5}, mgl64.QuatIdent(), 0.003},
+		{"above the ridge", mgl64.Vec3{0, 0.151, 0.25}, mgl64.QuatIdent(), 0},
+		{"a corner under a slope, deeper than the ridge in the face", mgl64.Vec3{1, 0.15 - math.Tan(10*math.Pi/180) - 0.02, 0.25}, mgl64.QuatIdent(), 0},
+	} {
+		b := actor.NewRigidBody(actor.Transform{Position: c.position, Rotation: c.rotation}, box, actor.BodyTypeDynamic, 500)
+		got := underTerrain(field, b)
+		if c.want == 0 && c.name != "above the ridge" {
+			// the corners: their distance to the slope, as before
+			corners := 0.0
+			for k := 0; k < 8; k++ {
+				corner := box.HalfExtents
+				for axis := 0; axis < 3; axis++ {
+					if k&(1<<axis) != 0 {
+						corner[axis] = -corner[axis]
+					}
+				}
+				corners = math.Max(corners, sunk(field, b.Transform.ToWorld(corner), 0))
+			}
+			if corners < 0.02 || got < corners {
+				t.Errorf("%s: %.3f mm, the corners alone %.3f mm", c.name, got*1000, corners*1000)
+			}
+			continue
+		}
+		if math.Abs(got-c.want) > 1e-6 {
+			t.Errorf("%s: the terrain is %.4f mm in the box, want %.4f", c.name, got*1000, c.want*1000)
+		}
+	}
+}
+
+// The deepest point of a segment in a box: at an end, or where the closest face changes
+func TestSegmentInBox(t *testing.T) {
+	half := mgl64.Vec3{1, 1, 1}
+	for _, c := range []struct {
+		name       string
+		start, end mgl64.Vec3
+		want       float64
+	}{
+		{"through 2 opposite faces, along a face at 0.5", mgl64.Vec3{-2, 0.5, 0}, mgl64.Vec3{2, 0.5, 0}, 0.5},
+		{"from a corner edge to the opposite one, through the center", mgl64.Vec3{-1, 1, 0}, mgl64.Vec3{1, -1, 0}, 1},
+		{"out of the box", mgl64.Vec3{-2, 2, 0}, mgl64.Vec3{2, 2, 0}, 0},
+		{"an end in the box", mgl64.Vec3{0.2, 0.3, 0.6}, mgl64.Vec3{3, 0.3, 0.6}, 0.4},
+		{"a point", mgl64.Vec3{0.2, 0.3, 0.6}, mgl64.Vec3{0.2, 0.3, 0.6}, 0.4},
+		{"across a corner", mgl64.Vec3{0.8, 2, 0}, mgl64.Vec3{2, 0.8, 0}, 0},
+		{"cutting a corner", mgl64.Vec3{0.4, 1.2, 0}, mgl64.Vec3{1.2, 0.4, 0}, 0.2},
+	} {
+		if got := segmentInBox(c.start, c.end, half); math.Abs(got-c.want) > 1e-12 {
+			t.Errorf("%s: %.6f, want %.6f", c.name, got, c.want)
+		}
 	}
 }
