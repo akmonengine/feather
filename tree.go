@@ -1,6 +1,7 @@
 package feather
 
 import (
+	"cmp"
 	"slices"
 
 	"github.com/akmonengine/feather/actor"
@@ -12,7 +13,8 @@ import (
 // b2DynamicTree of Box2D, the btDbvt of Bullet), one per kind of body as the trees of Box2D v3: one for the static
 // bodies, updated when a body is added, removed or moved by the game, one for the dynamic and the kinematic bodies,
 // awake or asleep (Box2D v3 gives the kinematic bodies a third tree, so that a kinematic proxy never queries the static
-// tree: here its proxy knows it, Tree.query). A dynamic or kinematic body is stored with its AABB enlarged by
+// tree for its contacts: here a kinematic proxy queries it for the triggers, and its pairs with the static bodies are
+// emitted only with a trigger, Tree.scan). A dynamic or kinematic body is stored with its AABB enlarged by
 // AABBMargin: a body which moves inside its enlarged AABB doesn't touch the tree, a sleeping body never does. The
 // planes and the heightfields are not in the trees: they are tested against every awake dynamic body.
 //
@@ -324,13 +326,18 @@ const (
 	proxyDynamic proxyKind = iota
 	proxyStatic
 	proxyLarge     // planes & heightfields: tested against every awake dynamic body
-	proxyKinematic // in the tree of the dynamic bodies, but it only pairs with them: it never queries the static bodies
+	proxyKinematic // in the tree of the dynamic bodies: its pairs with the static bodies and the planes are only for the triggers
 )
 
 type proxy struct {
 	node int32
 	kind proxyKind
 	aabb actor.AABB // as stored in the tree (enlarged for a dynamic body)
+	// box: the AABB of the body at its last sync, and changed: the step it last changed at (the body moved by a step, or
+	// by the game). A trigger pair at rest keeps its overlap while the boxes of both bodies stay the same
+	// (World.overlapKept)
+	box     actor.AABB
+	changed uint32
 }
 
 // Tree is the broad phase of a World: both AABB trees and the proxy of each body, in the order of World.Bodies
@@ -340,6 +347,8 @@ type Tree struct {
 	planes   []int32 // the large bodies
 	proxies  []proxy
 	bodies   []*actor.RigidBody // the bodies the proxies were made for: a mismatch rebuilds everything
+	// step: the step of the World, the stamp of a change of the box of a proxy
+	step uint32
 
 	// filter: the pairs of bodies which never collide (nil without a World)
 	filter *pairFilter
@@ -382,6 +391,8 @@ type pairRecord struct {
 	key          fatPair
 	first, count int32
 	stamp        uint32
+	// trigger: the pair had a trigger at the step stamp, and overlap: its shapes overlapped (it has no contact)
+	trigger, overlap bool
 }
 
 func kindOf(body *actor.RigidBody) proxyKind {
@@ -462,6 +473,7 @@ func (t *Tree) rebuild(bodies []*actor.RigidBody, boxes []actor.AABB) {
 // place the body in its tree (or in the planes)
 func (t *Tree) place(i int32, body *actor.RigidBody, aabb actor.AABB) {
 	p := &t.proxies[i]
+	p.box, p.changed = aabb, t.step
 	p.kind = kindOf(body)
 	switch p.kind {
 	case proxyDynamic, proxyKinematic:
@@ -497,6 +509,9 @@ func (t *Tree) unplace(i int32) {
 
 func (t *Tree) update(i int32, body *actor.RigidBody, aabb actor.AABB) {
 	p := &t.proxies[i]
+	if p.box != aabb {
+		p.box, p.changed = aabb, t.step
+	}
 	kind := kindOf(body)
 	if kind != p.kind {
 		t.unplace(i)
@@ -614,14 +629,14 @@ func (t *Tree) queryCandidates(aabb actor.AABB, stack []int32, out []int32) ([]i
 // proxy put in a tree since the last search (a dynamic body out of its enlarged AABB, a static body moved by the
 // game, a body added) queries the trees, and a resting body costs nothing. The planes and the heightfields pair with
 // every body which moved. The pairs are dropped when their stored AABBs no longer overlap. The pairs of the step are
-// the ones whose exact AABBs overlap and which pass the collision filters (filter.go), with an awake dynamic body: the
-// same pairs as a search from scratch, in the same order. A filtered pair stays in the records (the filters can change
-// at any time) but is never emitted. Each pair keeps the contacts of its last step (pairRecord): the World finds them
-// without any lookup
+// the ones whose exact AABBs overlap and which pass the collision filters (filter.go), with an awake dynamic body, or a
+// trigger and a dynamic or kinematic body awake or asleep (detectsTrigger): the same pairs as a search from scratch, in the same
+// order. A filtered pair stays in the records (the filters can change at any time) but is never emitted. Each pair
+// keeps the contacts of its last step (pairRecord): the World finds them without any lookup
 
 // findPairs: the pairs of bodies whose AABBs overlap and which pass the collision filters, with at least an awake
-// dynamic body, sorted by the index of the first body (the planes of a body before its other pairs, in the order of the
-// planes). The slice is reused
+// dynamic body, or a trigger (detectsTrigger), sorted by the index of the first body (the planes of a body before its
+// other pairs, in the order of the planes). The slice is reused
 func (t *Tree) findPairs(bodies []*actor.RigidBody, boxes []actor.AABB, pool *workerPool) []Pair {
 	t.pairs = t.pairs[:0]
 	t.bodyList, t.boxes = bodies, boxes
@@ -688,8 +703,10 @@ const (
 )
 
 // query: the chunk c of the moved proxies finds its pairs (a pair of static bodies never needs solving, nor a static
-// body against a plane; a kinematic body only pairs with the bodies of the dynamic tree: it has no contact with the
-// static bodies, the planes and the heightfields, as the kinematic proxies of Box2D v3 only query its dynamic tree)
+// body against a plane). A kinematic body has no contact with the static bodies, the planes and the heightfields, as
+// the kinematic proxies of Box2D v3 only query its dynamic tree for their contacts, but it enters and leaves their
+// triggers, as the sensors of Box2D v3 query its 3 trees (b2SensorTask): it queries them too, its pairs without a
+// trigger are kept but never emitted (Tree.scan), as a pair filtered
 func (t *Tree) query(c int) {
 	chunk := &t.chunks[c]
 	chunk.found = chunk.found[:0]
@@ -698,7 +715,7 @@ func (t *Tree) query(c int) {
 		p := &t.proxies[i]
 		chunk.candidates = chunk.candidates[:0]
 		chunk.stack, chunk.candidates = t.dynamics.query(p.aabb, chunk.stack, chunk.candidates)
-		if p.kind == proxyDynamic {
+		if p.kind == proxyDynamic || p.kind == proxyKinematic {
 			chunk.stack, chunk.candidates = t.statics.query(p.aabb, chunk.stack, chunk.candidates)
 			chunk.candidates = append(chunk.candidates, t.planes...)
 		}
@@ -738,21 +755,25 @@ func (t *Tree) scan(c int) {
 			if !plane {
 				i, j = j, i
 			}
-			if !isAwakeDynamic(bodies[j]) || !t.filter.collides(bodies[i], bodies[j]) {
+			tested := isAwakeDynamic(bodies[j]) || detectsTrigger(bodies[i], bodies[j])
+			if !tested || !t.filter.collides(bodies[i], bodies[j]) {
 				continue
 			}
 			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: j, second: int32(slices.Index(t.planes, i)), plane: true, slot: int32(k)})
 			continue
 		}
 		// the filters last: the pairs of resting bodies, the most of them, are skipped before
-		if needsSolving(bodies[i], bodies[j]) && t.filter.collides(bodies[i], bodies[j]) {
+		if (needsSolving(bodies[i], bodies[j]) || detectsTrigger(bodies[i], bodies[j])) && t.filter.collides(bodies[i], bodies[j]) {
 			chunk.pairs = append(chunk.pairs, Pair{BodyA: bodies[i], BodyB: bodies[j], IndexA: i, IndexB: j, first: i, second: j, slot: int32(k)})
 		}
 	}
 }
 
 // sortPairs by the index of the first body: a counting sort (O(pairs + bodies), the pairs are many and the keys are
-// small), then the few pairs of a body by their second key. Returns the sorted slice (the buffers are swapped)
+// small), then the pairs of each body by their second key with the sort of the standard library (pdqsort, an insertion
+// sort under 12 elements: a body with a few pairs costs as before, a zone or a ground with hundreds of pairs no longer
+// costs their square). The keys of a body are unique, the order doesn't depend on the sort. Returns the sorted slice
+// (the buffers are swapped)
 func (t *Tree) sortPairs(pairs []Pair, bodiesCount int) []Pair {
 	if cap(t.counts) < bodiesCount+1 {
 		t.counts = make([]int32, bodiesCount+1)
@@ -776,16 +797,14 @@ func (t *Tree) sortPairs(pairs []Pair, bodiesCount int) []Pair {
 		sorted[counts[k]] = pairs[i]
 		counts[k]++
 	}
-	// within a body: its planes first (in their order), then its other pairs by index: an insertion sort of a few pairs
+	// within a body: its planes first (in their order), then its other pairs by index
 	start := 0
 	for end := 1; end <= len(sorted); end++ {
 		if end < len(sorted) && sorted[end].first == sorted[start].first {
 			continue
 		}
-		for i := start + 1; i < end; i++ {
-			for j := i; j > start && pairBefore(sorted[j], sorted[j-1]); j-- {
-				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-			}
+		if end-start > 1 {
+			slices.SortFunc(sorted[start:end], comparePairs)
 		}
 		start = end
 	}
@@ -793,18 +812,36 @@ func (t *Tree) sortPairs(pairs []Pair, bodiesCount int) []Pair {
 	return sorted
 }
 
-// pairBefore: the order of the pairs of a body
-func pairBefore(a, b Pair) bool {
+// comparePairs: the order of the pairs of a body, its planes first
+func comparePairs(a, b Pair) int {
 	if a.plane != b.plane {
-		return a.plane
+		if a.plane {
+			return -1
+		}
+		return 1
 	}
-	return a.second < b.second
+	return cmp.Compare(a.second, b.second)
 }
 
 // needsSolving: a dynamic body, and an awake body which moves (dynamic or kinematic): a pair of a kinematic body with a
 // static or a kinematic body has no contact, a sleeping dynamic body is woken up by the kinematic body which reaches it
 func needsSolving(a, b *actor.RigidBody) bool {
 	return (isAwakeMover(a) || isAwakeMover(b)) && (a.BodyType == actor.BodyTypeDynamic || b.BodyType == actor.BodyTypeDynamic)
+}
+
+// detectsTrigger: a pair of a trigger and a body which moves (dynamic or kinematic), the trigger or the other one, is
+// tested whatever the sleep, as the sensors of Box2D v3 ("Sensors do not consider sleep", docs/simulation.md;
+// b2SensorTask queries every sensor against its 3 trees at each step): the pair ends when the shapes no longer
+// overlap, never because a body falls asleep, and a static trigger the game moves away from a sleeping body, or over
+// it, ends or starts the pair. While both bodies rest, the pair keeps its overlap without any test (World.overlapKept):
+// it costs its place in the pairs of the step. A kinematic body enters a static trigger, and a kinematic trigger
+// detects the static and the kinematic bodies, as in Box2D v3 and in Unity ("A dynamic or kinematic trigger collider
+// collides with any collider type. A static trigger collider collides with any dynamic or Kinematic collider"); Jolt
+// does it for a static sensor ("These sensors will only detect collisions with active Dynamic or Kinematic bodies",
+// Body.h), for a kinematic sensor against the static bodies only on demand (SetCollideKinematicVsNonDynamic). 2 static
+// bodies never pair
+func detectsTrigger(a, b *actor.RigidBody) bool {
+	return (a.IsTrigger || b.IsTrigger) && (a.BodyType != actor.BodyTypeStatic || b.BodyType != actor.BodyTypeStatic)
 }
 
 func isAwakeDynamic(body *actor.RigidBody) bool {

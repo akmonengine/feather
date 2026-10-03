@@ -8,6 +8,7 @@ import (
 
 	"github.com/akmonengine/feather/actor"
 	"github.com/akmonengine/feather/constraint"
+	"github.com/akmonengine/feather/gjk"
 	"github.com/go-gl/mathgl/mgl64"
 )
 
@@ -250,6 +251,7 @@ func (w *World) Step(dt float64) {
 	w.previous = w.contacts
 	w.buffer = 1 - w.buffer
 	w.step++
+	w.tree.step = w.step
 	manifolds := w.detectCollision(dt, pool)
 	if w.wakeTouched(manifolds) {
 		// the woken bodies get their contacts in this step (as in Jolt)
@@ -415,47 +417,88 @@ func (w *World) computeAABB(i int) {
 	w.aabbs[i] = aabb
 }
 
-// collide the pair i. The triggers only need the real overlaps, the other pairs get speculative contacts
+// collide the pair i. A pair with a trigger only needs to know if the shapes overlap, the other pairs get speculative
+// contacts
 func (w *World) collide(i int) {
 	pair := w.pairs[i]
 	out := w.manifolds[w.offsets[i]:w.offsets[i+1]]
-	margin := 0.0
-	if !pair.BodyA.IsTrigger && !pair.BodyB.IsTrigger {
-		// against a static or a kinematic body, the contact exists before the body touches it, from their relative speed
-		// (the speculative CCD of PhysX, legal on its kinematic actors): it doesn't sink into the ground, a leg at 5 m/s
-		// doesn't enter the tail it meets. The pairs of a fast dynamic body (isFast) get the same margin: 2 fast spheres
-		// don't go through each other. Between 2 dynamic bodies which are not fast, only within SpeculativeDistance (as in
-		// Box2D v3): an impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one
-		// substep would throw the lighter body and turn both
-		margin = SpeculativeDistance
-		if pair.BodyA.BodyType != actor.BodyTypeDynamic || pair.BodyB.BodyType != actor.BodyTypeDynamic ||
-			w.fast[pair.IndexA] || w.fast[pair.IndexB] {
-			margin += relativeSpeed(pair.BodyA, pair.BodyB) * w.dt
-		}
-
-		// pair cache: the contacts of the previous step, if the bodies barely moved relative to each other
-		previous := w.previousContacts(pair)
-		if len(previous) > 0 && !w.isChanged(pair) {
-			count := 0
-			for k := range previous {
-				if count < len(out) && reuseManifold(&previous[k], margin, &out[count]) {
-					count++
-				}
-			}
-			if count > 0 {
-				w.counts[i] = count
-				indexManifolds(out[:count], pair)
-				warmStartPair(out[:count], previous)
-				return
-			}
-		}
-		w.counts[i] = collidePair(pair, margin, out)
-		indexManifolds(out[:w.counts[i]], pair)
-		warmStartPair(out[:w.counts[i]], previous)
+	if pair.BodyA.IsTrigger || pair.BodyB.IsTrigger {
+		w.counts[i] = w.overlapTrigger(pair, out)
 		return
+	}
+	// against a static or a kinematic body, the contact exists before the body touches it, from their relative speed
+	// (the speculative CCD of PhysX, legal on its kinematic actors): it doesn't sink into the ground, a leg at 5 m/s
+	// doesn't enter the tail it meets. The pairs of a fast dynamic body (isFast) get the same margin: 2 fast spheres
+	// don't go through each other. Between 2 dynamic bodies which are not fast, only within SpeculativeDistance (as in
+	// Box2D v3): an impact is then absorbed by the spring of the contact over a few substeps, a rigid stop in one
+	// substep would throw the lighter body and turn both
+	margin := SpeculativeDistance
+	if pair.BodyA.BodyType != actor.BodyTypeDynamic || pair.BodyB.BodyType != actor.BodyTypeDynamic ||
+		w.fast[pair.IndexA] || w.fast[pair.IndexB] {
+		margin += relativeSpeed(pair.BodyA, pair.BodyB) * w.dt
+	}
+
+	// pair cache: the contacts of the previous step, if the bodies barely moved relative to each other
+	previous := w.previousContacts(pair)
+	if len(previous) > 0 && !w.isChanged(pair) {
+		count := 0
+		for k := range previous {
+			if count < len(out) && reuseManifold(&previous[k], margin, &out[count]) {
+				count++
+			}
+		}
+		if count > 0 {
+			w.counts[i] = count
+			indexManifolds(out[:count], pair)
+			warmStartPair(out[:count], previous)
+			return
+		}
 	}
 	w.counts[i] = collidePair(pair, margin, out)
 	indexManifolds(out[:w.counts[i]], pair)
+	warmStartPair(out[:w.counts[i]], previous)
+}
+
+// overlapTrigger: a pair with a trigger has no contact, only an overlap: one manifold without any point if the shapes
+// overlap, none otherwise. The overlap is the one of World.Overlap, the distance between the cores of both shapes by
+// GJK, not over the sum of their radii: a body in contact with a trigger is in it. So are the sensors of Box2D v3
+// (b2SensorQueryCallback: b2ShapeDistance with the radii, an overlap under 10 * FLT_EPSILON), without contact points.
+// A plane, a heightfield or a triangle mesh keeps its real contacts: it has no core for GJK (the support point of a
+// mesh is null). A pair at rest keeps its overlap (overlapKept)
+func (w *World) overlapTrigger(pair Pair, out []constraint.Manifold) int {
+	var overlaps bool
+	switch {
+	case w.overlapKept(pair):
+		overlaps = w.tree.fat[pair.slot].overlap
+	case isLarge(pair.BodyA) || isLarge(pair.BodyB) || isSurface(pair.BodyA) || isSurface(pair.BodyB):
+		return collidePair(pair, 0, out)
+	default:
+		coreA, radiusA := gjk.NewCoreProxy(pair.BodyA)
+		coreB, radiusB := gjk.NewCoreProxy(pair.BodyB)
+		overlaps = coresOverlap(&coreA, radiusA, &coreB, radiusB)
+	}
+	if !overlaps {
+		return 0
+	}
+	out[0].Reset(pair.BodyA, pair.BodyB)
+	indexManifolds(out[:1], pair)
+	return 1
+}
+
+// overlapKept: both bodies of a trigger pair rest (static or asleep), the pair was tested or kept at the previous step
+// with a trigger (a body made a trigger by the game is tested), and the AABBs of both bodies are the same since the step it was tested at: the overlap can't have changed, it is
+// kept without any test. As the trigger pairs of PhysX, not tested while both actors sleep ("the overlap state can not
+// change if both objects are sleeping") and tested again when the pose of an actor is set (ScTriggerInteraction.cpp,
+// onActivate, PROCESS_THIS_FRAME): here a body moved by the game, whose AABB changed (UpdateAABB), as the broad phase
+// sees a static body moved by the game
+func (w *World) overlapKept(pair Pair) bool {
+	if isAwakeMover(pair.BodyA) || isAwakeMover(pair.BodyB) {
+		return false
+	}
+	record := &w.tree.fat[pair.slot]
+	proxies := w.tree.proxies
+	return record.trigger && record.stamp == w.step-1 &&
+		proxies[pair.IndexA].changed < record.stamp && proxies[pair.IndexB].changed < record.stamp
 }
 
 // previousContacts of the pair: the manifolds it had in the previous step (none if it had none, or if the bodies
@@ -468,17 +511,19 @@ func (w *World) previousContacts(pair Pair) []constraint.Manifold {
 	return w.previous[record.first : record.first+record.count]
 }
 
-// recordContacts: each pair keeps where its contacts of this step are, for the next step. The contacts with a trigger
-// are not kept (they are not in the contacts)
+// recordContacts: each pair keeps where its contacts of this step are, for the next step. A pair with a trigger has no
+// contact (it is not in the contacts): it keeps whether its shapes overlap (overlapKept)
 func (w *World) recordContacts() {
 	first := int32(0)
 	for i := range w.pairs {
 		pair := &w.pairs[i]
 		count := int32(w.counts[i])
-		if pair.BodyA.IsTrigger || pair.BodyB.IsTrigger {
+		record := &w.tree.fat[pair.slot]
+		record.trigger = pair.BodyA.IsTrigger || pair.BodyB.IsTrigger
+		record.overlap = record.trigger && count > 0
+		if record.trigger {
 			count = 0
 		}
-		record := &w.tree.fat[pair.slot]
 		record.first, record.count, record.stamp = first, count, w.step
 		first += count
 	}

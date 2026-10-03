@@ -179,8 +179,8 @@ world.Step(dt)
   kinematic body: a leg at 5 m/s doesn't enter the tail on its path. A kinematic body pushing a body against a wall
   squeezes it: the body enters the wall, as in every engine.
 - **No contact with the static and the kinematic bodies**: a kinematic body in the ground, through a wall or through
-  another kinematic body is not pushed out, and sends no event. The collision and trigger events are sent with the
-  dynamic bodies.
+  another kinematic body is not pushed out, and sends no collision event. It enters and leaves the triggers, static or
+  not, and a kinematic trigger detects every body ([Triggers](#triggers)).
 - **Sleep.** On its way, a kinematic body keeps awake the bodies it touches, however slowly it goes. Stopped (no
   target), it falls asleep with them half a second later; its next target wakes them all up.
 - **Teleport.** `world.Teleport(body, transform)` places a body without any velocity: a kinematic body brought there by
@@ -443,7 +443,27 @@ bounce off each other; a plate of 1 cm at 30 m/s pushes the resting plate it mee
 The bodies touching each other form an island. An island resting for 0.5 s (all its bodies under 0.05 m/s and 0.05 rad/s)
 falls asleep: it is not simulated anymore.
 The whole island wakes up with `AddForce`, `AddTorque` or `WakeUp` on one of its bodies, when a moving body touches it,
-or when a body under it is removed.
+or when a body under it is removed. A body asleep in a trigger stays in it ([Triggers](#triggers)).
+
+### Triggers
+A trigger (`IsTrigger`) is not solved: it detects the bodies which overlap it. `EventTriggerEnter` when a body starts to
+overlap it, `EventTriggerStay` at each step while one of them is awake, `EventTriggerExit` when they no longer overlap, or
+when one of them is removed (`RemoveBody`: the exit is sent with the events of the next step).
+- A body asleep in a trigger stays in it: no exit, and no stay while both rest. Counting the enters and the exits gives
+  the bodies in a zone.
+- A body in contact with a trigger is in it (as `World.Overlap`).
+- The game moves a static trigger, or a sleeping body: set its `Transform` and call `UpdateAABB` (or `Teleport`). The
+  overlap is tested again when the AABB of one of the bodies changed.
+- A kinematic body enters and leaves a static trigger, and a kinematic trigger detects the static and the kinematic
+  bodies: a door zone sees the platform which carries the player. 2 static bodies never pair.
+- Each awake body in a trigger costs a test per step; a body asleep in a trigger costs its place in the pairs of the
+  step, without test while nothing moves.
+
+### Collision events
+`EventCollisionEnter` when 2 bodies start to touch, `EventCollisionStay` at each step while one of them is awake,
+`EventCollisionExit` when they stop touching, or when one of them is removed (`RemoveBody`: the exit is sent with the
+events of the next step). A body asleep on the ground, or on another body, still touches it: no exit, and no stay
+while both rest. A body made a trigger ends its contacts and starts its trigger pairs.
 
 ### Determinism & threads
 The same scene gives the same result, bit for bit, whatever the number of `Workers`.

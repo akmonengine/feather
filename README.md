@@ -155,13 +155,43 @@ err = world.SetBodyType(bone, actor.BodyTypeKinematic) // and follows its target
 - Infinite mass for the solver: no force, no gravity, no impulse, no contact moves it. A dynamic body it meets takes its
   velocity, friction included (a stack rides a platform, a leg pushes a tail). The contact exists before they touch,
   from the speed of the kinematic body: a leg at 5 m/s doesn't enter the resting body on its path.
-- No contact between a kinematic body and a static or a kinematic body: no narrow phase, no event. The collision and
-  trigger events are sent with the dynamic bodies.
+- No contact between a kinematic body and a static or a kinematic body: no narrow phase, no collision event. A
+  kinematic body enters and leaves the triggers, static or not, and a kinematic trigger detects every body
+  ([Triggers](#triggers)).
 - On its way, a kinematic body keeps awake the bodies it touches; stopped, it sleeps with them; its next target wakes
   them all up.
 - The planes and the heightfields stay static.
 
 See the [physics guide](PHYSICS_GUIDE.md#kinematic-bodies) and the [algorithms](ALGORITHMS.md#kinematic-bodies).
+
+## Triggers
+A trigger (`IsTrigger`) is not solved: it reports the bodies which overlap it, with the events of the world. A pair of
+a trigger and a body enters once, stays, and exits once: when the shapes no longer overlap, when one of the bodies
+leaves the world, never because one of them falls asleep. Counting the enters and the exits tells who is in a zone.
+
+```go
+zone := actor.NewRigidBody(transform, &actor.Box{HalfExtents: mgl64.Vec3{2, 1, 2}}, actor.BodyTypeStatic, 0)
+zone.IsTrigger = true
+world.AddBody(zone)
+
+occupants := 0
+world.Events.Subscribe(feather.EventTriggerEnter, func(feather.Event) { occupants++ })
+world.Events.Subscribe(feather.EventTriggerExit, func(feather.Event) { occupants-- })
+```
+- A body in contact with a trigger is in it: the overlap is the one of `World.Overlap`.
+- A body asleep in a trigger stays in it, without stay events while both rest (the overlap can't change). Its pair is
+  kept in the broad phase whatever the sleep, as the sensors of Box2D v3, and is tested again when the game moves one of
+  the bodies (its AABB changes), as the trigger pairs of PhysX.
+- `RemoveBody` on a body in a trigger, or on the trigger, ends their pairs: the exits are sent with the events of the
+  next step (or in the events running, if a listener removed the body).
+- A kinematic body enters and leaves a static trigger, and a kinematic trigger detects the static and the kinematic
+  bodies (as Box2D v3 and Unity), without any contact. 2 static bodies never pair.
+- A trigger is filtered like any body ([Collision filtering](#collision-filtering)).
+- The collision events follow the same rules: a contact ends when the bodies stop touching or one of them is removed
+  (`EventCollisionExit` at the next events), never because a body falls asleep, on the ground or on another body, and
+  sends no stay while both rest.
+
+See the [physics guide](PHYSICS_GUIDE.md#triggers) and the [algorithms](ALGORITHMS.md#triggers).
 
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
@@ -303,6 +333,14 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/FHitResult)
 - John Amanatides & Andrew Woo, A Fast Voxel Traversal Algorithm for Ray Tracing (Eurographics 1987): the walk of a
   grid by a ray
+- Triggers, contacts & sleep: Box2D v3.1.1 (`src/sensor.c`: `b2SensorTask`, `b2SensorQueryCallback`;
+  `b2SensorEndTouchEvent`; docs/simulation.md, "Sensors do not consider sleep"; `src/solver_set.c`:
+  `b2TrySleepIsland`; `src/contact.c`: `b2DestroyContact`, `b2ContactEndTouchEvent`), PhysX (`ScTriggerInteraction.cpp`:
+  `onActivate`, `onDeactivate`, `PROCESS_THIS_FRAME`; `PxTriggerPair`, `eNOTIFY_TOUCH_LOST`), Jolt 5.6
+  (`Body::SetIsSensor`, `Body::SetCollideKinematicVsNonDynamic`, `Body::UpdateSleepStateInternal`,
+  `ContactListener::OnContactRemoved`), Godot 4 (`Area3D.body_exited`, `GodotAreaPair3D`, `JoltArea3D`), Unity
+  (`MonoBehaviour.OnTriggerStay`, `MonoBehaviour.OnTriggerExit`, `MonoBehaviour.OnCollisionStay`; Manual, Collider types
+  interaction)
 - Axis locks: Jolt 5.3 (`EAllowedDOFs`, `MotionProperties::GetInverseInertiaForRotation`), Rapier 0.22 (the inverse
   mass by axis, `effective_inv_mass`), Box3D & Box2D (`b3MotionLocks`, `b2MotionLocks`), PhysX 5.6
   (`PxRigidDynamicLockFlag`), Unity `Rigidbody.constraints`

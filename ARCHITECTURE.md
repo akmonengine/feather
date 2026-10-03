@@ -41,7 +41,9 @@ Step(dt)
 │   ├── broad phase: pairs of overlapping AABBs (AABB trees) which pass the collision filters
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
-│   ├── events: pairs touching or overlapping (triggers are not solved)
+│   ├── events: pairs touching or overlapping (triggers are not solved: a pair with a trigger is tested whatever the
+│   │   sleep, its overlap kept while both bodies rest and their AABBs don't change; a contact whose bodies both rest is
+│   │   kept until they move apart or one is removed)
 │   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
 ├── Phase 2: solver (substeps: articulations, then contacts and joints by color; the kinematic bodies interpolated to
 │   their target), then restitution
@@ -85,7 +87,7 @@ in the records of the broad phase (its stored AABBs still overlap) and is emitte
 | Where | What the filter does |
 |-------|----------------------|
 | broad phase | a filtered pair is not emitted: no narrow phase, no manifold, no contact |
-| triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event |
+| triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event. A pair of a trigger and a dynamic or kinematic body is emitted whatever the sleep (ALGORITHMS.md#triggers) |
 | continuous collision | `findImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
 | sleep | a filtered pair has no contact: it wakes nobody up and links no island. `RemoveBody` and `UpdateHeightfield` only wake the sleeping bodies which collide with the body |
 | queries | `QueryFilter{Mask, Excluded}.Accepts(body)`: the layer of the body is in the mask of the query, and the body is not excluded. The mask of the body is not read |
@@ -129,13 +131,13 @@ one of this motion. Where it appears:
 | Where | What |
 |-------|------|
 | start of the step | `World.moveKinematics`: the velocity of the motion to the target, 0 without target |
-| broad phase | in the tree of the dynamic bodies, with a proxy of its own kind: it never queries the static tree nor the planes. A pair needs a dynamic body and an awake body which moves (`needsSolving`): no pair with a static or a kinematic body |
+| broad phase | in the tree of the dynamic bodies, with a proxy of its own kind: it queries the static tree and the planes for the triggers only. A pair needs a dynamic body and an awake body which moves (`needsSolving`), or a trigger (`detectsTrigger`): no contact with a static or a kinematic body |
 | narrow phase | the speculative margin of its pairs follows the relative speed, as against a static body |
 | solver | a `bodyState` without mass (`dynamic` false): the rows read its velocity and its motion, never write it; colored as a static body |
 | sub-steps | `solver.moveKinematic`: position interpolated linearly, rotation along the shortest arc; the last sub-step is the target, bit for bit |
 | islands & sleep | in the island of the bodies it touches; resting when its velocity is exactly 0 (no target, or a target at its pose) |
 | continuous collision | never stopped; a fast dynamic body meeting it is held by their speculative contact, and stopped by the time of impact when they had none |
-| events, queries | the collision and trigger events with the dynamic bodies; seen by the queries like any body |
+| events, queries | the collision events with the dynamic bodies, the trigger events with every trigger (a static trigger, a kinematic trigger and the static or kinematic bodies); seen by the queries like any body |
 | `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
 | `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
 

@@ -24,11 +24,17 @@ awake body.
 The pairs of bodies whose stored AABBs overlap are kept from a step to the next (the persistent pairs of Box2D v3):
 only a body put in a tree since the last step (a dynamic body out of its enlarged AABB, a static body moved by the
 game, a body added) queries the trees for its pairs, and a pair is dropped when its stored AABBs no longer overlap.
-A resting scene costs nothing, an awake one only pays for the bodies which left their enlarged AABB (2000 bodies
-settling: 1.6 ms for a traversal of the trees against each other, 0.3 ms with the pairs kept). The pairs of the step
-are those whose exact AABBs overlap, with an awake dynamic body, sorted by the index of their first body (a counting
-sort): the list is the same as a search from scratch, and the same as the former uniform grid gave, so the solver keeps
-its order and its results bit for bit.
+A resting scene costs nothing (but for the bodies asleep in a trigger, [Triggers](#triggers)), an awake one only pays
+for the bodies which left their enlarged AABB (2000 bodies settling: 1.6 ms for a traversal of the trees against each
+other, 0.3 ms with the pairs kept). The pairs of the step are those whose exact AABBs overlap, with an awake dynamic
+body, or a trigger and a dynamic or kinematic body awake or asleep ([Triggers](#triggers)), sorted by the index of
+their first body (a counting sort), then the pairs of each body by the index of the other body (the sort of the
+standard library, `slices.SortFunc`: pdqsort, an insertion sort under 12 elements; the keys of a body are unique, so
+the order doesn't depend on the sort): the list is the same as a search from scratch, and the same as the former
+uniform grid gave, so the solver keeps its order and its results bit for bit. The pairs of a body were sorted by
+insertion up to v0.4.0, quadratic for a body with hundreds of pairs (a zone or a ground box under 400 bodies: their
+pairs come from the records nearly in reverse order): 400 crates asleep in a zone cost 341 µs per step with it, 103 µs
+with `slices.SortFunc` ([Triggers](#triggers)).
 
 ## Collision filtering
 
@@ -96,6 +102,83 @@ The contacts of a pair are kept with the pair of the broad phase. If a body move
 separations measured again, instead of running GJK/EPA (the body pair cache of Jolt, with its thresholds). The
 impulses of the previous step warm start the new points: each point takes the impulses of the closest previous point
 in the local space of body A, within 2 cm (as the contact cache of Jolt; Box2D matches the points by feature id).
+
+## Triggers
+
+`tree.go` (`detectsTrigger`), `world.go` (`overlapTrigger`, `overlapKept`), `event.go`. A pair of a trigger and a body
+ends when their shapes no longer overlap, or when one of them leaves the world: never because one of them falls
+asleep. Up to v0.4.0 the pair of a static trigger and a body left the broad phase when the body fell asleep, and the
+missing pair was taken for an exit (the body entered again when it woke up); a kinematic body never entered a static
+trigger.
+
+What the references do:
+
+| Engine | A body asleep in a trigger | Removal |
+|--------|----------------------------|---------|
+| Box2D v3.1.1 | every sensor queries the trees at each step, "Sensors do not consider sleep" (`docs/simulation.md`, `b2SensorTask`): the overlap holds | `b2SensorEndTouchEvent` "if the sensor or visitor are destroyed" (`types.h`) |
+| PhysX | a trigger pair is not tested while both actors sleep, "the overlap state can not change if both objects are sleeping"; it is tested again when an actor is created or its pose set (`ScTriggerInteraction.cpp`, `onActivate`, `onDeactivate`, `PROCESS_THIS_FRAME`) | `eNOTIFY_TOUCH_LOST` when an object is deleted (`PxTriggerPair`, since 3.1.1) |
+| Jolt 5.6 | a static sensor loses the contact of a body which falls asleep (`OnContactRemoved`, `ContactListener.h`); an active kinematic or dynamic sensor never sleeps and detects the sleeping bodies (`Body::SetIsSensor`, `Body::UpdateSleepStateInternal`) | `OnContactRemoved` at the next update |
+| Godot 4 | `GodotAreaPair3D` keeps its state, tested only when its area moves or its body is active (`godot_step_3d.cpp`); its Jolt module makes every `Area3D` a kinematic sensor, active while it monitors (`JoltArea3D::_get_motion_type`, `_should_sleep`) | `body_exited` when the pair is destroyed |
+| Unity | `OnTriggerStay` "while a collider remains touching the trigger", `OnTriggerExit` "when a collider stops touching a trigger" | no `OnTriggerExit` when a collider is destroyed or deactivated |
+
+Feather follows Box2D for the pairs and PhysX for their cost:
+- The broad phase emits the pair of a trigger and a body which moves (dynamic or kinematic) whatever the sleep
+  (`detectsTrigger`): a static trigger the game moves away from a sleeping body ends the pair, moved over it starts one.
+  2 static bodies never pair.
+- A kinematic body enters and leaves a static trigger, and a kinematic trigger detects the static and the kinematic
+  bodies, without any contact: Box2D v3 tests every sensor against its 3 trees, static, kinematic and dynamic
+  (`b2SensorTask`); Jolt: "These sensors will only detect collisions with active Dynamic or Kinematic bodies" for a
+  static sensor (`Body.h`), a kinematic sensor detects the static bodies only with `SetCollideKinematicVsNonDynamic`;
+  Unity: "A dynamic or kinematic trigger collider collides with any collider type. A static trigger collider collides
+  with any dynamic or Kinematic collider" (Manual, Collider types interaction), the rule of Feather. A moved kinematic
+  proxy queries the static tree and the planes too: its pairs without a trigger are kept in the records of the broad
+  phase, never emitted, as a filtered pair.
+- A pair with a trigger has no contact: its narrow phase only tells whether the shapes overlap, by the distance between
+  their cores (GJK), not over the sum of their radii, as `World.Overlap` (Box2D: `b2ShapeDistance` with the radii, an
+  overlap under `10 * FLT_EPSILON`, `b2SensorQueryCallback`). A body in contact with a trigger is in it. A plane, a
+  heightfield or a triangle mesh keeps its real contacts: it has no core for GJK.
+- A pair whose bodies both rest (static or asleep) keeps the overlap of its last test, while the AABB of each body is
+  the same, bit for bit, since that test (`overlapKept`: the box and the step of its last change in the proxy of each
+  body, the overlap in the record of the pair): the overlap can't have changed, as PhysX. A body moved by the game, its
+  AABB updated, is tested again. A rotation which keeps the AABB of a body bit for bit is not seen, as the broad phase
+  doesn't see it for a static body.
+- The events: an enter when the pair starts, a stay at each step while one of the bodies is awake (none while both rest,
+  as between 2 sleeping bodies), an exit when it ends. `RemoveBody` ends the pairs of the body: their exits are sent
+  with the next events (at the end of the next step, or in the flush running if a listener removed the body), as Box2D,
+  PhysX and Jolt.
+
+**The contacts follow the same rules.** A contact whose bodies both rest, a body asleep on a static body (the ground,
+a plane) or on another sleeping body, is no longer detected but its bodies still touch: the events keep it, with no
+stay, and its exit comes when the bodies stop touching or one of them is removed. Up to v0.4.0 only a contact between 2
+sleeping bodies was kept: a crate falling asleep on the ground got a `CollisionExit`, and a `CollisionEnter` when it
+woke up. Box2D v3 keeps the touching contacts of an island which falls asleep in its sleeping set (`b2TrySleepIsland`,
+`solver_set.c`) and sends `b2ContactEndTouchEvent` when a touching contact is destroyed (`b2DestroyContact`,
+`contact.c`); PhysX sends `eNOTIFY_TOUCH_LOST` when an actor is removed; Unity: "Collision stay events are not sent for
+sleeping Rigidbodies". Jolt alone documents the other way: "as soon as a body goes to sleep the contacts between that
+body and all other bodies will receive an OnContactRemoved callback" (`ContactListener.h`). A pair of the events keeps
+its kind (contact or trigger): a body made a trigger by the game ends its contacts and starts its trigger pairs.
+
+Cost of a step, 1 worker, crates asleep in a static zone of 20 x 20 m and listened to (µs, median of 5, machine at
+rest):
+
+| Crates | With the overlap kept | A GJK per pair at each step | The manifolds of the former narrow phase | Before (out of the zone) |
+|--------|-----------------------|-----------------------------|------------------------------------------|--------------------------|
+| 25 | 8 | 26 | 91 | 4 |
+| 100 | 29 | 104 | 363 | 8 |
+| 400 | 120 | 429 | 1463 | 25 |
+
+Before, the sleeping crates were out of the broad phase, and out of the zone too; their contact with the ground left
+the events when they fell asleep. With the overlap kept, a crate at rest costs about 0.24 µs per step: its trigger
+pair, its place in the pairs of the step (the scan of its record, the sort), `overlapKept`, and in the events its
+trigger pair and its contact with the ground, kept, and their comparison with the previous step (0.04 µs of it for
+the contact). The pairs of the zone sorted by insertion, as up to v0.4.0, cost 341 µs at 400 crates instead of 103
+without the kept contacts. PhysX costs nothing for a pair whose actors both sleep (the interaction is deactivated),
+Box2D a `b2ShapeDistance` per pair at each step (the column of a GJK per pair).
+
+The kinematic bodies: 64 kinematic cubes going round over a floor of 400 static tiles (1 worker, median of 5), 95 µs
+per step before and 96 µs with their pairs with the static bodies kept in the records for the triggers; with 16
+static zones on the floor, 95 µs before (no kinematic cube entered them) and 118 µs: the cubes in the zones are tested
+at each step and send their events.
 
 ## GJK Algorithm
 GJK tests if two convex shapes overlap: they overlap if their Minkowski difference `A - B` contains the origin.
@@ -1011,11 +1094,12 @@ The contacts with a kinematic body keep the softness of the contacts between dyn
 `Body::sFindCollidingPairsCanCollide`, `Body.inl:36-44`: "One of the bodies must be dynamic to collide"; Box2D
 `simulation.md`: "A shape on a kinematic body can only collide with a dynamic body"; PhysX `PxRigidBody.h:56`:
 "Kinematics will not collide with static or other kinematic objects"). The broad phase keeps it in the tree of the
-dynamic bodies, with a proxy of its own kind (`proxyKinematic`): moved, it queries the dynamic tree only, never the
-static tree nor the planes and the heightfields, and a pair is emitted if it has a dynamic body and an awake body which
-moves (`needsSolving`). Box2D v3 gives the kinematic bodies a third tree for the same rule ("Only dynamic proxies
-collide with kinematic and static proxies", `broad_phase.c:351`); two trees and a kind on the proxy do the same job
-here, and a body which changes type (below) keeps its leaf, its pairs and their contacts.
+dynamic bodies, with a proxy of its own kind (`proxyKinematic`): moved, it queries the dynamic tree, and the static
+tree and the planes for the triggers only, and a pair is emitted if it has a dynamic body and an awake body which moves
+(`needsSolving`), or a trigger ([Triggers](#triggers)). Box2D v3 gives the kinematic bodies a third tree for the same
+rule ("Only dynamic proxies collide with kinematic and static proxies", `broad_phase.c:351`), its sensors query the 3
+trees; two trees and a kind on the proxy do the same job here, and a body which changes type (below) keeps its leaf,
+its pairs and their contacts.
 
 **Speculative contacts from its speed.** The margin of a contact against a static body follows the relative speed of
 the bodies (the speculative CCD of PhysX, see Continuous collision); the margin against a kinematic body does the same

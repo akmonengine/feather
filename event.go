@@ -31,6 +31,17 @@ func makePairKey(bodyA, bodyB *actor.RigidBody) pairKey {
 	return pairKey{bodyA: bodyA, bodyB: bodyB}
 }
 
+// eventPair: a pair of the events, its bodies and its kind (a trigger pair or a contact) when it was recorded: a
+// contact whose body is made a trigger by the game ends, and the trigger pair starts
+type eventPair struct {
+	pairKey
+	trigger bool
+}
+
+func makeEventPair(bodyA, bodyB *actor.RigidBody) eventPair {
+	return eventPair{pairKey: makePairKey(bodyA, bodyB), trigger: bodyA.IsTrigger || bodyB.IsTrigger}
+}
+
 type EventType uint8
 
 // Event interface - all events implement this
@@ -108,10 +119,10 @@ type Events struct {
 
 	// Collision tracking for Enter/Stay/Exit detection
 	// The slices keep the order of the pairs, so the events are always sent in the same order
-	previousPairs       []pairKey
-	currentPairs        []pairKey
-	previousActivePairs map[pairKey]bool
-	currentActivePairs  map[pairKey]bool
+	previousPairs       []eventPair
+	currentPairs        []eventPair
+	previousActivePairs map[eventPair]bool
+	currentActivePairs  map[eventPair]bool
 
 	sleepStates map[*actor.RigidBody]bool
 }
@@ -120,8 +131,8 @@ func NewEvents() Events {
 	return Events{
 		listeners:           make(map[EventType][]EventListener),
 		buffer:              make([]Event, 0, 256),
-		previousActivePairs: make(map[pairKey]bool),
-		currentActivePairs:  make(map[pairKey]bool),
+		previousActivePairs: make(map[eventPair]bool),
+		currentActivePairs:  make(map[eventPair]bool),
 		sleepStates:         make(map[*actor.RigidBody]bool),
 	}
 }
@@ -143,7 +154,7 @@ func (e *Events) recordCollisions(manifolds []constraint.Manifold) []constraint.
 		m := &manifolds[i]
 		isTrigger := m.BodyA.IsTrigger || m.BodyB.IsTrigger
 		if tracked && (isTrigger || m.MinSeparation() <= touchingDistance) {
-			e.record(makePairKey(m.BodyA, m.BodyB))
+			e.record(makeEventPair(m.BodyA, m.BodyB))
 		}
 		if !isTrigger {
 			manifolds[n] = *m
@@ -153,7 +164,7 @@ func (e *Events) recordCollisions(manifolds []constraint.Manifold) []constraint.
 	return manifolds[:n]
 }
 
-func (e *Events) record(pair pairKey) {
+func (e *Events) record(pair eventPair) {
 	if e.currentActivePairs == nil {
 		*e = NewEvents()
 	}
@@ -163,13 +174,23 @@ func (e *Events) record(pair pairKey) {
 	}
 }
 
-// forget a removed body
+// forget a removed body. Its pairs end: their exit is sent with the next events (at the end of the next step, or in
+// the flush running if a listener removed the body), as Box2D v3 sends a b2SensorEndTouchEvent when the sensor or its
+// visitor is destroyed and a b2ContactEndTouchEvent when a touching contact is destroyed (b2DestroyContact), PhysX an
+// eNOTIFY_TOUCH_LOST (PxTriggerPair, PxContactPair) and Jolt an OnContactRemoved
 func (e *Events) forget(body *actor.RigidBody) {
 	delete(e.sleepStates, body)
 	n := 0
 	for _, pair := range e.previousPairs {
 		if pair.bodyA == body || pair.bodyB == body {
 			delete(e.previousActivePairs, pair)
+			if pair.trigger {
+				if e.hasListeners(EventTriggerExit) {
+					e.buffer = append(e.buffer, TriggerExitEvent{BodyA: pair.bodyA, BodyB: pair.bodyB})
+				}
+			} else if e.hasListeners(EventCollisionExit) {
+				e.buffer = append(e.buffer, CollisionExitEvent{BodyA: pair.bodyA, BodyB: pair.bodyB})
+			}
 			continue
 		}
 		e.previousPairs[n] = pair
@@ -183,15 +204,14 @@ func (e *Events) forget(body *actor.RigidBody) {
 func (e *Events) processCollisionEvents() {
 	// Detect Enter and Stay events
 	for _, pair := range e.currentPairs {
-		// Skip if both bodies are sleeping, to avoid spamming events
-		if pair.bodyA.IsSleeping && pair.bodyB.IsSleeping {
-			continue
-		}
-
-		isTrigger := pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
-
+		isTrigger := pair.trigger
 		if e.previousActivePairs[pair] {
-			// Pair was active before and still is, Stay
+			// Pair was active before and still is, Stay. No stay while both bodies rest (static or asleep): nothing
+			// changes, as Unity sends no collision stay for a sleeping rigidbody and PhysX tests no trigger pair whose
+			// actors sleep
+			if isAtRest(pair) {
+				continue
+			}
 			if isTrigger {
 				if e.hasListeners(EventTriggerStay) {
 					e.buffer = append(e.buffer, TriggerStayEvent{
@@ -229,14 +249,17 @@ func (e *Events) processCollisionEvents() {
 
 	// Detect Exit events
 	for _, pair := range e.previousPairs {
-		// Sleeping pairs are not detected anymore, but they are still touching
-		if !e.currentActivePairs[pair] && pair.bodyA.IsSleeping && pair.bodyB.IsSleeping {
+		isTrigger := pair.trigger
+		// A contact whose bodies both rest (a body asleep on a static body, or on another sleeping body) is not detected
+		// anymore, but its bodies still touch: it is kept, as Box2D v3 keeps the contacts of a sleeping body with their
+		// touching flag (b2ContactEndTouchEvent only when they stop touching or are destroyed), unless one of its bodies
+		// was made a trigger. A trigger pair is tested whatever the sleep: gone, its shapes no longer overlap
+		if !isTrigger && !e.currentActivePairs[pair] && isAtRest(pair) && !isTriggerPair(pair.pairKey) {
 			e.record(pair)
 			continue
 		}
 		if !e.currentActivePairs[pair] {
 			// Pair was active but is no longer, Exit
-			isTrigger := pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
 
 			if isTrigger {
 				if e.hasListeners(EventTriggerExit) {
@@ -290,6 +313,16 @@ func (e *Events) processSleepEvents(bodies []*actor.RigidBody) {
 	}
 }
 
+// isAtRest: both bodies of the pair rest, static or asleep
+func isAtRest(pair eventPair) bool {
+	return !isAwakeMover(pair.bodyA) && !isAwakeMover(pair.bodyB)
+}
+
+// isTriggerPair: one of the bodies is a trigger
+func isTriggerPair(pair pairKey) bool {
+	return pair.bodyA.IsTrigger || pair.bodyB.IsTrigger
+}
+
 // hasListeners: an event is only created if somebody listens to it (creating an event allocates)
 func (e *Events) hasListeners(eventType EventType) bool {
 	return len(e.listeners[eventType]) > 0
@@ -305,11 +338,13 @@ func (e *Events) tracksCollisions() bool {
 	return false
 }
 
-// flush sends all buffered events and clears the buffer
+// flush sends all buffered events and clears the buffer. A listener can remove a body: the exits of its triggers are
+// added to the buffer, and sent in this flush
 func (e *Events) flush() {
 	e.processCollisionEvents()
 
-	for _, event := range e.buffer {
+	for i := 0; i < len(e.buffer); i++ {
+		event := e.buffer[i]
 		if listeners, ok := e.listeners[event.Type()]; ok {
 			for _, listener := range listeners {
 				listener(event)
