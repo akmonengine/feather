@@ -9,6 +9,7 @@
 7. [Continuous collision](#continuous-collision)
 8. [Queries](#queries)
 9. [Kinematic bodies](#kinematic-bodies)
+10. [Characters](#characters)
 
 ## Broad phase
 
@@ -1146,3 +1147,177 @@ function can still be used though, if one simply wants to teleport a kinematic a
 **Measured** (`TestKinematicPushesABox`, `TestFastKinematicDoesNotGoThroughARestingBody`, 60 Hz, 8 sub-steps): a cube
 pushed at 1 m/s on the ground (µ = 0.6) stays against the pusher within 0.00 mm, 0.12 mm deep at worst, at 1.000 m/s; a
 leg at 5 m/s enters a resting capsule by 0.25 mm at worst, a box by 0.22 mm, and never goes through.
+
+## Characters
+
+A character is a capsule moved by the game between 2 steps, with the queries of the world: a virtual character, the
+`CharacterVirtual` of Jolt (`Jolt/Physics/Character/CharacterVirtual.cpp`, v5.3.0), the mover of Box2D v3
+(`src/mover.c`, `samples/sample_character.cpp`, v3.1.0). `PxController` of PhysX
+(`physxcharacterkinematic/src/CctCharacterController.cpp`, 5.11) and `CharacterBody3D` of Godot
+(`scene/3d/physics/character_body_3d.cpp`, 4.4) are of the same kind. `charactervirtual.go`, `charactervirtual_move.go`.
+The name is the one of Jolt: Jolt keeps `Character` for its character on a rigid body, moved by the solver, which
+Feather doesn't have.
+
+**Why virtual.** A dynamic body as a character is pushed by the solver: it bounces, it is thrown by a contact, it
+needs its rotations locked and a friction tuned; a kinematic body goes through the walls. A virtual character goes
+exactly where the game decides, at once, and is stopped by the walls: every engine offers one. Feather follows Jolt,
+whose character slides its velocity along the planes of its contacts by time of impact and checks the path by a
+sweep, where PhysX moves by 3 sweeps (up, side, down: the up pass makes the steps, `moveCharacter`, `:1682-2005`),
+Box2D v3 solves the planes in position (`b2SolvePlanes`, Gauss-Seidel on the pushes, then `b2ClipVector` on the
+velocity) and Godot slides the remainder of a motion test (`_move_and_slide_grounded`, 6 slides at most).
+
+**The inner body.** The character stands in the world through an inner kinematic body at its capsule (the
+`mInnerBodyShape` of Jolt, `CharacterVirtual.h:50-55`; the kinematic actor of PhysX, `CctController.cpp:111-170`),
+teleported there after each update without velocity (`UpdateInnerBodyTransform`, `:165-169`: `SetPositionAndRotation`,
+`DontActivate`). The rays, the sweeps and the overlaps see it; a dynamic body which runs into it is stopped by the
+solver (infinite mass); the other characters gather it in their contacts and hit it in their sweeps, with the velocity
+of its character (`sFillCharacterContactProperties`, `:232-245`): the `CharacterVsCharacterCollision` list of Jolt is
+not needed. It pushes nothing by itself: PhysX moves its actor by `setKinematicTarget` (`:2545-2555`), so that it
+shoves the dynamic bodies with an infinite force; Feather bounds the push by the strength of the character, as Jolt.
+
+**Padding.** The capsule is inflated by `CharacterPadding` (2 cm, `mCharacterPadding`) for its contacts and its
+sweeps: the character keeps 2 cm from everything, "this ensures that the sweep will hit as little as possible lowering
+the collision cost and reducing the risk of getting stuck" (`CharacterVirtual.h:46`). Jolt collides the real shape
+and removes the padding from the distances (`GetContactsAtPosition`, `:430-434`), then casts the shrunken shape and
+corrects the fraction (`GetFirstContactForSweep`, `:552-640`): for a capsule, inflating the radius is the same thing,
+exactly. The inner body has the real capsule. PhysX stops its sweeps `contactOffset` before the obstacle (0.1 m,
+`doSweepTest`, `:1638-1641`).
+
+**Contacts.** `collectContacts`: the candidates of the trees for the AABB of the padded capsule enlarged by the
+predictive distance (10 cm, `mPredictiveContactDistance`: "A value of 0 will most likely cause the character to get
+stuck as it cannot properly calculate a sliding direction anymore", `.h:41`), filtered as the pairs of the world
+(`World.ShouldCollide`), the triggers skipped, then the contact generator of the world (`collideAllMoving`: GJK/EPA,
+the analytic pairs, the patches of the surfaces) with the predictive distance as margin: one contact per manifold, its
+deepest point, its normal towards the character, its distance (the padding removed), the velocity of its body at the
+point (the velocity of the other character). The contacts are sorted by the index of their body (Jolt sorts them,
+`:420-424`): the same whatever the shape of the trees. On an inactive edge of a surface, the normal of EPA is kept
+when it brakes the motion less than the normal of the triangle (`contactNormal`, the hint of `ActiveEdges::FixNormal`
+of Jolt: the character passes the direction of its velocity, `CheckCollision`, `:377-404`): a capsule level with the
+top edge of a riser has its closest point on the flat diagonal of the riser, 10 cm away along the normal of EPA; with
+the normal of the riser it was a wall at a distance of 0, and the character stuck at the edge of every step. The pairs
+of a step give no direction: their arithmetic is unchanged.
+
+**Conflicting contacts.** 2 contacts of the same body deeper than 1.25 × padding with opposed normals (the character
+squeezed in the body) can't both be solved: the shallower one is discarded, and the body ignored by the sweep
+(`RemoveConflictingContacts`, `:436-473`).
+
+**Constraints.** Each contact is a plane `n · x + d ≥ 0` with the velocity of its body (`DetermineConstraints`,
+`:642-682`); a contact which enters the body (`d < 0`) gets the velocity `-n d / dt` out of it (the penetration
+recovery, all of it in one update); a contact too steep (`n · up < cos(MaxSlopeAngle)`, `IsSlopeTooSteep`,
+`CharacterBase.h:73-78`) gets a second, vertical plane (its normal in the horizontal plane, its distance the one to
+travel horizontally to the contact) which blocks the way up the slope.
+
+**Solve** (`solveConstraints`, `SolveConstraints` of Jolt, `:755-1010`): 15 iterations at most. The time of impact of
+the velocity on each plane is `toi = (n · displacement + d) / (n · (v_plane - v))`, infinite when the character moves
+away or would enter the plane by less than 0.1 mm during the time left; the planes are sorted by it (at `toi = 0`,
+the one which pushes the most first; at a tie, a static body first). The character goes to the first plane, hits it
+(`handleContact`: the body gets its impulse), and its velocity is projected on the plane: `v - ((v - v_plane) · n) n`;
+on a steep slope the velocity towards it is removed first, else the character climbs a little and jitters. If the new
+velocity would enter a plane hit earlier in this solve (the planes closer than 10° apart excepted), the character
+slides along the edge of both: `v · (n₁ × n₂)` on the edge, plus the velocities of both planes perpendicular to it,
+each plane losing its push into the other (no ping-pong). The solve stops when nothing pushes and no velocity is left,
+or when the velocity reversed. Standing without horizontal velocity on a walkable, still surface, the character stops
+dead instead of creeping down it (`OnContactSolve` of the samples of Jolt, `CharacterVirtualTest.cpp:383-391`;
+`floor_stop_on_slope` of Godot): the velocity of the game then holds the gravity of the step alone.
+
+**Move** (`moveShape`, `MoveShape` of Jolt, `:1203-1287`): contacts, constraints, solve, then a sweep of the padded
+capsule along the displacement (`sweep`): the bodies it starts in or touches are passed through (their planes were
+solved: the hits at the fraction 0 are ignored, `ContactCastCollector::AddHit`, `:328-376`; `b2World_CastMover` of
+Box2D ignores the overlapping shapes too, `world.c:2446-2451`), a hit which would enter the body by less than the
+collision tolerance (1 mm) is ignored, the others shorten the displacement. 5 loops at most, while time remains
+(`characterMinTimeRemaining`, 1e-4 s) and the character moves. The sweep is the one of the world (conservative
+advancement on the cores), through the bodies the character collides with.
+
+**Push** (`handleContact`, `HandleContact` of Jolt, `:684-753`): a dynamic body hit receives the impulse which brings
+it to the velocity of the character along the normal, damped by 0.9, plus 0.4 of the penetration per update:
+`P = Δv / (1/m + (r × n) · I⁻¹ (r × n))`, bounded by `MaxStrength × dt` (100 N), its downward part removed (the gravity
+is the world's). `Update` adds the weight of the character to a dynamic ground, `-Mass (n · g) / |g| dt g` at the
+ground point (`:1404-1416`). The body woken by the impulse wakes its island at the step.
+
+**Ground** (`updateSupportingContact`, `UpdateSupportingContact` of Jolt, `:1012-1190`): a contact closer than the
+collision tolerance which the character doesn't leave is a collision; a contact holds the character if its point is
+in the lower sphere of the capsule (the supporting volume of the samples of Jolt, `Plane(Y, -radius)`: "Accept
+contacts that touch the lower sphere of the capsule", `CharacterVirtualTest.cpp:35`). On the ground if a holding
+contact is under the slope limit; on steep ground with steep holding contacts only, unless they block the character
+together (the solve of a fall of 1 s moves it by less than 0.6 × dt: a crevice holds); not supported with a contact
+which doesn't hold; in the air without any. The ground normal and velocity are the average of the contacts within
+85° of up; the ground body is the one of the most upright holding contact, else the deepest. On a kinematic platform
+the ground velocity is the one of the point under the character over the last step, on its arc when the platform turns
+(`CalculateCharacterGroundVelocity`, `:190-207`); `UpdateGroundVelocity` reads it again without any collision test.
+
+**Stick to the floor** (`stickToFloor`, `StickToFloor`, `:1686-1712`): leaving the ground without going up
+(`ExtendedUpdate`, `:1740-1750`), the character sweeps `StickToFloor` down (0.5 m by default, the
+`mStickToFloorStepDown` of the `ExtendedUpdateSettings` of Jolt; `floor_snap_length` of Godot is 0.1 m, a setting of
+the body too) and lands on the floor found, its contacts read there. 0 sticks to nothing: off a platform of 1 m the
+default doesn't reach the floor and the character falls, 1.5 m puts it on the floor at once.
+
+**Stairs** (`walkStairs`, `WalkStairs`, `:1545-1684`; `ExtendedUpdate`, `:1752-1792`): when the horizontal step
+achieved is shorter than the step wanted and a contact too steep is pushed into (`canWalkStairs`, `:1523-1543`), the
+character sweeps up by `StepHeight`, moves forward by what it lacked (2 cm at least, `mWalkStairsMinStepForward`),
+cancels if it gained less than 5 % of the step against the steep contacts, sweeps down by as much as it went up,
+cancels without floor, and when the floor found is too steep (the edge of the step) tests it 15 cm further along the
+ground normal in the horizontal plane (or along the walk when they differ by more than 75°,
+`mWalkStairsStepForwardTest`, `mWalkStairsCosAngleForwardContact`). Then it lands on the floor, on the ground. PhysX
+makes its steps of its up pass (`stepOffset`); Godot has none.
+
+**Steep slopes.** Before the move, the horizontal velocity towards the steep contacts of the last update is removed
+(`CancelVelocityTowardsSteepSlopes`, `:1297-1323`) when the character is on steep ground or not supported: it doesn't
+try to climb. On a slope too steep, the gravity of the recipe slides it down (`OnSteepGround`: "The caller should
+start applying downward velocity if sliding from the slope is desired", `CharacterBase.h:86`; the
+`ePREVENT_CLIMBING_AND_FORCE_SLIDING` of PhysX, `PxController.h:60-67`).
+
+**Constants** (`charactervirtual.go`), those of Jolt: padding 0.02 m, predictive distance 0.1 m, collision tolerance
+1e-3 m, accepted penetration 1e-4 m, 5 collision loops, 15 constraint iterations, 1e-4 s left, penetration recovery 1,
+minimal step forward 0.02 m, forward test 0.15 m at cos 75°, push damping 0.9 and penetration 0.4, ground normals
+within cos 0.08, planes apart by cos 0.984, progress 5 %. Defaults of the settings: a slope of 50° (45° in PhysX,
+0.707, and in Godot), a step of 0.4 m (0.5 in PhysX), 100 N, 70 kg, the floor kept within 0.5 m (`StickToFloor`). A
+normal within 1e-6 of up gets no vertical plane (the rounding of a vertical normal under a slope limit of 0).
+
+**Measured** (`charactervirtual_test.go`, 60 Hz, a capsule of 0.3 × 1.7 m at 2 m/s):
+- on a plane, a bumpy terrain of 0.5 m cells and a hilly mesh: the real capsule is never in the ground (0.000 mm over
+  480 frames), the character stays supported, and stopped it doesn't move (0.0000 mm over 2 s);
+- against a wall at 45°: 20.00 mm from it (the padding), 5.657 m along it in 4 s (2 × 4 / √2 = 5.657, nothing lost);
+- a slope of 30°: climbed 2.48 m in 3 s (2 × 3 × sin 30° × cos 30° = 2.60, less the gravity of the recipe); 49°:
+  climbed; 51° and 60°: not climbed, slid down. Steps of 0.2, 0.3, 0.39 and 0.41 m: walked (0.41: the sphere of the
+  capsule rolls over the edge); 0.6 m: blocked at the riser;
+- down a slope of 30° at 3 m/s: 0 frame off the ground of 180; off a step of 0.3 m: 0 frame in the air of 150;
+- a platform at 1 m/s sideways: carried by 3.000 m in 3 s, bit for bit; at 0.5 m/s up: 1.508 m, a frame ahead (the
+  first step put the platform 8 mm in the padding, the penetration recovery added its push to the velocity of the plane);
+- a ball of 11 kg and a crate of 22 kg are pushed at 1.99 m/s; a crate of 8 t stops the character (0.18 m: the walk to
+  it); a crate of 8 t thrown at 4 m/s at a standing character is stopped by its inner body;
+- 2 characters head on stop 53 mm apart (2 paddings + the accepted penetration); crossing, they pass each other at
+  21 mm (2 paddings);
+- the same bits with 1 and 8 workers (24 characters crossing a crowded scene); 0 allocation per update once the
+  buffers of the characters have grown (the scene walked again by the same characters, 2 collections before each
+  frame): the buffers of the contacts and of the sweeps of a character are its own, not those of a `sync.Pool`, which
+  the garbage collector empties, and an update which found it empty grew its buffers again;
+- cost, one core (`BenchmarkCharacters`, machine at rest): 24 characters walking alone on the terrain 0.27 ms per
+  frame (11 µs each), 24 characters crowded against walls and crates 1.3 ms (54 µs each), the frame of the crowd with
+  its step 1.4 ms; 200 characters: 6.3 and 9.8 ms — before the work below, which takes 13 % off.
+
+**Where an update spends its time**, counted on the bumpy terrain (24 characters, per update): alone, 1.5 gatherings
+of contacts testing 14 triangles with GJK (6.4 give a contact), 1.9 sweeps over 7.8 triangles (1.5 hit); against the
+walls of the crowd, 2.0 gatherings of 23 triangles (10 contacts), 2.3 sweeps over 6.9 triangles. These counts are
+the ones of Jolt: against a wall, `ExtendedUpdate` tries `WalkStairs` at every update too (a sweep up, a move with its
+contacts, and the walk is cancelled); PhysX makes its up, side and down passes at every move. The cost is the one of
+GJK per triangle within reach, and of the contact it makes. Three things were taken off it, each identical to the
+bit (the 33 fingerprints of the bench, the character tests): the supports of GJK skip the two rotations of a shape
+at the identity (a triangle of a surface, a standing capsule: `Proxy.upright`), the cores of GJK are made once per
+pair instead of once per triangle (`penetrationOfCores`), and the proxy of the triangle of a sweep or an overlap once
+per scratch. Measured against the version before them, interleaved on the same loaded machine (A/B, 3 rounds, the
+best of each): the 24 characters alone 787 → 677 µs per frame (−14 %), the crowd of 24 1 063 → 925 µs (−13 %), its
+frame with the step 1 218 → 1 073 µs (−12 %), 200 characters alone 7.64 → 6.58 ms (−14 %), the crowd of 200
+9.98 → 9.07 ms (−9 %).
+
+Two things the references do were measured and not kept. The rejection of a triangle by the exact distance of the
+segment of the capsule before any contact (`PCMCapsuleVsMeshContactGeneration::processTriangle` of PhysX, by
+`pcmDistanceSegmentTriangleSquared` against the inflated radius; `rejectTriangle` of `sweepCapsuleTriangles` for the
+sweeps): it rejected 7.6 of the 14 triangles alone and 10 of the 23 in the crowd before GJK, and gained nothing
+(0 to −2 %): GJK on a triangle out of reach converges in 1 or 2 iterations, as cheap as the exact distance (5 closest
+points) in scalar Go. The geometry gathered once per move (`findTouchedGeometry` of `CctCharacterController` into
+`mGeomStream`, within the swept volume grown by `mVolumeGrowth`): the triangles around the character gathered once
+per update for all its gatherings and sweeps gathered 22 to 24 triangles where the queries fetched about 30 (2
+gatherings and 2.3 sweeps: a reuse of 1.3), and the gathering cost what the fetching saved (12 % against 14 %, within
+the noise of the bench). What remains is GJK on the 6 to 10 triangles which touch the capsule and the 2 to 3 the
+sweeps hit, 1 to 1.5 µs each: the floor of a contact generator which is GJK/EPA only. PhysX goes 3 to 5 times lower
+on a capsule against a mesh with its analytic contact of a segment and a triangle, a second mechanism of contact.

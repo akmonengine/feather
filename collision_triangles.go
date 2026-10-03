@@ -103,6 +103,8 @@ type triangleScratch struct {
 	shape    triangleShape
 	triangle actor.RigidBody
 	simplex  gjk.Simplex
+	// epa: the buffers of EPA of the character which owns the scratch (contactScratch), nil for those of the pool of EPA
+	epa *epa.Scratch
 	// the cells of a heightfield, the triangles of a mesh, under the body
 	cells     []int32
 	triangles []int32
@@ -113,11 +115,24 @@ type triangleScratch struct {
 	clip      [2][maxClipVertices]mgl64.Vec3
 	// sides: the sides of the triangle each vertex of clip was cut on (bit e), 0 for a vertex of the body
 	sides [2][maxClipVertices]uint8
+	// movement: the direction the body moves in, for the normals of the contacts on the inactive edges (contactNormal);
+	// zero for the pairs of a step
+	movement mgl64.Vec3
+	// the cores of the triangle (made once: the shape is the one of the scratch, at the identity) and of the body
+	// (made once per pair), for the GJK of every triangle
+	triangleCore, objectCore gjk.Proxy
+	objectRadius             float64
+}
+
+// init the triangle of the scratch and its core: they point to the scratch, which must not be copied
+func (s *triangleScratch) init() {
+	s.triangle = actor.RigidBody{Transform: actor.NewTransform(), BodyType: actor.BodyTypeStatic, Shape: &s.shape}
+	s.triangleCore, _ = gjk.NewCoreProxy(&s.triangle)
 }
 
 var trianglePool = sync.Pool{New: func() any {
 	s := &triangleScratch{}
-	s.triangle = actor.RigidBody{Transform: actor.NewTransform(), BodyType: actor.BodyTypeStatic, Shape: &s.shape}
+	s.init()
 	return s
 }}
 
@@ -147,10 +162,18 @@ func isSurface(body *actor.RigidBody) bool {
 // In one manifold of 4 points, the points on the edges of the surface take the place of a corner of the body: a plate
 // resting flat lost 2 corners to 2 points of its face over an edge of the grid, and sank by 10 mm on this side while
 // the pair cache kept its contact.
-// The order of the pair is kept: if the surface is B, the normals point from the body to the surface
-func collideTriangles(surface, object *actor.RigidBody, margin float64, surfaceIsB bool, out []constraint.Manifold) int {
-	s := trianglePool.Get().(*triangleScratch)
-	defer trianglePool.Put(s)
+// The order of the pair is kept: if the surface is B, the normals point from the body to the surface. The buffers are
+// those of owner, those of the pool if nil
+func collideTriangles(owner *contactScratch, surface, object *actor.RigidBody, margin float64, surfaceIsB bool, movement mgl64.Vec3, out []constraint.Manifold) int {
+	var s *triangleScratch
+	if owner != nil {
+		s = &owner.triangles
+	} else {
+		s = trianglePool.Get().(*triangleScratch)
+		defer trianglePool.Put(s)
+	}
+	s.movement = movement
+	s.objectCore, s.objectRadius = gjk.NewCoreProxy(object)
 
 	bounds := object.AABB()
 	bounds = actor.AABB{Min: bounds.Min.Sub(mgl64.Vec3{margin, margin, margin}), Max: bounds.Max.Add(mgl64.Vec3{margin, margin, margin})}
@@ -290,7 +313,7 @@ func (s *triangleScratch) collideTriangle(object *actor.RigidBody, activeEdges, 
 	if faceNormal.Dot(object.Transform.Position.Sub(vertices[0])) < 0 {
 		return
 	}
-	result, ok := penetration(&s.triangle, object, margin, &s.simplex)
+	result, ok := penetrationOfCores(&s.triangle, object, &s.triangleCore, 0, &s.objectCore, s.objectRadius, margin, &s.simplex, s.epa)
 	if !ok {
 		return
 	}
@@ -314,7 +337,7 @@ func (s *triangleScratch) collideTriangle(object *actor.RigidBody, activeEdges, 
 	// WitnessA is on the triangle grown by the margin
 	onTriangle, onBody := result.WitnessA.Sub(result.Normal.Mul(margin)), result.WitnessB
 	touched := touchedEdges(vertices, onTriangle)
-	normal := contactNormal(faceNormal, activeEdges, touched, result.Normal)
+	normal := contactNormal(faceNormal, activeEdges, touched, result.Normal, s.movement)
 	separation := onBody.Sub(onTriangle).Dot(normal)
 	closest := constraint.ContactPoint{Position: onBody.Sub(normal.Mul(separation / 2)), Separation: separation}
 	first = len(s.points)
@@ -377,24 +400,35 @@ func touchedEdges(vertices *[3]mgl64.Vec3, point mgl64.Vec3) uint8 {
 // contactNormal: the normal of the contact of a body with a triangle, given the normal of EPA and the edges of the
 // triangle its point is on (touchedEdges). A body sliding on the terrain must not hit the edges between its triangles:
 // on an inactive edge (between 2 triangles almost flat, or bent inwards) the normal is the one of the triangle. The rule
-// of ActiveEdges::FixNormal of Jolt (ActiveEdges.h), without its part on the motion of the body. The normal of EPA is
-// kept:
+// of ActiveEdges::FixNormal of Jolt (ActiveEdges.h). The normal of EPA is kept:
+//   - if the body moves (movement, a unit direction, or zero), and the normal of EPA brakes its motion less than the
+//     normal of the triangle: the body grazes a triangle it can't reach by its face (a capsule level with the top edge
+//     of a riser, whose closest point is on the flat diagonal of the riser: with the normal of the riser it would be a
+//     wall at a distance of 0, where its real distance is along the normal of EPA), or leaves a triangle. The hint of
+//     Jolt, "to make a distinction between sliding over a horizontal triangulated grid and hitting an edge ... and
+//     grazing a vertical triangle with an inactive edge"
 //   - if the 3 edges of the triangle are active
 //   - if the triangle has an active edge, and the normal of EPA is closer than 1° to its normal
 //   - if the point is on an active edge, or on a vertex of an active edge
 //
-// Jolt also keeps it when it brakes the motion of the body less than the normal of the triangle (a body leaving a
-// triangle is not held by its plane): its margin is fixed (2 cm, mSpeculativeContactDistance), the speculative margin
-// of Feather grows with the speed of the body (reach), and brings the vertices and the edges of the triangles around
-// within it. A box falling flat on a flat terrain, straight on a vertex of the grid, had 5 contacts at the same
-// corner: one straight up, 4 on the edges of the triangles around, tilted by 10 to 60°, each braking a vertical fall
-// less than the plane. The tilted ones, nearly parallel, took impulse from the vertical one over the sub-steps, and
-// the box landed 2 mm deep. PhysX and Box3D have no such rule (PCMContactConvexMesh, b3ComputeMeshManifolds). A box
-// sliding across an active ridge is not held by the plane it leaves: the points cut on an active edge are never points
-// of the face (clipFace)
+// The pairs of a step give no movement: Jolt keeps the normal of EPA when it brakes the motion of the body less than
+// the normal of the triangle (a body leaving a triangle is not held by its plane): its margin is fixed (2 cm,
+// mSpeculativeContactDistance), the speculative margin of Feather grows with the speed of the body (reach), and
+// brings the vertices and the edges of the triangles around within it. A box falling flat on a flat terrain, straight
+// on a vertex of the grid, had 5 contacts at the same corner: one straight up, 4 on the edges of the triangles around,
+// tilted by 10 to 60°, each braking a vertical fall less than the plane. The tilted ones, nearly parallel, took impulse
+// from the vertical one over the sub-steps, and the box landed 2 mm deep. The character (character_move.go) gives the
+// direction of its velocity: its contacts are gathered within 10 cm whatever its speed, and the rule is the one of
+// CharacterVirtual (CheckCollision passes the movement direction). PhysX and Box3D have no such rule
+// (PCMContactConvexMesh, b3ComputeMeshManifolds). A box sliding across an active ridge is not held by the plane it
+// leaves: the points cut on an active edge are never points of the face (clipFace)
 //
-// activeEdges: bit e for the edge from the vertex e to the vertex e+1
-func contactNormal(faceNormal mgl64.Vec3, activeEdges, touched uint8, normal mgl64.Vec3) mgl64.Vec3 {
+// activeEdges: bit e for the edge from the vertex e to the vertex e+1. The normals point from the triangle to the body:
+// the ones of Jolt point into the triangle, its test reads the other way
+func contactNormal(faceNormal mgl64.Vec3, activeEdges, touched uint8, normal, movement mgl64.Vec3) mgl64.Vec3 {
+	if movement.Dot(normal) > movement.Dot(faceNormal) {
+		return normal
+	}
 	if activeEdges == 0b111 {
 		return normal
 	}

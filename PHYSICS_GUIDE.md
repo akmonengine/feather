@@ -201,6 +201,81 @@ world.Step(dt)
   kinematic body.
 - A plane or a heightfield stays static: a moving terrain is not supported.
 
+### Characters
+A character is a capsule which walks: the player, a creature of the game. It is virtual (the `CharacterVirtual` of
+Jolt, whose name it takes, the `CharacterController` of Unity, the mover of Box2D v3): the game gives its velocity and calls its update,
+which slides the capsule along the walls, climbs the slopes and the steps, finds the ground and pushes the dynamic
+bodies; no force, no contact of the solver moves it, so it goes exactly where the game decides, at once.
+
+```go
+hero := feather.NewCharacterVirtual(actor.Capsule{HalfHeight: 0.55, Radius: 0.3}, feet.Add(mgl64.Vec3{0, 0.85, 0}))
+hero.MaxSlopeAngle, hero.StepHeight = 45*math.Pi/180, 0.3 // the defaults: 50°, 0.4 m, 100 N, 70 kg, StickToFloor 0.5 m (Jolt)
+world.AddCharacter(hero)
+world.SetFilter(hero.Body(), layerCharacters, actor.AllLayers)
+
+// each frame
+world.Step(dt)
+velocity := mgl64.Vec3{0, hero.Velocity.Y(), 0}             // in the air: the vertical velocity of the fall is kept
+if hero.GroundState() == feather.CharacterOnGround {        // on the ground: the velocity of the ground (a platform)
+	hero.UpdateGroundVelocity()
+	velocity = hero.GroundVelocity()
+	if jump {
+		velocity = velocity.Add(mgl64.Vec3{0, 4, 0})
+	}
+}
+hero.Velocity = velocity.Add(world.Gravity.Mul(dt)).Add(input) // + the gravity of the step, + the input (m/s)
+hero.Update(dt)
+model.SetPosition(hero.Position.Sub(mgl64.Vec3{0, 0.85, 0})) // the feet are 0.85 m under the center of the capsule
+```
+- **The velocity is the game's.** The recipe above is the one of the samples of Jolt (`CharacterVirtualTest::HandleInput`):
+  the gravity of the step is added every frame, so that the character presses on the ground and falls when it leaves
+  it; on the ground the vertical velocity is reset to the one of the ground, in the air it accumulates. PhysX, Box2D
+  and Godot leave the gravity to the game the same way. After the update, `Velocity` is what the character took: the
+  part towards a slope too steep removed.
+- **Update after the step.** The velocity of a platform is the one of the step just done: updated after it, the
+  character follows the platform without lag (`UpdateGroundVelocity` reads the velocity of the platform again before
+  the recipe, for the frame the platform starts). Updated before the step, it is one step behind the platform. During
+  a step an update panics, as a query.
+- **It walks on everything**: a plane, a terrain, a mesh, the boxes, the hulls, the capsules, the dynamic and the
+  kinematic bodies. It keeps 2 cm from them (`CharacterPadding`): a model drawn at the capsule stands 2 cm above the
+  ground. The contacts are gathered 10 cm around the capsule: no body is entered, whatever the speed.
+- **Slopes.** Under `MaxSlopeAngle` a surface is a ground: the horizontal velocity is projected on it (the character
+  climbs at `speed × cos(angle)` along the slope, as in Jolt; Godot keeps the speed with `floor_constant_speed`).
+  Steeper, it is a wall: the character doesn't climb it, and slides down it under the gravity of the recipe
+  (`CharacterOnSteepGround`; the `ePREVENT_CLIMBING_AND_FORCE_SLIDING` of PhysX). Standing still (no horizontal
+  velocity) on a ground, the character doesn't creep down (the stop on slope of the samples of Jolt and of Godot).
+- **Steps.** A step lower than `StepHeight` is walked without jumping; higher, it is a wall. A step is walked up,
+  forward and down onto its floor, which must not be too steep where the character lands (the edge of a step is tested
+  15 cm further). A step of 0.6 m blocks a character of radius 0.3: the sphere of its capsule stops against the riser.
+- **Downhill**, the character sticks to the floor: leaving the ground without going up, it looks for the floor within
+  `StickToFloor` under it (0.5 m by default; 0 sticks to nothing) and lands on it (a slope, a step down). It walks down
+  a 30° slope at 3 m/s without a frame in the air. Over a crest it was going up: it leaves the ground for a frame, and
+  lands at the next one. Off a drop longer than `StickToFloor`, it falls.
+- **Platforms.** Standing on a kinematic body, `GroundVelocity` is the velocity of the point under the character over
+  the last step (its arc when the platform turns, as `CalculateCharacterGroundVelocity` of Jolt); the recipe adds it. A
+  platform going up lifts the character by its contact. Drive the platform by `SetKinematicTarget`: its velocity is
+  the one of its motion.
+- **Pushing.** A dynamic body met gets an impulse which brings it to the speed of the character along the contact (damped
+  by 0.9), at most `MaxStrength × dt` (100 N: a ball of 11 kg or a crate of 22 kg is pushed at the walking speed), and
+  never downwards; a crate of 8 t doesn't move and stops the character. A dynamic body which hits a character is
+  stopped by its inner kinematic body: it never goes through it. The weight of the character (`Mass × g`) presses a
+  dynamic body it stands on.
+- **Characters** block each other head on (they stop 2 paddings apart), slide along each other when they cross, and
+  never go through each other. The inner body of a character is the body a ray, a sweep or an overlap hits:
+  `world.CharacterOf(hit.Body)` gives the character.
+- **Filtering.** The character collides with the bodies its inner body collides with: its layer and its mask
+  (`world.SetFilter(hero.Body(), ...)`), the pairs ignored (`IgnoreCollision`). Give the characters a layer of their
+  own to let the rays of the game skip them. The inner body enters and leaves the triggers as a kinematic body does
+  (`EventTriggerEnter` and `EventTriggerExit` with the body; `CharacterOf` gives the character); a trigger never
+  blocks the character: its contacts and its sweeps skip the triggers.
+- **Teleport** places the character with its inner body and reads its contacts there; the next update pushes it out of
+  a body it was placed in. `RemoveCharacter` removes it with its inner body.
+- **A crouch**: write `Capsule.HalfHeight` between 2 updates; the inner body shares the capsule.
+- **Cost.** On a bumpy terrain, 11 µs per update for a character walking alone (24 characters: 0.27 ms per frame), 54 µs
+  in a crowd pushing against walls and crates (24: 1.3 ms; 200: 9.8 ms), measured on one core, then 13 % less (the
+  supports and the cores of GJK made once, see ALGORITHMS.md). An update is GJK on the 6 to 10 triangles under the
+  capsule and the 2 or 3 its sweeps hit.
+
 ### Collision filtering
 Who collides with whom is decided by 3 things, tested in the broad phase before any contact is computed.
 
@@ -479,7 +554,12 @@ Call `World.Close()` when the world is not used anymore, to stop its workers.
 | Stacks wobble | Increase `Substeps` |
 | No bounce | Restitution on both bodies, impact faster than 1 m/s |
 | A body does not move | It may be asleep: call `WakeUp`. It may be locked along this axis: `LinearLock`, `AngularLock` |
-| A character falls over | Lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |
+| A character falls over | Use a `CharacterVirtual` (a capsule which never turns); for a dynamic body, lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |
+| A character falls through the floor, or flies | Add the gravity of the step to its velocity every frame, and reset the vertical velocity on the ground (the recipe of [Characters](#characters)) |
+| A character creeps down a slope | It has a horizontal velocity: give it exactly 0 to stand still. Steeper than `MaxSlopeAngle`, a slope is slid down |
+| A character stops at a small step | `StepHeight` is 0, or lower than the step |
+| A character lags behind its platform | Update it after `World.Step`, and call `UpdateGroundVelocity` before reading `GroundVelocity` |
+| A character can't push a crate | `MaxStrength` (N) × dt is the impulse of a frame: 100 N moves 20 kg; a heavy crate stops the character by design |
 | A kinematic body doesn't move | Give it a target before each step: `SetKinematicTarget`. A velocity written on it is ignored |
 | A kinematic body goes through the bodies | It was teleported or placed by hand: move it by `SetKinematicTarget`, which pushes with the velocity of the motion |
 | A platform falls asleep with its riders | It had no target: a kinematic body without target rests. Give it a target each step while it must move |

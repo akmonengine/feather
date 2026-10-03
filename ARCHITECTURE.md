@@ -9,6 +9,8 @@ feather/
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
 ├── kinematic.go        # kinematic bodies: the motion to their target, SetBodyType, Teleport
+├── charactervirtual.go      # characters: Update (slide, ground, stick to the floor, stairs), the inner body
+├── charactervirtual_move.go # the move of a character: contacts made planes, solver by time of impact, sweep, push
 ├── joint.go            # joints: distance, ball, hinge, fixed
 ├── joint_configurable.go # configurable joint: each axis locked, limited or free
 ├── articulation.go     # the anchors of the trees of joints, solved together (Baraff 1996)
@@ -141,6 +143,22 @@ one of this motion. Where it appears:
 | `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
 | `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
 
+## Characters
+`charactervirtual.go`, `charactervirtual_move.go`, see [ALGORITHMS.md](ALGORITHMS.md#characters). A `CharacterVirtual` is a capsule moved
+by the game between 2 steps (`CharacterVirtual.Update`), with the queries of the world: no rigid body moves it (the
+`CharacterVirtual` of Jolt). Where it appears:
+
+| Where | What |
+|-------|------|
+| `World.AddCharacter` | an inner kinematic body at the capsule, in `World.Bodies` and in `World.characters` (by body): the queries, the dynamic bodies and the other characters see the character through it |
+| `CharacterVirtual.Update` | between 2 steps, as a query (it panics during a step). `cancelVelocityTowardsSteepSlopes`, `moveShape`, `updateSupportingContact`, the weight on a dynamic ground, `stickToFloor`, `walkStairs`, then `placeBody` |
+| `moveShape` | 5 loops at most: `collectContacts` (the candidates of `Tree.queryCandidates` for the padded capsule within the predictive distance, `World.ShouldCollide`, the contact generator with the direction of the motion, `collideAllMoving`), `removeConflictingContacts`, `determineConstraints`, `solveConstraints`, `sweep` |
+| contact generator | `collideAllMoving` gives the direction of the motion to `collideTriangles`: on an inactive edge the normal of EPA is kept when it brakes the motion less than the normal of the triangle (the hint of `ActiveEdges::FixNormal` of Jolt, `contactNormal`). The pairs of a step give no direction: their bits are unchanged |
+| `sweep` | `sweepQuery` with `treeQuery.character`: the bodies of the pair rules, the excluded ones (the inner body, the discarded contacts), the hits at the fraction 0 and the ones which enter by less than the collision tolerance ignored |
+| `placeBody` | the inner body at the capsule, without velocity, its leaf of the broad phase updated (`Tree.update` at its index, checked), woken with its island when it moved |
+| `World.RemoveBody` | forgets the character of the body |
+| the step | the inner body is a kinematic body without target: no velocity, no pair with a static or a kinematic body, in the island of the dynamic bodies it touches, which are stopped by it (infinite mass) |
+
 ## Solver
 See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the awake dynamic and kinematic bodies
 (`bodyState`): the static and sleeping bodies share a state with no mass; a kinematic body has its own state, read by
@@ -261,6 +279,13 @@ restitution, continuous collision, islands), without allocation.
 - A kinematic body is moved by a target per step: a velocity written on it is overwritten by the step (Box2D and Jolt
   move theirs by their velocity). A kinematic body pushing a dynamic body against a static body squeezes it, as in every
   engine (PhysX documents it). The planes and the heightfields stay static.
+- A character is a standing capsule which never turns, with one padding and one supporting volume (its lower sphere),
+  up along +Y. Its inner body enters and leaves the triggers as a kinematic body, which never block it (its contacts
+  and its sweeps skip them). Pushing a body, it stands in the padding
+  of the body after its update (its plane moves at the velocity of the body) until the step moves the body: a frame
+  rendered between the two shows it up to 2 cm closer than the padding. Against a wall, every update tries a stair
+  walk and cancels it, as Jolt: an update costs 54 µs there, 11 µs on the open terrain (24 characters, before the
+  13 % taken off, see ALGORITHMS.md), and the cost is GJK on the triangles within reach.
 - The queries test every plane and every heightfield of the world: they are in no tree. A terrain cut in dozens of
   heightfields would need one.
 - `SyncQueries` costs a test per body, even for a static body which never moves: Feather doesn't know what the game

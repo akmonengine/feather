@@ -60,6 +60,8 @@ type World struct {
 	counts  []int
 	// heightfields changed during this step: their contacts are computed again
 	changed []*actor.RigidBody
+	// characters of the world, by their inner body (character.go)
+	characters map[*actor.RigidBody]*CharacterVirtual
 
 	// profile of the last step
 	profile Profile
@@ -137,6 +139,7 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 	}
 
 	w.Events.forget(body)
+	delete(w.characters, body)
 	// the bodies touching the removed body wake up (with their islands): they may have to fall
 	w.islands.remove(body)
 	w.wakeNeighbors(body)

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/akmonengine/feather/actor"
+	"github.com/akmonengine/feather/epa"
 	"github.com/akmonengine/feather/gjk"
 	"github.com/go-gl/mathgl/mgl64"
 )
@@ -40,10 +41,14 @@ const (
 type queryScratch struct {
 	// mover: the moving shape as a body, for the overlaps (penetration needs bodies)
 	mover actor.RigidBody
-	// a triangle of a surface, in world space, and its body
-	shape    triangleShape
-	triangle actor.RigidBody
-	simplex  gjk.Simplex
+	// a triangle of a surface, in world space, its body and its proxy for GJK (made once: the shape is this one, at
+	// the identity)
+	shape         triangleShape
+	triangle      actor.RigidBody
+	triangleProxy gjk.Proxy
+	simplex       gjk.Simplex
+	// epa: the buffers of EPA of the character which owns the scratch, nil for those of the pool of EPA
+	epa *epa.Scratch
 	// sweep: the query of a moving shape. It points to itself (treeQuery.sweep): it cannot live on a stack
 	sweep sweepQuery
 	// buffers of Overlap: the stack and the candidates of the trees, the cells of a terrain, the triangles of a mesh
@@ -53,12 +58,17 @@ type queryScratch struct {
 	triangles  []int32
 }
 
-var queryPool = sync.Pool{New: func() any {
+// newQueryScratch: the buffers, the triangle of the surfaces made. The queries take theirs from queryPool; a character
+// keeps its own (CharacterVirtual), as its contactScratch
+func newQueryScratch() *queryScratch {
 	s := &queryScratch{}
 	s.mover = actor.RigidBody{BodyType: actor.BodyTypeStatic}
 	s.triangle = actor.RigidBody{Transform: actor.NewTransform(), BodyType: actor.BodyTypeStatic, Shape: &s.shape}
+	s.triangleProxy = gjk.NewProxyAt(s.triangle.Transform, &s.shape)
 	return s
-}}
+}
+
+var queryPool = sync.Pool{New: func() any { return newQueryScratch() }}
 
 // sweepQuery: a shape moving through a world
 type sweepQuery struct {
@@ -123,11 +133,16 @@ func (w *World) Sweep(shape actor.ShapeInterface, start actor.Transform, transla
 	return best, found
 }
 
-// release the scratch: it keeps no body nor shape of the world alive
+// release the scratch to the pool, cleared
 func (s *queryScratch) release() {
+	s.clear()
+	queryPool.Put(s)
+}
+
+// clear the scratch: it keeps no body nor shape of the world alive
+func (s *queryScratch) clear() {
 	s.sweep = sweepQuery{}
 	s.mover.Shape = nil
-	queryPool.Put(s)
 }
 
 // sweepBody: the hit of the moving shape on the body, before the limit of the query
@@ -206,7 +221,7 @@ func (q *sweepQuery) sweepConvex(other *gjk.Proxy, otherRadius, limit float64) (
 
 // overlapPoint: a point in both the moving shape at its start and the body: the middle of their deepest points
 func (q *sweepQuery) overlapPoint(body *actor.RigidBody) mgl64.Vec3 {
-	result, ok := penetration(&q.scratch.mover, body, 0, &q.scratch.simplex)
+	result, ok := penetration(&q.scratch.mover, body, 0, &q.scratch.simplex, q.scratch.epa)
 	if !ok {
 		return q.start.Position
 	}
@@ -255,8 +270,7 @@ func (q *sweepQuery) sweepTriangle(vertices [3]mgl64.Vec3, limit float64) (Hit, 
 	}
 	s := q.scratch
 	s.shape.vertices, s.shape.aabb = vertices, box
-	proxy := gjk.NewProxyAt(s.triangle.Transform, &s.shape)
-	hit, overlap, ok := q.sweepConvex(&proxy, 0, limit)
+	hit, overlap, ok := q.sweepConvex(&s.triangleProxy, 0, limit)
 	if overlap {
 		hit.Point = q.overlapPoint(&s.triangle)
 	}

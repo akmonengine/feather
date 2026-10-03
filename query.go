@@ -75,6 +75,9 @@ type treeQuery struct {
 	hits []Hit
 	// sweep: the query moves a shape (query_sweep.go), else it is a ray
 	sweep *sweepQuery
+	// character: the sweep is the one of a character (character_move.go): the bodies it collides with, the hits it
+	// keeps
+	character *CharacterVirtual
 }
 
 // run the query on the large bodies, then on both trees
@@ -90,7 +93,7 @@ func (q *treeQuery) run() {
 // visit the body of a leaf, or a large body: its hit is kept if it comes first
 func (q *treeQuery) visit(index int32) {
 	body := q.world.Bodies[index]
-	if !q.filter.Accepts(body) {
+	if !q.filter.Accepts(body) || (q.character != nil && !q.character.sweepAccepts(body)) {
 		return
 	}
 	var found Hit
@@ -105,6 +108,9 @@ func (q *treeQuery) visit(index int32) {
 			return
 		}
 		found = Hit{Body: body, Point: q.ray.origin.Add(q.ray.translation.Mul(hit.Fraction)), Normal: hit.Normal, Fraction: hit.Fraction, Triangle: hit.Triangle}
+	}
+	if q.character != nil && !q.character.sweepKeeps(&found, q.sweep.translation) {
+		return
 	}
 	found.index = index
 	if q.all {

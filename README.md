@@ -193,6 +193,54 @@ world.Events.Subscribe(feather.EventTriggerExit, func(feather.Event) { occupants
 
 See the [physics guide](PHYSICS_GUIDE.md#triggers) and the [algorithms](ALGORITHMS.md#triggers).
 
+## Characters
+A character is a capsule the game moves at a velocity: it walks on the ground, the terrains and the meshes, slides
+along the walls, climbs the slopes under its limit and the steps under its height, stays on the floor downhill, is
+carried by a moving platform, pushes the dynamic bodies with a bounded force, and is blocked by the heavy ones and by
+the other characters. It is virtual, as `CharacterVirtual` of Jolt and the mover of Box2D v3: no rigid body moves it,
+it moves itself between 2 steps with the queries of the world, so that it goes exactly where the game decides. It is
+named as Jolt names it (Jolt keeps `Character` for its character on a rigid body, which Feather doesn't have).
+
+```go
+hero := feather.NewCharacterVirtual(actor.Capsule{HalfHeight: 0.55, Radius: 0.3}, feet.Add(mgl64.Vec3{0, 0.85, 0}))
+hero.MaxSlopeAngle = 45 * math.Pi / 180   // the defaults are those of Jolt: 50°, a step of 0.4 m, 100 N, 70 kg, the floor kept within 0.5 m
+world.AddCharacter(hero)                   // its inner kinematic body stands in the world (hero.Body())
+
+// each frame, after Step: the velocity the character wants, then its update
+world.Step(dt)
+velocity := mgl64.Vec3{0, hero.Velocity.Y(), 0}             // in the air: the fall goes on
+if hero.GroundState() == feather.CharacterOnGround {        // on the ground: the velocity of the ground (a platform)
+	hero.UpdateGroundVelocity()
+	velocity = hero.GroundVelocity()
+}
+hero.Velocity = velocity.Add(world.Gravity.Mul(dt)).Add(input) // the gravity of the step, the input of the player
+hero.Update(dt)
+```
+- **Position** is the center of the capsule; **Velocity** is written by the game and read back after the update: the
+  part towards a slope too steep is removed, the rest is kept (a fall accumulates the gravity). The gravity is the
+  game's, as in Jolt, PhysX, Box2D and Godot.
+- **Slide.** The contacts within 10 cm of the capsule (inflated by a padding of 2 cm it keeps from everything) are
+  planes with the velocity of their body; the velocity is slid along them by time of impact, and a sweep checks the
+  path: the character never enters a body, and never gets stuck in a corner.
+- **Slopes and steps.** `MaxSlopeAngle`: steeper, a surface is a wall, not climbed, slid down. `StepHeight`: a step
+  lower than it is walked (up, forward, down onto the floor). Leaving the ground downhill without going up, the
+  character sticks to the floor within `StickToFloor` (0.5 m).
+- **Ground.** `GroundState` (in the air, not supported, on steep ground, on the ground), `GroundNormal`,
+  `GroundVelocity`, `GroundBody`, `GroundPosition`: the contacts in the lower sphere of the capsule hold it.
+- **Bodies.** A dynamic body met receives an impulse which brings it to the speed of the character, at most
+  `MaxStrength` × dt and never downwards; a heavy body stops the character. The weight `Mass` × g goes to a dynamic
+  ground. A dynamic body which runs into a character is stopped by its inner body (the solver): it never goes
+  through it. A kinematic platform carries the character (its velocity in `GroundVelocity`, its arc when it turns).
+- **Characters** find each other through their inner bodies: 2 characters block each other head on, slide along
+  each other when they cross, and never go through each other.
+- **Filtering.** The layer and the mask of the inner body (`world.SetFilter(hero.Body(), layer, mask)`), the pairs
+  ignored: the rules of the pairs. Its inner body enters and leaves the triggers (`EventTriggerEnter`,
+  `EventTriggerExit` with the body: `CharacterOf` gives the character); a trigger never blocks the character.
+- `Teleport` places the character and reads its contacts there; `RemoveCharacter` removes it with its inner body;
+  `CharacterOf` gives the character of a body hit by a ray.
+
+See the [physics guide](PHYSICS_GUIDE.md#characters) and the [algorithms](ALGORITHMS.md#characters).
+
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
 It is made of substeps, soft constraints, warm starting and relaxation:
@@ -369,6 +417,14 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   `EdgeList::computeActiveEdges`, `PCMConvexVsMeshContactGeneration`), Bullet 3.25 (`btQuantizedBvh::buildTree`: the
   balance of the split), Ericson 6.2.1 (top-down construction of a bounding volume hierarchy), Möller & Trumbore, Fast,
   Minimum Storage Ray/Triangle Intersection (1997)
+- Characters: Jolt 5.3 (`CharacterVirtual`: `GetContactsAtPosition`, `DetermineConstraints`, `SolveConstraints`,
+  `MoveShape`, `UpdateSupportingContact`, `HandleContact`, `WalkStairs`, `StickToFloor`, `ExtendedUpdate`,
+  `CancelVelocityTowardsSteepSlopes`, `CalculateCharacterGroundVelocity`; `ActiveEdges::FixNormal`; the samples
+  `CharacterVirtualTest::HandleInput` & `OnContactSolve`), PhysX 5.11 (`PxController`, `PxControllerDesc`,
+  `SweepTest::moveCharacter` & `doSweepTest`, `Controller::rideOnTouchedObject` in
+  `physxcharacterkinematic/src/CctCharacterController.cpp`), Box2D v3.1 (`b2World_CastMover`, `b2World_CollideMover`,
+  `b2SolvePlanes`, `b2ClipVector`, `samples/sample_character.cpp`), Godot 4.4 (`CharacterBody3D::move_and_slide`,
+  `_move_and_slide_grounded`, `_snap_on_floor`, `_set_collision_direction`, `scene/3d/physics/character_body_3d.cpp`)
 - Kinematic bodies: PhysX 5.6 (`PxRigidDynamic::setKinematicTarget`, `Sc::BodySim::calculateKinematicVelocity` &
   `updateKinematicPose` in `ScKinematics.cpp`, the guide Rigid Body Dynamics > Kinematic Actors,
   https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyDynamics.html), Jolt 5.3 (`Body::MoveKinematic`,
@@ -387,12 +443,15 @@ Feather is written from the publications, the documentation and the source code 
 - [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains and of
   the meshes, the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks), the cast of a
   fast body against every body and the relative cast of two fast bodies, the hull centered on its center of mass with
-  the inertia of its volume, the supporting face of a hull, the weld of the vertices of a mesh
+  the inertia of its volume, the supporting face of a hull, the weld of the vertices of a mesh, the virtual character
+  (its contacts made planes, its solver by time of impact, its stairs, its floor, its padding, its strength)
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
   the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
   the conservative advancement of the time of impact, the balance of the splits of the tree of a mesh
 - [PhysX](https://github.com/NVIDIA-Omniverse/PhysX), by NVIDIA: the speculative CCD, the kinematic actors (a target
-  per step, reached at the end of the step, no velocity without target), the vertex limit of a convex hull
+  per step, reached at the end of the step, no velocity without target), the vertex limit of a convex hull, the
+  kinematic actor under a character controller
+- [Godot](https://github.com/godotengine/godot): a character standing still on a slope stays there (`floor_stop_on_slope`)
 
 ## Contributing Guidelines
 

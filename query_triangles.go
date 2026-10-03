@@ -118,6 +118,5 @@ func (s *queryScratch) overlapsTriangle(core *gjk.Proxy, radius float64, bounds 
 	if !s.shape.aabb.Overlaps(bounds) {
 		return false
 	}
-	proxy := gjk.NewProxyAt(s.triangle.Transform, &s.shape)
-	return coresOverlap(core, radius, &proxy, 0)
+	return coresOverlap(core, radius, &s.triangleProxy, 0)
 }
