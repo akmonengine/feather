@@ -512,21 +512,104 @@ joint (as in PhysX).
 ## Heightfield
 The terrain is a grid of heights, split in 2 triangles per cell (along the diagonal from (x, z) to (x+1, z+1)).
 The body is tested against the triangles under its AABB, one by one: the grid is cut in blocks of 16x16 cells with
-their lowest and highest heights, to skip the blocks far from the body.
+their lowest and highest heights, to skip the blocks far from the body. Jolt keeps a hierarchy of such blocks
+(`HeightFieldShape`, `RangeBlock`), PhysX and Box3D a flat grid (`b3QueryHeightField`); none uses a tree of triangles
+for a terrain.
 
-Each triangle is tested with GJK/EPA:
-- **Face**: always, the contact of the body with the plane of the triangle (`CollideWithPlane`), limited to the
-  points above the triangle. On a flat terrain, a body behaves exactly as on a plane.
-- **Inner edges**: a body sliding on the terrain must not hit the edges between the triangles. Each edge is active if it
-  is on a border or a hole, or if it bends down (convex) by more than 5° (like Jolt, `ActiveEdges.h`). A contact on an inactive
-  edge (or vertex) takes the normal of its triangle. If the body is beside the triangle, above the edge, it keeps the
-  witness point of EPA, only if no other triangle has a contact with this normal.
-- **Active edges** (a ridge, a border): also the contact of EPA, with its normal. A capsule lying across a ridge touches
-  the ridge, and its ends can fall on both faces.
+**Edges** (`Heightfield.cellEdges`). An edge is *convex* if the triangle on its other side bends down, or if there is
+none (a border, a hole), and *active* if it is convex by more than 5° (`ActiveEdges::IsEdgeActive` of Jolt with
+`mActiveEdgeCosThresholdAngle`, `HeightFieldShape.h:110`; `cos5Deg` of `b3CreateHeightField`, Box3D
+`src/height_field.c:192`). Only an active edge can push a body sideways.
 
-The contacts are then grouped by normal: the contacts of triangles with less than 5° between their normals form a patch,
-a manifold of 4 points. A body touches the terrain with 8 patches at most (`MaxManifoldsPerPair`): a box in a valley
-gets one patch per slope. The patches of the deepest contacts are kept, the others are dropped (like Jolt).
+**Each triangle** (`collideTriangle`), with GJK/EPA as the only detection:
+1. **Seen from below, it is ignored**: the center of the body is under its plane (Jolt
+   `CollideConvexVsTriangles.cpp:52-54`, Box3D `triangle_manifold.c:380-385`, PhysX
+   `GuPCMContactConvexCommon.cpp:238-240`). The terrain is a surface, without thickness (`CollidePoint` of the height
+   field of Jolt is empty, `thickness = 0` in `GuHeightField.h:847` of PhysX): a body whose center went through it is
+   not pushed back, it falls under the terrain. The continuous collision is what keeps a fast body above it.
+2. **Face**: the vertices of the body over the triangle, along the normal of the triangle. The face of the body is the
+   one it shows to a plane of this normal (`CollideWithPlane` without limit of distance): the 4 corners of a face of a
+   box, both ends of a capsule. It is taken whatever its tilt, as the supporting face of Jolt
+   (`BoxShape::GetSupportingFace`); a capsule gives both ends at any tilt, where Jolt asks them within 2 cm along the
+   normal (`cCapsuleProjectionSlop`, `CapsuleShape.cpp:204-212`). Seen along the normal, the face is cut by the 3
+   sides of the triangle (Sutherland-Hodgman): the part of the face over the triangle, the polygon
+   `ManifoldBetweenTwoFaces` of Jolt gets by cutting the triangle by the face (`ManifoldBetweenTwoFaces.cpp:194`);
+   a segment is cut the same way (`b3CollideTriangleAndCapsule` of Box3D: `ClipPolyVsEdge` of Jolt, `ClipPoly.h`, can
+   give a point out of the triangle when the capsule ends beside it). Each point is at its distance to the plane of the
+   triangle along the normal, kept under the margin of the pair (Jolt adds `mManifoldTolerance`, 1 mm). On a flat
+   terrain these points are the points of the body on a plane.
+3. **Flat ridges**: the points where the face of the body crosses a convex edge which is not active (a ridge folded by
+   less than 5°), along the normal of the triangle. The side of a capsule, the face of a box laid across such a ridge
+   touch it there, with none of their vertices: before, the ridge went in the body by `half length x tan(fold / 2)`,
+   up to 10.7 mm for a body of 0.5 m. The points cut on a flat edge or on an edge bent inwards are not kept (Jolt keeps
+   all the points of the polygon): they are between vertices of the body, and say nothing more.
+4. **Closest point** (GJK/EPA: the closest points of the triangle and of the body, their normal, their depth). Its
+   normal follows the rule of `ActiveEdges::FixNormal` of Jolt (`ActiveEdges.h:42-111`), without its part on the
+   motion of the body: the normal of EPA is kept if the 3 edges of the triangle are active, if the triangle has an
+   active edge and both normals are closer than 1°, or if the point is on an active edge or on a vertex of an active
+   edge (barycentric coordinates under 1e-4); else the normal is the one of the triangle. The point and its depth are
+   kept in both cases (Jolt), the separation is measured along the normal kept (`ContactConstraintManager.cpp:69`).
+   Jolt also keeps the normal of EPA when it brakes the motion of the body over the terrain less than the normal of
+   the triangle (the hint `mActiveEdgeMovementDirection` of `PhysicsSystem.cpp`: a body leaving a triangle is not held
+   by its plane). Feather does not: the margin of Jolt is fixed (`mSpeculativeContactDistance`, 2 cm, `PhysicsSettings.h:50`, the
+   `mMaxSeparationDistance` of its collisions, `PhysicsSystem.cpp:1108`),
+   the speculative margin of Feather grows with the speed of the body (`reach`: 10 cm at 5 m/s), and brings the
+   vertices and the edges of the triangles around within it, where every normal tilted from the vertical brakes a fall
+   less than the plane. A box falling flat on a flat terrain, straight on a vertex of the grid, had 5 contacts at the
+   same corner: one straight up, 4 on the edges of the triangles around, tilted by 10 to 60°; nearly parallel to the
+   first, they took impulse from it over the sub-steps (9.4 N·s, their planes 2 mm under the ground), and the box landed
+   2 mm deep (0.3 mm now, the deepest of 560 boxes dropped alone on a flat terrain). PhysX and Box3D have no such
+   rule (`PCMContactConvexMesh`, `b3ComputeMeshManifolds`). What the rule gives in Jolt, a box sliding across an active
+   ridge not held by the plane it leaves, comes from the points cut on an active edge, never points of the face
+   (below).
+   - With the normal of the triangle, the closest point is a point of its face (a sphere has no other), kept as the
+     vertices of the body are, or a point of its edge, the body beside the triangle, above this edge: kept if it is
+     deeper than the other points of the triangle (the end of a capsule right above a ridge is over neither of its
+     triangles, along their normals).
+   - With another normal, it is the contact of an **edge**: the points where the face of the body crosses the active
+     edges of the triangle, along this normal, or the closest point alone (a sphere, an edge of a box across the
+     ridge). The points cut on an active edge are never points of the face: the plane of a triangle stops at its edge,
+     a box sliding across a ridge must not be held by the plane of the slope it leaves.
+
+**Patches** (`collideHeightfield`). The contacts are sorted, the deepest first, and grouped by normal: the contacts whose
+normals differ by less than 5° form a patch, a manifold of 4 points (`mContactNormalCosMaxDeltaRotation` of Jolt,
+`PhysicsSettings.h:74`; `clusterThreshold` 0.996 of Box3D, `mesh_contact.c:856`). The normal of a patch is the one of
+its deepest contact (Jolt takes the mean of the normals, `PhysicsSystem.cpp:1186`). 3 choices of Feather:
+- **The vertices of the body and the edges of the terrain don't share a manifold**: one patch per normal for the points
+  of the faces, one for the points on the edges (flat ridges, active edges). Jolt and Box3D group by normal alone and
+  keep 4 points out of all of them (`PruneContactPoints`, `b3ReduceCluster`). With 4 points for both, a point on an
+  edge takes the place of a corner: a plate resting flat on a slope lost 2 corners to 2 points of its face over an edge
+  of the grid, tipped, and sank by 10 mm while the pair cache kept its contact; boxes dropped alone on a flat terrain
+  landed up to 21 mm deep (0.3 mm with their corners, as on a plane).
+- **A closest point on an edge is kept if it is the deepest point along its normal** (no patch within 5° has a point
+  as deep). A body resting on a triangle near an edge also has a closest point with each triangle around, on this
+  edge: one more point per triangle, which moves the friction center (a sphere would not roll on a flat terrain as on
+  a plane). Box3D and PhysX drop such a point when a triangle with a contact of its face owns the edge
+  (`b3ComputeMeshManifolds`, `mesh_contact.c:654-832`; `PCMConvexVsMeshContactGeneration::generateLastContacts`).
+  Feather compares the depths: with the ownership alone, the deepest point of a body above a ridge is dropped when the
+  rest of the body gives a contact to the faces around (the cause of the bodies found 5 to 19 cm in the terrain: a
+  point 56 mm deep dropped for a point 0.1 mm deep). A closest point inside a triangle is a point of its face: kept
+  whatever its depth, as the vertices of a body are (Box3D and PhysX keep it too, `mesh_contact.c:653-660`,
+  `GuPCMContactSphereMesh.cpp:305-319`: a point of a face owns no edge). Dropped as the others, it left a sphere rolling
+  to a triangle folded by less than 5° without a contact with it until it was the deepest, and the sphere sank by
+  3 mm: 70 spheres out of 2800 dropped alone on the hills landed deeper than 2 mm, 22 now.
+- **8 patches at most** per pair (`MaxManifoldsPerPair`; 32 manifolds in Jolt, `PhysicsSystem.cpp:1133`): the deepest
+  are kept. Measured with 32: the same depths for the spheres and the capsules, 47 boxes out of 800 landing deeper
+  than 5 mm instead of 52.
+
+The 4 points of a patch (`reducePatch`) follow the steps of `Reduce`: the deepest, the furthest from it, the points
+adding the most area. Among the points as deep as the deepest, the first one is an end of the contact (the furthest
+along a tangent, as the first step of `b3ReduceManifoldPoints`), and a point is added only if it widens the contact by
+`SpeculativeDistance`.
+
+Measured (`bench`, the depth of a box counts the terrain in its faces): a capsule and a box across a ridge folded by 0
+to 10° rest less than 0.1 mm in it (2.2 to 10.8 mm before, under 5°); 1000 piles of 60 bodies on hills rest at 0.28 mm
+(median of the deepest body; 3.3 mm before) and land at 7.9 mm (15.9 mm before); the same piles on a flat terrain rest
+at 0.13 mm and land at 1.7 mm, as on a plane. What is left at the landing is the limit of the contacts computed once
+per step, as Jolt, Box3D and PhysX compute them (see the limitations in ARCHITECTURE.md): a point of a tumbling body
+moves over another triangle during the step, and has no contact with it before the next step. With the contacts
+computed at each of the 8 sub-steps, the deepest of 60 bodies dropped alone lands at 3.7 mm instead of 8.1 mm, and
+no sphere deeper than 1 mm.
 
 ## Continuous collision
 **Speculative contacts**: against a static body, the contacts are created up to `SpeculativeDistance` + the relative

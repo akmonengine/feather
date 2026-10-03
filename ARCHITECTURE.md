@@ -13,7 +13,7 @@ feather/
 ├── articulation.go     # the anchors of the trees of joints, solved together (Baraff 1996)
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
-├── collision_heightfield.go # heightfields: triangles, inner edges, patches
+├── collision_heightfield.go # heightfields: triangles (faces, edges), patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
 ├── tree.go             # broad phase: dynamic AABB trees, the pairs kept from a step to the next
 ├── filter.go           # collision filtering: layers & masks, ignored pairs, linked bodies, the filter of the queries
@@ -49,7 +49,7 @@ Step(dt)
 | Pair | Method |
 |------|--------|
 | any shape - plane | `CollideWithPlane` of the shape |
-| any shape - heightfield | each triangle under the body: GJK + EPA, inner edges, patches (up to 8 manifolds) |
+| any shape - heightfield | each triangle under the body, seen from above: the vertices of the body over its face, GJK + EPA for its edges; patches by normal (up to 8 manifolds) |
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
 | sphere / capsule - other shape | GJK distance between the core (a point, a segment) and the shape, plus the radius; EPA only if the core is inside |
 | other pairs | GJK + EPA, then clipping of the contact points |
@@ -210,13 +210,18 @@ restitution, continuous collision, islands), without allocation.
 ## Current limitations
 - The broad phase is a pair of dynamic AABB trees (static and dynamic bodies), the dynamic AABBs enlarged by a margin:
   a sleeping body costs nothing (the planes & the heightfields are not in the trees, they are tested with every awake body).
-- A heightfield is a surface: a body entirely under it is not pushed up.
-- The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
-  triangle during the step, and sink by a few mm before the next step.
+- A heightfield is a surface, without thickness: a triangle whose plane is above the center of a body is ignored (as
+  Jolt, Box3D and PhysX do). A body whose center went under the surface is not pushed up, even if it still crosses it:
+  it falls under the terrain. The continuous collision keeps the fast bodies above it; a body must not be placed with
+  its center under the terrain.
+- The contacts are computed once per step: on a rough terrain, a point of a tumbling body moves over another triangle
+  during the step, and has no contact with it before the next step. On hills folded by 18° between 2 triangles (the
+  median of the terrain of the bench), the deepest of 60 bodies dropped alone lands 8 mm deep (the median; under
+  0.3 mm on a flat terrain), and 3.7 mm with the contacts computed at each sub-step (480 Hz with 1 sub-step); at rest
+  it is 0.3 mm deep. Jolt, Box3D and PhysX compute their contacts once per step too.
+- A body has 8 manifolds at most against a terrain: the deepest ones.
 - The friction around the normal comes from the lever arms of the points: a ball spinning on itself on its single point
   of contact never stops (no sleep), unless its material has a `SpinningResistance` (0 by default).
-- A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
-  the feature of the body above the triangle, the middle of the capsule is missed.
 - The restitution is applied once per step, with the approach velocity of the impact: a body not round (box,
   capsule), bouncy (`e` over 0.5) and spinning fast (10-20 rad/s) can bounce higher than it fell. Measured at 60 Hz
   with 8 substeps: up to +21 % of energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.

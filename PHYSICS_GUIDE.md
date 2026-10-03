@@ -316,6 +316,8 @@ world.AddBody(terrain)
 world.UpdateHeightfield(terrain, minX, minZ, maxX, maxZ)
 ```
 - A heightfield is static. The body is at the center of the grid, the heights along its Y axis.
+- The terrain is a surface, without thickness: a body is held while its center is above it. Placed with its center
+  under the surface, it falls under the terrain.
 - The terrain is made of triangles: a finer grid gives finer contacts (a 2048x2048 grid follows the ground better than
   512x512), the bodies slide on the flat parts without hitting the edges between the triangles.
 - `Holes[x*(zSamples-1)+z]`: a cell without triangles (a cave, a tunnel entrance).

@@ -13,24 +13,32 @@ import (
 )
 
 const (
-	// MaxManifoldsPerPair: a body on a terrain touches it with 8 normals at most (8 patches):
-	// on a rough terrain, both ends of a capsule can touch 4 triangles each
+	// MaxManifoldsPerPair: a body on a terrain touches it with 8 normals at most (8 patches): on a rough terrain, both
+	// ends of a capsule can touch 4 triangles each. Jolt keeps 32 manifolds per pair (PhysicsSystem.cpp), PhysX 6
+	// (GU_MAX_MANIFOLD_SIZE); the deepest patches are kept, the ones left out are the shallowest
 	MaxManifoldsPerPair = 8
 
 	// patchCos: the contacts of 2 triangles whose normals differ by less than 5° are in the same patch: cos(5°)
+	// (mContactNormalCosMaxDeltaRotation of Jolt)
 	patchCos = 0.99619469809174553229501040247389
 
-	// triangleFaceCos: the contact of a triangle is a face contact if its normal is the normal of the triangle (0.5°)
-	triangleFaceCos = 0.99996
+	// nearFaceCos: a contact normal closer than 1° to the normal of its triangle is kept as it is: cos(1°), the value
+	// of ActiveEdges::FixNormal of Jolt
+	nearFaceCos = 0.999848
 
-	// edgeBarycentric: a point on a triangle with a barycentric coordinate under this value is on an edge
-	edgeBarycentric = 1e-3
+	// edgeBarycentric: a point of a triangle with a barycentric coordinate under this value is on an edge, over 1 minus
+	// this value on a vertex (cEpsilon of ActiveEdges::FixNormal of Jolt)
+	edgeBarycentric = 1e-4
 
 	// weldDistance: 2 points of a patch closer than this distance are the same point (m)
 	weldDistance = 1e-4
 
-	// insideTriangle: a point on a side of a triangle is inside (barycentric coordinate)
-	insideTriangle = -1e-9
+	// clipEpsilon: a point on a side of a triangle is over the triangle (m)
+	clipEpsilon = 1e-9
+
+	// maxClipVertices: the face of a body has 8 vertices at most (ShapeInterface.GetContactFeature), each of the 3 sides
+	// of a triangle adds one
+	maxClipVertices = 11
 )
 
 // triangleShape is a triangle of a heightfield, in world space: its body has the identity transform
@@ -77,14 +85,17 @@ func (t *triangleShape) CastRay(origin, translation mgl64.Vec3, maxFraction floa
 	return actor.RayHit{}, false
 }
 
-// triangleContact: the points of a triangle, in heightfieldScratch.points, with their normal (from the terrain to the body).
-// A witness contact is only used if its patch has no other contact
+// triangleContact: points of a triangle, in heightfieldScratch.points, with their normal (from the terrain to the
+// body) and the separation of the deepest one
 type triangleContact struct {
 	normal     mgl64.Vec3
 	first      int
 	count      int
 	separation float64
-	witness    bool
+	// edge: the points of the body on the edges of the triangle, else its vertices over the face of the triangle
+	edge bool
+	// closest: the closest point of the body alone
+	closest bool
 }
 
 // heightfieldScratch: the buffers of a collision with a heightfield, reused to avoid the allocations
@@ -92,12 +103,14 @@ type heightfieldScratch struct {
 	shape    triangleShape
 	triangle actor.RigidBody
 	simplex  gjk.Simplex
-	manifold constraint.Manifold
 	cells    []int32
 	plane    actor.PlaneContact
 	contacts []triangleContact
 	points   []constraint.ContactPoint
 	patches  [MaxManifoldsPerPair][]constraint.ContactPoint
+	clip     [2][maxClipVertices]mgl64.Vec3
+	// sides: the sides of the triangle each vertex of clip was cut on (bit e), 0 for a vertex of the body
+	sides [2][maxClipVertices]uint8
 }
 
 var heightfieldPool = sync.Pool{New: func() any {
@@ -107,11 +120,14 @@ var heightfieldPool = sync.Pool{New: func() any {
 }}
 
 // collideHeightfield writes in out the patches of contact between the terrain and the body, and returns their count.
-// Each triangle under the body is tested with GJK/EPA. A contact on an inactive edge (between 2 triangles almost flat,
-// or bent inwards) takes the normal of its triangle: a body sliding on the terrain doesn't hit the inner edges.
-// A contact with the face of a triangle is the contact with its plane (CollideWithPlane of the shape), limited to
-// the triangle: on a flat terrain, the bodies behave exactly as on a plane.
-// The contacts are then grouped by normal: one patch (a manifold of 4 points) per normal.
+// Each triangle under the body, seen from above, is tested with GJK/EPA (collideTriangle): it gives the vertices of the
+// body over its face, and the points of the body on its edges (a ridge in the face of a box, an active edge).
+// The contacts are then grouped by normal: one patch (a manifold of 4 points) per normal, for the vertices of the body,
+// and one for the edges of the terrain. On a flat terrain a body has the manifold it has on a plane: its vertices.
+// Jolt and Box3D group by normal alone, and keep 4 points out of all of them (PruneContactPoints, b3ReduceCluster).
+// In one manifold of 4 points, the points on the edges of the terrain take the place of a corner of the body: a plate
+// resting flat lost 2 corners to 2 points of its face over an edge of the grid, and sank by 10 mm on this side while
+// the pair cache kept its contact.
 // The order of the pair is kept: if the terrain is B, the normals point from the body to the terrain
 func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, object *actor.RigidBody, margin float64, terrainIsB bool, out []constraint.Manifold) int {
 	s := heightfieldPool.Get().(*heightfieldScratch)
@@ -132,7 +148,7 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 			}
 			s.shape.aabb = triangleAABB(s.shape.vertices)
 			if s.shape.aabb.Overlaps(bounds) {
-				s.collideTriangle(object, edges, margin)
+				s.collideTriangle(object, edges&0b111, edges>>3, margin)
 			}
 		}
 	}
@@ -141,25 +157,50 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 	}
 
 	// ========== PATCHES ==========
-	// the deepest contacts first: they give the normal of their patch, the shallowest are dropped (as in Jolt)
+	// the deepest contacts first: they give the normal of their patch, the shallowest are dropped (Jolt replaces its
+	// shallowest manifold, and gives a manifold the mean of its normals). A closest point comes after the points as
+	// deep as it
 	slices.SortStableFunc(s.contacts, func(a, b triangleContact) int {
+		depthA, depthB := a.separation, b.separation
+		if a.closest {
+			depthA += epa.EPATieTolerance
+		}
+		if b.closest {
+			depthB += epa.EPATieTolerance
+		}
 		switch {
-		case a.separation < b.separation:
+		case depthA < depthB:
 			return -1
-		case a.separation > b.separation:
+		case depthA > depthB:
 			return 1
 		}
 		return 0
 	})
 	var normals [MaxManifoldsPerPair]mgl64.Vec3
-	var witnesses [MaxManifoldsPerPair]int
+	var edges [MaxManifoldsPerPair]bool
 	patches := 0
-	for c, contact := range s.contacts {
-		best, bestCos := -1, math.Inf(-1)
+	for _, contact := range s.contacts {
+		best, bestCos, held := -1, math.Inf(-1), false
 		for k := 0; k < patches; k++ {
-			if cos := normals[k].Dot(contact.normal); cos > bestCos {
+			cos := normals[k].Dot(contact.normal)
+			held = held || cos >= patchCos
+			if edges[k] == contact.edge && cos > bestCos {
 				best, bestCos = k, cos
 			}
+		}
+		if contact.closest && contact.edge && held {
+			// a closest point on an edge is the point of the terrain several triangles see, on the edge they share: it
+			// is kept if it is the deepest point along its normal. A body resting on a triangle near an edge would have
+			// one more point per triangle around, moving its friction center (a sphere would not roll on a flat terrain
+			// as on a plane): Box3D and PhysX drop such a point when a triangle with a contact of its face owns the edge
+			// (b3ComputeMeshManifolds, generateLastContacts). The depth is compared instead: the end of a capsule right
+			// above a ridge is over neither of its triangles, along their normals, while the rest of the capsule gives
+			// them a contact of their face. Its deepest point was dropped this way, and bodies sank by centimetres.
+			// A closest point inside the triangle is a point of its face (a sphere): kept whatever its depth, as the
+			// vertices of a body are (Box3D and PhysX keep it too: a point of a face owns no edge). It was dropped when
+			// a patch within 5° had a deeper point: a sphere rolling to a triangle folded by less than 5° had no contact
+			// with it until it was the deepest, and sank by 3 mm
+			continue
 		}
 		if bestCos < patchCos {
 			// a new normal: a new patch, unless the deepest patches are already found
@@ -167,26 +208,12 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 				continue
 			}
 			best = patches
-			normals[best] = contact.normal
+			normals[best], edges[best] = contact.normal, contact.edge
 			s.patches[best] = s.patches[best][:0]
-			witnesses[best] = -1
 			patches++
-		}
-		if contact.witness {
-			// the deepest witness contact of the patch, in case it has no other contact
-			if witnesses[best] < 0 {
-				witnesses[best] = c
-			}
-			continue
 		}
 		for _, point := range s.points[contact.first : contact.first+contact.count] {
 			s.patches[best] = weld(s.patches[best], point)
-		}
-	}
-	for k := 0; k < patches; k++ {
-		if len(s.patches[k]) == 0 {
-			witness := s.contacts[witnesses[k]]
-			s.patches[k] = append(s.patches[k], s.points[witness.first])
 		}
 	}
 
@@ -198,80 +225,333 @@ func collideHeightfield(terrain *actor.RigidBody, field *actor.Heightfield, obje
 			m.Reset(object, terrain)
 			m.Normal = normals[k].Mul(-1)
 		}
-		epa.Reduce(s.patches[k], normals[k], m)
+		reducePatch(s.patches[k], normals[k], m)
 	}
 	return patches
 }
 
-// collideTriangle adds the contact of the body with the triangle of s.shape
-func (s *heightfieldScratch) collideTriangle(object *actor.RigidBody, edges uint8, margin float64) {
+// collideTriangle adds the contacts of the body with the triangle of s.shape:
+//   - a triangle seen from below is ignored: the center of the body is under its plane (CollideConvexVsTriangles of
+//     Jolt, b3ComputeMeshManifolds of Box3D, PCMConvexVsMeshContactGeneration of PhysX). The terrain is a surface: a
+//     body whose center went through it is not pushed back
+//   - the face: the vertices of the body over the triangle, along the normal of the triangle (clipFace), as against a
+//     plane. Whatever the closest point is: a corner which turns towards the face of a triangle during the step has
+//     its contact
+//   - the ridges too flat to be active edges (inactive, bent outwards): the points where the face of the body crosses
+//     them, along the normal of the triangle. The side of a capsule, the face of a box laid across such a ridge touch
+//     it there, with no vertex
+//   - GJK/EPA gives the closest points of the triangle and of the body, their normal and their depth. Their normal is
+//     the one of EPA, or the one of the triangle on an inactive edge (contactNormal)
+//   - with the normal of the triangle, the closest point is one more point of the triangle, if it is deeper than the
+//     others: a point of its face (a sphere), or of its edge with the body beside the triangle, above this edge
+//   - with another normal (an active edge), the points where the body crosses the active edges, along this normal, or
+//     the closest point alone (a sphere, an edge of a box across the edge)
+//
+// Every separation is measured along the normal of its contact.
+// activeEdges, convexEdges: bit e for the edge from the vertex e to the vertex e+1
+func (s *heightfieldScratch) collideTriangle(object *actor.RigidBody, activeEdges, convexEdges uint8, margin float64) {
+	vertices := &s.shape.vertices
+	faceNormal := vertices[1].Sub(vertices[0]).Cross(vertices[2].Sub(vertices[0])).Normalize()
+	if faceNormal.Dot(object.Transform.Position.Sub(vertices[0])) < 0 {
+		return
+	}
 	result, ok := penetration(&s.triangle, object, margin, &s.simplex)
 	if !ok {
 		return
 	}
 
-	vertices := s.shape.vertices
-	faceNormal := vertices[1].Sub(vertices[0]).Cross(vertices[2].Sub(vertices[0])).Normalize()
-
 	// ========== FACE ==========
-	// the points of the body above the triangle, closer to its plane than the margin
 	first := len(s.points)
-	s.plane = object.Shape.CollideWithPlane(faceNormal, -faceNormal.Dot(vertices[0]), object.Transform, margin, s.plane[:0])
-	for _, point := range s.plane {
-		if u, v, w := barycentric(point.Position, vertices[0], vertices[1], vertices[2]); u >= insideTriangle && v >= insideTriangle && w >= insideTriangle {
-			s.points = append(s.points, constraint.ContactPoint{Position: point.Position, Separation: point.Separation})
-		}
-	}
-	faceFound := s.addContact(faceNormal, first, false)
+	s.clipFace(object, faceNormal, faceNormal, true, 0, margin)
+	faceDeepest := s.addContact(faceNormal, first, false, false)
 
-	// ========== EDGE ==========
-	// the body touches an active edge or vertex from above: the contact of EPA, with its normal
-	onTriangle := result.WitnessA.Sub(result.Normal.Mul(margin))
-	cos := result.Normal.Dot(faceNormal)
-	if cos < triangleFaceCos && cos > 0 && touchesEdge(vertices, onTriangle, edges&0b111) {
+	// ========== FLAT RIDGES ==========
+	// across a flat edge, or one bent inwards, the vertices of the body on both sides say everything. Across an active
+	// edge, the point belongs to the contact of this edge: the plane of the triangle stops at its edge, a face sliding
+	// across a ridge must not be held by the plane of the slope it leaves
+	if ridges := convexEdges &^ activeEdges; ridges != 0 {
 		first = len(s.points)
-		epa.Manifold(&s.triangle, object, result, margin, &s.manifold)
-		s.points = append(s.points, s.manifold.Points[:s.manifold.Count]...)
-		s.addContact(result.Normal, first, false)
+		s.clipFace(object, faceNormal, faceNormal, false, ridges, margin)
+		faceDeepest = math.Min(faceDeepest, s.addContact(faceNormal, first, true, false))
+	}
+
+	// ========== CLOSEST POINT ==========
+	// WitnessA is on the triangle grown by the margin
+	onTriangle, onBody := result.WitnessA.Sub(result.Normal.Mul(margin)), result.WitnessB
+	touched := touchedEdges(vertices, onTriangle)
+	normal := contactNormal(faceNormal, activeEdges, touched, result.Normal)
+	separation := onBody.Sub(onTriangle).Dot(normal)
+	closest := constraint.ContactPoint{Position: onBody.Sub(normal.Mul(separation / 2)), Separation: separation}
+	first = len(s.points)
+	if normal == faceNormal || normal.Dot(faceNormal) > nearFaceCos {
+		// a point of the face, inside the triangle (a sphere), or a point on an inactive edge, the body beside the
+		// triangle: with the points of the edges
+		if separation < faceDeepest-epa.EPATieTolerance {
+			s.points = append(s.points, closest)
+			s.addContact(normal, first, touched != 0, true)
+		}
 		return
 	}
 
-	if !faceFound {
-		// the body is beside the triangle, above an inactive edge: the witness point, with the normal of the face,
-		// only used if no other triangle has a contact with this normal
-		first = len(s.points)
-		onB := result.WitnessB
-		s.points = append(s.points, constraint.ContactPoint{Position: onTriangle.Add(onB).Mul(0.5), Separation: margin - result.Depth})
-		s.addContact(faceNormal, first, true)
+	// ========== EDGE ==========
+	// the normal of EPA: on an active edge
+	s.clipFace(object, normal, faceNormal, false, activeEdges, margin)
+	if len(s.points) > first {
+		s.addContact(normal, first, true, false)
+		return
 	}
+	s.points = append(s.points, closest)
+	s.addContact(normal, first, true, true)
 }
 
-// addContact: the points from first to the end of s.points, with their normal. Returns false if there is no point
-func (s *heightfieldScratch) addContact(normal mgl64.Vec3, first int, witness bool) bool {
-	count := len(s.points) - first
-	if count == 0 {
-		return false
-	}
+// addContact: the points from first to the end of s.points are a contact. Returns the separation of its deepest point,
+// +Inf without point
+func (s *heightfieldScratch) addContact(normal mgl64.Vec3, first int, edge, closest bool) float64 {
 	deepest := math.Inf(1)
 	for _, point := range s.points[first:] {
 		deepest = math.Min(deepest, point.Separation)
 	}
-	s.contacts = append(s.contacts, triangleContact{normal: normal, first: first, count: count, separation: deepest, witness: witness})
-	return true
+	if len(s.points) > first {
+		s.contacts = append(s.contacts, triangleContact{normal: normal, first: first, count: len(s.points) - first, separation: deepest, edge: edge, closest: closest})
+	}
+	return deepest
 }
 
-// touchesEdge: the point is on one of the edges of the triangle (bit e for the edge from the vertex e to the vertex e+1),
-// or on a vertex of these edges
-func touchesEdge(vertices [3]mgl64.Vec3, p mgl64.Vec3, edges uint8) bool {
-	u, v, w := barycentric(p, vertices[0], vertices[1], vertices[2])
-	weights := [3]float64{u, v, w}
-	for e := 0; e < 3; e++ {
-		// the edge e goes from the vertex e to the vertex e+1: the weight of the opposite vertex is 0
-		if weights[(e+2)%3] <= edgeBarycentric && edges&(1<<e) != 0 {
-			return true
+// touchedEdges: the edges of the triangle the point is on (bit e for the edge from the vertex e to the vertex e+1): one
+// edge, the 2 edges of a vertex, 0 inside the triangle. The barycentric coordinates of ActiveEdges::FixNormal of Jolt:
+// the edge e is opposite to the vertex e+2
+func touchedEdges(vertices *[3]mgl64.Vec3, point mgl64.Vec3) uint8 {
+	u, v, w := barycentric(point, vertices[0], vertices[1], vertices[2])
+	switch {
+	case u > 1-edgeBarycentric:
+		return 0b101
+	case v > 1-edgeBarycentric:
+		return 0b011
+	case w > 1-edgeBarycentric:
+		return 0b110
+	case u < edgeBarycentric:
+		return 0b010
+	case v < edgeBarycentric:
+		return 0b100
+	case w < edgeBarycentric:
+		return 0b001
+	}
+	return 0
+}
+
+// contactNormal: the normal of the contact of a body with a triangle, given the normal of EPA and the edges of the
+// triangle its point is on (touchedEdges). A body sliding on the terrain must not hit the edges between its triangles:
+// on an inactive edge (between 2 triangles almost flat, or bent inwards) the normal is the one of the triangle. The rule
+// of ActiveEdges::FixNormal of Jolt (ActiveEdges.h), without its part on the motion of the body. The normal of EPA is
+// kept:
+//   - if the 3 edges of the triangle are active
+//   - if the triangle has an active edge, and the normal of EPA is closer than 1° to its normal
+//   - if the point is on an active edge, or on a vertex of an active edge
+//
+// Jolt also keeps it when it brakes the motion of the body less than the normal of the triangle (a body leaving a
+// triangle is not held by its plane): its margin is fixed (2 cm, mSpeculativeContactDistance), the speculative margin
+// of Feather grows with the speed of the body (reach), and brings the vertices and the edges of the triangles around
+// within it. A box falling flat on a flat terrain, straight on a vertex of the grid, had 5 contacts at the same
+// corner: one straight up, 4 on the edges of the triangles around, tilted by 10 to 60°, each braking a vertical fall
+// less than the plane. The tilted ones, nearly parallel, took impulse from the vertical one over the sub-steps, and
+// the box landed 2 mm deep. PhysX and Box3D have no such rule (PCMContactConvexMesh, b3ComputeMeshManifolds). A box
+// sliding across an active ridge is not held by the plane it leaves: the points cut on an active edge are never points
+// of the face (clipFace)
+//
+// activeEdges: bit e for the edge from the vertex e to the vertex e+1
+func contactNormal(faceNormal mgl64.Vec3, activeEdges, touched uint8, normal mgl64.Vec3) mgl64.Vec3 {
+	if activeEdges == 0b111 {
+		return normal
+	}
+	if activeEdges == 0 {
+		return faceNormal
+	}
+	if normal.Dot(faceNormal) > nearFaceCos || activeEdges&touched != 0 {
+		return normal
+	}
+	return faceNormal
+}
+
+// clipFace adds to s.points the points of the face of the body over the triangle of s.shape, closer to it than the
+// margin along the normal. The face is the one the body shows to a plane of this normal (CollideWithPlane, whatever
+// the distance): the 4 corners of a face of a box, both ends of a capsule. It is taken without any threshold on its
+// alignment with the normal, as the supporting face of Jolt (BoxShape::GetSupportingFace); a capsule gives both its
+// ends whatever its tilt, where Jolt asks them within 2 cm along the normal (cCapsuleProjectionSlop): the points under
+// its segment are on its surface at any tilt. Seen along the normal, the face is cut by the 3 sides of the triangle
+// (Sutherland-Hodgman): what is left is the part of the face over the triangle, the same polygon as the triangle cut
+// by the sides of the face (ManifoldBetweenTwoFaces of Jolt, ClipPolyVsPoly). A segment is cut the same way, as
+// b3CollideTriangleAndCapsule of Box3D: ClipPolyVsEdge of Jolt can give a point out of the triangle when the capsule
+// ends beside it. Each vertex left is a point of the body, at its distance to the plane of the triangle along the
+// normal.
+//
+// bodyVertices: the vertices of the face over the triangle are kept: the points of the body against a plane.
+// cutSides: the points cut on these sides of the triangle are kept (bit e for the edge from the vertex e to the vertex
+// e+1): a ridge of the terrain in the face of a box, across the side of a capsule, is found where it crosses them.
+// Jolt keeps all the points of the polygon. The points cut on a flat edge are between vertices of the body, on the
+// same plane: they say nothing more, and take the place of a corner among the 4 points of a manifold
+func (s *heightfieldScratch) clipFace(object *actor.RigidBody, normal, faceNormal mgl64.Vec3, bodyVertices bool, cutSides uint8, margin float64) {
+	vertices := &s.shape.vertices
+	alignment := normal.Dot(faceNormal)
+	if alignment <= 0 {
+		// the body touches the triangle from its side: no face over it
+		return
+	}
+	s.plane = object.Shape.CollideWithPlane(normal, -normal.Dot(vertices[0]), object.Transform, math.Inf(1), s.plane[:0])
+	if len(s.plane) < 2 || len(s.plane) > maxClipVertices-3 {
+		return
+	}
+	face, sides, count := &s.clip[0], &s.sides[0], len(s.plane)
+	for i, point := range s.plane {
+		// Position is halfway between the body and the plane
+		face[i], sides[i] = point.Position.Add(normal.Mul(point.Separation/2)), 0
+	}
+	clipped, clippedSides := &s.clip[1], &s.sides[1]
+	for e := 0; e < 3 && count > 0; e++ {
+		// the side of the triangle along the normal, its inner side
+		inward := normal.Cross(vertices[(e+1)%3].Sub(vertices[e]))
+		count = clipAgainstSide(face[:count], sides, vertices[e], inward, 1<<e, clipped, clippedSides)
+		face, clipped, sides, clippedSides = clipped, face, clippedSides, sides
+	}
+	for i, vertex := range face[:count] {
+		if (sides[i] == 0 && !bodyVertices) || (sides[i] != 0 && sides[i]&cutSides == 0) {
+			continue
+		}
+		separation := vertex.Sub(vertices[0]).Dot(faceNormal) / alignment
+		if separation <= margin {
+			s.points = append(s.points, constraint.ContactPoint{Position: vertex.Sub(normal.Mul(separation / 2)), Separation: separation})
 		}
 	}
-	return false
+}
+
+// clipAgainstSide writes in out the part of the polygon (2 points: a segment) on the inner side of the plane, and
+// returns its count of vertices. sides follows the vertices: a vertex cut on this plane is on the side (its bit), and
+// on the sides both its neighbors are on
+func clipAgainstSide(in []mgl64.Vec3, inSides *[maxClipVertices]uint8, point, inward mgl64.Vec3, side uint8, out *[maxClipVertices]mgl64.Vec3, outSides *[maxClipVertices]uint8) int {
+	length := inward.Len()
+	if length == 0 {
+		return 0
+	}
+	epsilon := clipEpsilon * length
+	count := 0
+	edges := len(in)
+	if edges == 2 {
+		edges = 1 // an open segment, not a closed polygon
+	}
+	if len(in) == 1 {
+		if in[0].Sub(point).Dot(inward) >= -epsilon {
+			out[0], outSides[0], count = in[0], inSides[0], 1
+		}
+		return count
+	}
+	for i := 0; i < edges; i++ {
+		j := (i + 1) % len(in)
+		current, next := in[i], in[j]
+		distance, nextDistance := current.Sub(point).Dot(inward), next.Sub(point).Dot(inward)
+		if distance >= -epsilon {
+			out[count], outSides[count] = current, inSides[i]
+			count++
+		}
+		if (distance >= -epsilon) != (nextDistance >= -epsilon) {
+			out[count] = current.Add(next.Sub(current).Mul(distance / (distance - nextDistance)))
+			outSides[count] = side | (inSides[i] & inSides[j])
+			count++
+		}
+		if len(in) == 2 && nextDistance >= -epsilon {
+			out[count], outSides[count] = next, inSides[j]
+			count++
+		}
+	}
+	return count
+}
+
+// reducePatch adds to m 4 points of the patch at most. The points of a patch come from several triangles. The steps of
+// Reduce (the ones of b3ReduceManifoldPoints of Box3D): the deepest point, the furthest from it, then the points adding
+// the most area. 2 differences, for the points of several triangles:
+//   - among the points as deep as the deepest (EPATieTolerance), the first one is the furthest along a tangent, then
+//     along the other (the first step of Box3D looks for an extreme point along a tangent): an end of the contact,
+//     never a point inside it
+//   - a point is added if it widens the contact by SpeculativeDistance at least (Box3D has the same tolerance, on the
+//     area), and the best one wins, without the bias Reduce gives to the order of its points: the order of the points
+//     of a patch is the order of its triangles
+func reducePatch(points []constraint.ContactPoint, normal mgl64.Vec3, m *constraint.Manifold) {
+	if len(points) <= constraint.MaxContactPoints {
+		for _, p := range points {
+			m.Add(p.Position, p.Separation)
+		}
+		return
+	}
+
+	// ========== THE DEEPEST, AT AN END ==========
+	tangent := normal.Cross(mgl64.Vec3{1, 0, 0})
+	if math.Abs(normal.X()) > 0.5 {
+		tangent = normal.Cross(mgl64.Vec3{0, 0, 1})
+	}
+	tangent = tangent.Normalize()
+	bitangent := normal.Cross(tangent)
+	lowest := math.Inf(1)
+	for _, p := range points {
+		lowest = math.Min(lowest, p.Separation)
+	}
+	first := -1
+	for i, p := range points {
+		if p.Separation > lowest+epa.EPATieTolerance {
+			continue
+		}
+		if first < 0 {
+			first = i
+			continue
+		}
+		along := p.Position.Sub(points[first].Position).Dot(tangent)
+		if along > weldDistance || (along >= -weldDistance && p.Position.Sub(points[first].Position).Dot(bitangent) > 0) {
+			first = i
+		}
+	}
+	m.Add(points[first].Position, points[first].Separation)
+
+	// ========== THE WIDEST CONTACT ==========
+	planar := func(a, b int) mgl64.Vec3 {
+		offset := points[b].Position.Sub(points[a].Position)
+		return offset.Sub(normal.Mul(offset.Dot(normal)))
+	}
+	// area: twice the area of the triangle, seen along the normal
+	area := func(a, b, c int) float64 { return planar(a, b).Cross(planar(a, c)).Dot(normal) }
+	kept := [constraint.MaxContactPoints]int{first}
+	orientation := 0.0
+	for m.Count < constraint.MaxContactPoints {
+		chosen, highest := -1, 0.0
+		for i := range points {
+			// how much the point widens the contact of the points kept, and if it does by SpeculativeDistance
+			value, widens := 0.0, false
+			switch m.Count {
+			case 1:
+				value = planar(first, i).LenSqr()
+				widens = value > SpeculativeDistance*SpeculativeDistance
+			case 2:
+				// its distance to the line of the 2 points
+				value = math.Abs(area(kept[0], kept[1], i))
+				widens = value > SpeculativeDistance*planar(kept[0], kept[1]).Len()
+			default:
+				// the area added outside an edge of the triangle, by a point further than the tolerance from this edge
+				for e := 0; e < 3; e++ {
+					from, to := kept[e], kept[(e+1)%3]
+					outside := -orientation * area(from, to, i)
+					value = math.Max(value, outside)
+					widens = widens || outside > SpeculativeDistance*planar(from, to).Len()
+				}
+			}
+			if widens && value > highest {
+				chosen, highest = i, value
+			}
+		}
+		if chosen < 0 {
+			return
+		}
+		kept[m.Count] = chosen
+		m.Add(points[chosen].Position, points[chosen].Separation)
+		if m.Count == 3 {
+			orientation = math.Copysign(1, area(kept[0], kept[1], kept[2]))
+		}
+	}
 }
 
 // barycentric coordinates of the projection of p on the triangle
