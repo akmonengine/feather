@@ -173,6 +173,40 @@ func NewRigidBody(transform Transform, shape ShapeInterface, bodyType BodyType, 
 	return rb
 }
 
+// SetShape gives the body another shape, in place: the mass and the inertia of a dynamic or a kinematic body become
+// those of the shape at the density of its material (a static body keeps its infinite mass), the AABB follows; the
+// velocities, the locks, the material and the target are kept. The shapes of Feather are centered on their origin (the
+// hull on its center of mass): the body stays where it is, where Body::SetShapeInternal of Jolt (Body.cpp:117-141,
+// v5.3.0) moves the body by the difference of the centers of mass. A body in a World changes its shape by
+// World.SetShape, which refuses what cannot be simulated and tells the world
+func (rb *RigidBody) SetShape(shape ShapeInterface) {
+	rb.Shape = shape
+	rb.updateMassProperties()
+	rb.UpdateAABB()
+}
+
+// SetDensity gives the body another density, in place: the mass and the inertia of a dynamic or a kinematic body are
+// computed again from its shape (PxRigidBodyExt::updateMassAndInertia of PhysX, which the game calls after a change of
+// density or of geometry; Jolt recomputes them in SetShape); a static body keeps the density, for the day it becomes
+// dynamic, and its infinite mass. A body in a World changes its density by World.SetDensity, which wakes it up
+func (rb *RigidBody) SetDensity(density float64) {
+	rb.Material.Density = density
+	rb.updateMassProperties()
+}
+
+// updateMassProperties: the mass and the inertia of the shape at the density of the material, for a dynamic or a
+// kinematic body (the formulas of NewRigidBody); a static body has an infinite mass and no inertia
+func (rb *RigidBody) updateMassProperties() {
+	if rb.BodyType == BodyTypeStatic {
+		rb.Material.mass = math.Inf(1)
+		rb.InertiaLocal, rb.InverseInertiaLocal = mgl64.Mat3{}, mgl64.Mat3{}
+		return
+	}
+	rb.Material.mass = rb.Shape.ComputeMass(rb.Material.Density)
+	rb.InertiaLocal = rb.Shape.ComputeInertia(rb.Material.mass)
+	rb.InverseInertiaLocal = rb.InertiaLocal.Inv()
+}
+
 // Serial is a unique number of the body, given by NewRigidBody
 func (rb *RigidBody) Serial() uint64 {
 	return rb.serial

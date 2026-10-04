@@ -1148,6 +1148,46 @@ function can still be used though, if one simply wants to teleport a kinematic a
 pushed at 1 m/s on the ground (µ = 0.6) stays against the pusher within 0.00 mm, 0.12 mm deep at worst, at 1.000 m/s; a
 leg at 5 m/s enters a resting capsule by 0.25 mm at worst, a box by 0.22 mm, and never goes through.
 
+## Changing a body
+
+**SetShape** gives a body of the world another shape, in place (`World.SetShape`, `shape.go`), as
+`BodyInterface::SetShape` of Jolt (`BodyInterface.cpp:298-326`, v5.3.0, with the mass properties updated and the body
+activated): `RigidBody.SetShape` replaces the shape, recomputes the mass and the inertia of a dynamic or a kinematic
+body at the density of its material (`Body::SetShapeInternal`, `MotionProperties::SetMassProperties`; a static body
+keeps its infinite mass) and the AABB; the world then puts the body in `changed`, the list of the heightfields updated
+during the step, so that its pairs skip the pair cache at the next step (`BodyManager::InvalidateContactCacheForBody`
+of Jolt: the cache of the body is ignored for one step; the pair cache of Feather would move the four corners of a cube
+made a sphere with the bodies, `TestSetShapeComputesTheContactsAgain`), wakes the body with its island and the sleeping
+bodies within the union of its old and its new AABB (the rule of `Teleport` and `UpdateHeightfield`: a static pedestal
+shrunk under a pile lets it fall, a slab grown under a crate lifts it, a trigger made its inscribed sphere tests again
+the overlap of the crate asleep in its corner; Jolt leaves the neighbours asleep). The broad phase moves the proxy to
+the tree of its new kind at the next synchronization (`Tree.update`: a plane made a box leaves the planes for the
+static tree). The index, the joints, the layers, the ignored pairs, the velocities, the target and the locks are kept.
+
+The shapes of Feather are centered on their origin (the hull on its center of mass): the body stays where it is,
+where Jolt moves it by the difference of the centers of mass (`Body::UpdateCenterOfMassInternal`); the caller places
+the body where the new shape belongs. A body overlapping something with its new shape is pushed out by the spring of
+its contacts over the next steps, at `ContactSpeed` at most: a resting cube made a box twice as big rises to its new
+height without going through the ground (`TestSetShapeOfARestingBodyKeepsItStable`). PhysX (`PxShape::setGeometry`,
+`PxShape.h:122-133`, v5.6.0) keeps the type of the geometry ("It is not allowed to change the geometry type of a
+shape") and "does not guarantee correct/continuous behavior when objects are resting on top of old or new geometry";
+Feather changes the kind and keeps the resting bodies stable. A plane, a heightfield or a mesh on a dynamic or a
+kinematic body is refused (`ErrShapeNotConvex`): a surface has no support point for GJK and no volume for a mass (the
+complex collision of Unreal "cannot simulate the object", the concave shape of Godot is "intended to work with static
+CollisionShape3D nodes"). No shape is refused (`ErrNoShape`); the same shape again does nothing.
+
+**SetDensity** gives a body another density, in place (`World.SetDensity`): the mass and the inertia of its shape at
+this density (`PxRigidBodyExt::updateMassAndInertia` of PhysX, `ExtRigidBodyExt.cpp:282-290`, which the game calls after
+a change of density or of geometry, where Jolt recomputes them in `SetShape`), the body woken up with its island; a
+static body keeps the density written, for the day it becomes dynamic, and its infinite mass; a density which is not
+positive on a dynamic body is refused (`ErrMasslessBody`). The solver reads the mass and the inertia of each body at
+`prepare` (`solver.go`): nothing else is copied, a change is seen by the next step.
+
+Neither call allocates once the world has stepped; the steps after a change allocate nothing
+(`TestStepAfterSetShapeAllocatesNothing`); the mixed scene with shapes and densities changed during the run gives the
+same bits with 1, 4 and 8 workers (`TestSetShapeIsDeterministic`). No scene of the bench changes a shape: the 33
+fingerprints are unchanged.
+
 ## Characters
 
 A character is a capsule moved by the game between 2 steps, with the queries of the world: a virtual character, the

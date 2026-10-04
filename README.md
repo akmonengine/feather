@@ -38,6 +38,12 @@ A mesh and a heightfield are surfaces: their triangles are seen from the side of
 through is not pushed back. See the [physics guide](PHYSICS_GUIDE.md#decor-meshes-and-convex-hulls) and the
 [algorithms](ALGORITHMS.md#convex-hull).
 
+A body in the world changes its shape or its density in place: `world.SetShape(body, shape)` and
+`world.SetDensity(body, density)` keep its index, its pairs, its joints, its layers and its island, give it the mass and
+the inertia of the shape, wake it up with the sleeping bodies around it; a plane, a heightfield or a mesh on a dynamic
+or a kinematic body is refused (`ErrShapeNotConvex`). See the [physics guide](PHYSICS_GUIDE.md#changing-a-body) and the
+[algorithms](ALGORITHMS.md#changing-a-body).
+
 ```go
 body := actor.NewRigidBody(
 	actor.Transform{Position: mgl64.Vec3{0, 1, 0}, Rotation: mgl64.QuatIdent()},
@@ -149,6 +155,8 @@ world.Step(dt)                                   // the platform is at next, bit
 world.Teleport(platform, start)                  // placed without velocity: it pushes nothing
 err = world.SetBodyType(bone, actor.BodyTypeDynamic)   // a ragdoll: the bone falls, with its contacts, its joints and its island
 err = world.SetBodyType(bone, actor.BodyTypeKinematic) // and follows its targets again; ErrStaticBody, ErrMasslessBody refuse
+err = world.SetShape(crate, &actor.Sphere{Radius: 0.3})  // another shape in place: mass and inertia follow, contacts, joints and island kept
+err = world.SetDensity(crate, 700)                       // another density in place: the mass and the inertia of the shape at 700 kg/m³
 ```
 - One target per step: it is reached at the end of the step and dropped. Without target the body stays, with no
   velocity (the kinematic actors of PhysX). Its velocity is the one of its motion: the contacts push with it.

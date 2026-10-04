@@ -9,6 +9,7 @@ feather/
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
 ├── kinematic.go        # kinematic bodies: the motion to their target, SetBodyType, Teleport
+├── shape.go            # the shape or the density of a body changed in place: SetShape, SetDensity
 ├── charactervirtual.go      # characters: Update (slide, ground, stick to the floor, stairs), the inner body
 ├── charactervirtual_move.go # the move of a character: contacts made planes, solver by time of impact, sweep, push
 ├── joint.go            # joints: distance, ball, hinge, fixed
@@ -142,6 +143,7 @@ one of this motion. Where it appears:
 | events, queries | the collision events with the dynamic bodies, the trigger events with every trigger (a static trigger, a kinematic trigger and the static or kinematic bodies); seen by the queries like any body |
 | `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
 | `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
+| `World.SetShape`, `World.SetDensity` | another shape or density in place (`shape.go`): index, proxy, joints, filters and island kept, the mass and the inertia of the shape at the density, the pairs computed again at the next step, the body and its sleeping neighbours woken up; a surface (plane, heightfield, mesh) on a dynamic or a kinematic body is refused (`ErrShapeNotConvex`), no shape too (`ErrNoShape`), a density which is not positive on a dynamic body too (`ErrMasslessBody`) |
 
 ## Characters
 `charactervirtual.go`, `charactervirtual_move.go`, see [ALGORITHMS.md](ALGORITHMS.md#characters). A `CharacterVirtual` is a capsule moved

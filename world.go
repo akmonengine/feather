@@ -162,7 +162,12 @@ func (w *World) RemoveBody(body *actor.RigidBody) {
 // wakeNeighbors: the sleeping bodies which collide with the body wake up, with their islands. The sleeping bodies have
 // no contact anymore: their AABB is used
 func (w *World) wakeNeighbors(body *actor.RigidBody) {
-	aabb := body.AABB()
+	w.wakeNeighborsIn(body, body.AABB())
+}
+
+// wakeNeighborsIn: the sleeping bodies which collide with the body and whose AABB touches aabb, within the speculative
+// distance, wake up with their islands
+func (w *World) wakeNeighborsIn(body *actor.RigidBody, aabb actor.AABB) {
 	margin := mgl64.Vec3{SpeculativeDistance, SpeculativeDistance, SpeculativeDistance}
 	aabb = actor.AABB{Min: aabb.Min.Sub(margin), Max: aabb.Max.Add(margin)}
 	for _, other := range w.Bodies {

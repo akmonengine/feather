@@ -84,10 +84,19 @@ type sweepQuery struct {
 
 // mustBeConvex: a plane, a heightfield and a mesh have no support point, they cannot be moved nor overlapped
 func mustBeConvex(shape actor.ShapeInterface) {
-	switch shape.(type) {
-	case *actor.Plane, *actor.Heightfield, *actor.TriangleMesh:
+	if !isConvex(shape) {
 		panic(notConvex)
 	}
+}
+
+// isConvex: a plane, a heightfield and a mesh have no support point: they are surfaces, the shapes of the static
+// bodies; every other shape is a convex volume GJK/EPA can move
+func isConvex(shape actor.ShapeInterface) bool {
+	switch shape.(type) {
+	case *actor.Plane, *actor.Heightfield, *actor.TriangleMesh:
+		return false
+	}
+	return true
 }
 
 // newSweepQuery of the shape moved from start by translation. Through the trees, the shape is the center of its AABB,

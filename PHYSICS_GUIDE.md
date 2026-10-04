@@ -195,7 +195,8 @@ world.Step(dt)
 - **Ragdoll.** `world.SetBodyType(bone, actor.BodyTypeDynamic)`: the bone falls with the velocity of its last motion,
   and keeps its contacts, its joints, its layers and the pairs it ignores; `SetBodyType(bone, actor.BodyTypeKinematic)`
   stops it and gives it back to the animation. Create the bones with their density: a body without mass can't become
-  dynamic (`SetBodyType` panics). A static body stays static (it panics too): it is the shape of the world.
+  dynamic (`ErrMasslessBody`, or give it one by `SetDensity`). A static body stays static (`ErrStaticBody`): it is the
+  shape of the world.
 - **The continuous collision** never stops a kinematic body. A fast dynamic body meeting it is held by their speculative
   contact (from their relative speed), and stopped by the time of impact when they had none: a thin moving wall is a
   kinematic body.
@@ -477,6 +478,26 @@ crate := actor.NewRigidBody(actor.Transform{Position: place.Add(hull.CenterOfMas
 ### Moving a body
 A shape has no state: several bodies can share the same shape. Each body keeps its AABB: after moving a body by hand
 (its `Transform`), call `UpdateAABB`.
+
+### Changing a body
+```go
+err := world.SetShape(crate, &actor.Box{HalfExtents: mgl64.Vec3{0.5, 0.5, 0.5}}) // a box twice as big, in place
+err = world.SetDensity(crate, 700)                                                // oak instead of pine
+```
+- **The body stays in the world** with its index, its contacts, its joints, its layers, the pairs it ignores and its
+  island; it wakes up, and so do the sleeping bodies around its old and its new shape: a crate resting on a plate
+  made thinner falls on it, a pile on a pedestal shrunk under it falls to the ground.
+- **The mass and the inertia follow**: those of the new shape at the density of the body (`SetShape`), or of its
+  shape at the new density (`SetDensity`). A static body keeps its infinite mass; `SetDensity` on it keeps the
+  density written, for the day it becomes dynamic.
+- **The body stays where it is.** The shapes are centered on their origin: a cube made a box twice as big is half in
+  the ground, and the spring of its contacts pushes it out over the next steps (at `ContactSpeed` at most). Place the
+  body where the new shape belongs before the change if you want no push: its `Transform` and `UpdateAABB`, or
+  `Teleport`. A hull is centered on its center of mass: `hull.CenterOfMass()` is the offset to add to the pose.
+- **A surface stays static.** A plane, a heightfield or a mesh on a dynamic or a kinematic body is refused
+  (`ErrShapeNotConvex`), no shape too (`ErrNoShape`), a density which is not positive on a dynamic body too
+  (`ErrMasslessBody`): the body is left as it is, never in silence.
+- Both calls run between two steps, like `AddBody`; they allocate nothing.
 
 ### Timestep & substeps
 ```go
