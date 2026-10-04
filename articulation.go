@@ -50,15 +50,16 @@ func (s *solver) buildArticulations() {
 	a.bodyJoints = resizeSlices(a.bodyJoints, bodies)
 	a.visited = resizeBools(a.visited, bodies)
 	a.position = resizeInts(a.position, len(s.joints))
+	// a kinematic body is a wall for the trees, as a static body: its joints are leaves (dynamicIndex)
 	for i, joint := range s.joints {
 		j := joint.base()
 		j.inArticulation = false
 		a.position[i] = -1
-		if j.indexA >= 0 {
-			a.bodyJoints[j.indexA] = append(a.bodyJoints[j.indexA], i)
+		if indexA := s.dynamicIndex(j.indexA); indexA >= 0 {
+			a.bodyJoints[indexA] = append(a.bodyJoints[indexA], i)
 		}
-		if j.indexB >= 0 {
-			a.bodyJoints[j.indexB] = append(a.bodyJoints[j.indexB], i)
+		if indexB := s.dynamicIndex(j.indexB); indexB >= 0 {
+			a.bodyJoints[indexB] = append(a.bodyJoints[indexB], i)
 		}
 	}
 
@@ -130,7 +131,7 @@ func (s *solver) buildArticulations() {
 
 func (s *solver) attachedToStatic(body int) bool {
 	for _, i := range s.articulations.bodyJoints[body] {
-		if j := s.joints[i].base(); j.indexA < 0 || j.indexB < 0 {
+		if j := s.joints[i].base(); s.dynamicIndex(j.indexA) < 0 || s.dynamicIndex(j.indexB) < 0 {
 			return true
 		}
 	}
@@ -155,13 +156,13 @@ func (s *solver) orderTree(root int) bool {
 				continue
 			}
 			j := s.joints[i].base()
-			other := j.indexA
+			other := s.dynamicIndex(j.indexA)
 			if other == body {
-				other = j.indexB
+				other = s.dynamicIndex(j.indexB)
 			}
 			switch {
 			case other < 0:
-				// attached to a static body: a leaf
+				// attached to a static or a kinematic body: a leaf
 				s.place(i)
 			case !a.visited[other]:
 				a.visited[other] = true

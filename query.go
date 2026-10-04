@@ -49,8 +49,8 @@ type Hit struct {
 	Point    mgl64.Vec3 // world space, on the surface of Body
 	Normal   mgl64.Vec3 // unit, out of Body, at Point
 	Fraction float64    // of the translation, in [0, 1]
-	// heightfield: 2*cell + t (cell = x*(ZSamples-1)+z), the lowest index if several triangles are hit at the same
-	// fraction (a ray on an edge); else actor.NoTriangle
+	// heightfield: 2*cell + t (cell = x*(ZSamples-1)+z); mesh: the index of the triangle; the lowest index if several
+	// triangles are hit at the same fraction (a ray on an edge); else actor.NoTriangle
 	Triangle int32
 	// index of Body in World.Bodies when it was hit: the order of the hits at the same fraction
 	index int32
@@ -75,6 +75,9 @@ type treeQuery struct {
 	hits []Hit
 	// sweep: the query moves a shape (query_sweep.go), else it is a ray
 	sweep *sweepQuery
+	// character: the sweep is the one of a character (character_move.go): the bodies it collides with, the hits it
+	// keeps
+	character *CharacterVirtual
 }
 
 // run the query on the large bodies, then on both trees
@@ -90,7 +93,7 @@ func (q *treeQuery) run() {
 // visit the body of a leaf, or a large body: its hit is kept if it comes first
 func (q *treeQuery) visit(index int32) {
 	body := q.world.Bodies[index]
-	if !q.filter.Accepts(body) {
+	if !q.filter.Accepts(body) || (q.character != nil && !q.character.sweepAccepts(body)) {
 		return
 	}
 	var found Hit
@@ -105,6 +108,9 @@ func (q *treeQuery) visit(index int32) {
 			return
 		}
 		found = Hit{Body: body, Point: q.ray.origin.Add(q.ray.translation.Mul(hit.Fraction)), Normal: hit.Normal, Fraction: hit.Fraction, Triangle: hit.Triangle}
+	}
+	if q.character != nil && !q.character.sweepKeeps(&found, q.sweep.translation) {
+		return
 	}
 	found.index = index
 	if q.all {
@@ -149,7 +155,8 @@ func finiteSegment(origin, translation mgl64.Vec3) bool {
 
 // Raycast: the first body on the segment from origin to origin + translation, among the bodies the filter accepts.
 // A ray which starts in a body hits it at the fraction 0, the normal against its direction; a ray without length is a
-// point, its hit has no normal. The top side of a heightfield only is hit. A ray which is not finite hits nothing
+// point, its hit has no normal. The top side of a heightfield only is hit, the side of the normal of the triangles of a
+// mesh. A ray which is not finite hits nothing
 func (w *World) Raycast(origin, translation mgl64.Vec3, filter QueryFilter) (Hit, bool) {
 	w.guard()
 	if !finiteSegment(origin, translation) {

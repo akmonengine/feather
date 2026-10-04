@@ -140,8 +140,8 @@ body.SetLocks(actor.NoAxes, actor.AxisX|actor.AxisZ)            // later: it cle
 - `SetLocks` wakes the body up: a body freed in the air falls. Writing the fields of a sleeping body doesn't.
 - A body with all its axes locked stays dynamic: it never moves, carries what rests on it, sleeps and wakes up, and
   collides with the static bodies (events). A static body costs less: prefer it for what never moves.
-- A fast body which is not a bullet goes through a body with all its axes locked: its continuous collision only looks
-  at the static bodies. A thin wall is a static body, or what is thrown at it is a bullet (`IsBullet`).
+- A fast body is stopped by a body with all its axes locked as by any body (speculative contact, then time of impact).
+  A static body still costs less for a wall which never moves.
 - A static body has no lock: `SetLocks` does nothing on it.
 - A joint which needs a locked axis can't be satisfied: its other rows are still solved (a body which only turns around
   Y, held by a fixed joint, doesn't turn), the impossible ones are left out. Nothing explodes.
@@ -151,6 +151,131 @@ body.SetLocks(actor.NoAxes, actor.AxisX|actor.AxisZ)            // later: it cle
 - A leaning body locked around some axes turns as on an axle: with its moment of inertia around its free axes (a rod
   leaning by 45° which only turns around Y is as heavy to spin as it looks). Jolt, Rapier, PhysX and Box3D make it
   lighter than it is; see the [algorithms](ALGORITHMS.md#axis-locks).
+
+### Kinematic bodies
+A kinematic body is moved by the game, not by the forces: a lift, a moving platform, a door, a character, the bones of
+a creature which follow its animation while its tail is simulated. It pushes the dynamic bodies it meets with the
+velocity of its motion, carries what rests on it, and nothing pushes it back. It is the kinematic body of PhysX
+(`setKinematicTarget`), Unity (`isKinematic` + `MovePosition`), Jolt (`MoveKinematic`) and Unreal.
+
+```go
+lift := actor.NewRigidBody(actor.Transform{Position: start, Rotation: mgl64.QuatIdent()}, &actor.Box{HalfExtents: mgl64.Vec3{1, 0.1, 1}}, actor.BodyTypeKinematic, 500)
+lift.Material.StaticFriction, lift.Material.DynamicFriction = 0.6, 0.6 // the friction of its surface, for the riders
+world.AddBody(lift)
+
+// each frame, before Step: where the lift is at the end of the step
+next := lift.Transform
+next.Position = next.Position.Add(mgl64.Vec3{0, 0.5, 0}.Mul(dt))
+lift.SetKinematicTarget(next)
+world.Step(dt)
+```
+- **One target per step.** `SetKinematicTarget` gives the pose the body reaches at the end of the next step: the body
+  goes there over the sub-steps (position linearly, rotation along the shortest arc), its velocity is the one of this
+  motion (`Velocity`, `AngularVelocity`: (target - pose) / dt, read after the step), and the target is dropped. Give one
+  before each step to move the body along a path; without target the body stays where it is, with no velocity. A
+  velocity written on a kinematic body is ignored: move it by its target.
+- **What it carries follows it.** A body resting on a platform moves with it, by friction (give the platform a
+  friction); a body it meets is pushed at its speed. The contact exists before they touch, from the speed of the
+  kinematic body: a leg at 5 m/s doesn't enter the tail on its path. A kinematic body pushing a body against a wall
+  squeezes it: the body enters the wall, as in every engine.
+- **No contact with the static and the kinematic bodies**: a kinematic body in the ground, through a wall or through
+  another kinematic body is not pushed out, and sends no collision event. It enters and leaves the triggers, static or
+  not, and a kinematic trigger detects every body ([Triggers](#triggers)).
+- **Sleep.** On its way, a kinematic body keeps awake the bodies it touches, however slowly it goes. Stopped (no
+  target), it falls asleep with them half a second later; its next target wakes them all up.
+- **Teleport.** `world.Teleport(body, transform)` places a body without any velocity: a kinematic body brought there by
+  a target pushes what is on its path, a teleported one goes through it (it overlaps it, and the contact pushes them
+  apart at the next steps). For a cut scene, a respawn; `Teleport` works on every body, and wakes the sleeping bodies at
+  the new place.
+- **Forces, torques and impulses** are ignored, so is the gravity. The locks (`LinearLock`, `AngularLock`) are kept for
+  the day the body becomes dynamic.
+- **The animated bones of a creature.** Each bone is a kinematic body: at each step, give it the pose of its bone in the
+  animation. The simulated parts (a tail, a bag, hair) are dynamic bodies linked by joints, which hit the kinematic
+  bones and are pushed by them.
+- **Ragdoll.** `world.SetBodyType(bone, actor.BodyTypeDynamic)`: the bone falls with the velocity of its last motion,
+  and keeps its contacts, its joints, its layers and the pairs it ignores; `SetBodyType(bone, actor.BodyTypeKinematic)`
+  stops it and gives it back to the animation. Create the bones with their density: a body without mass can't become
+  dynamic (`ErrMasslessBody`, or give it one by `SetDensity`). A static body stays static (`ErrStaticBody`): it is the
+  shape of the world.
+- **The continuous collision** never stops a kinematic body. A fast dynamic body meeting it is held by their speculative
+  contact (from their relative speed), and stopped by the time of impact when they had none: a thin moving wall is a
+  kinematic body.
+- A plane or a heightfield stays static: a moving terrain is not supported.
+
+### Characters
+A character is a capsule which walks: the player, a creature of the game. It is virtual (the `CharacterVirtual` of
+Jolt, whose name it takes, the `CharacterController` of Unity, the mover of Box2D v3): the game gives its velocity and calls its update,
+which slides the capsule along the walls, climbs the slopes and the steps, finds the ground and pushes the dynamic
+bodies; no force, no contact of the solver moves it, so it goes exactly where the game decides, at once.
+
+```go
+hero := feather.NewCharacterVirtual(actor.Capsule{HalfHeight: 0.55, Radius: 0.3}, feet.Add(mgl64.Vec3{0, 0.85, 0}))
+hero.MaxSlopeAngle, hero.StepHeight = 45*math.Pi/180, 0.3 // the defaults: 50°, 0.4 m, 100 N, 70 kg, StickToFloor 0.5 m (Jolt)
+world.AddCharacter(hero)
+world.SetFilter(hero.Body(), layerCharacters, actor.AllLayers)
+
+// each frame
+world.Step(dt)
+velocity := mgl64.Vec3{0, hero.Velocity.Y(), 0}             // in the air: the vertical velocity of the fall is kept
+if hero.GroundState() == feather.CharacterOnGround {        // on the ground: the velocity of the ground (a platform)
+	hero.UpdateGroundVelocity()
+	velocity = hero.GroundVelocity()
+	if jump {
+		velocity = velocity.Add(mgl64.Vec3{0, 4, 0})
+	}
+}
+hero.Velocity = velocity.Add(world.Gravity.Mul(dt)).Add(input) // + the gravity of the step, + the input (m/s)
+hero.Update(dt)
+model.SetPosition(hero.Position.Sub(mgl64.Vec3{0, 0.85, 0})) // the feet are 0.85 m under the center of the capsule
+```
+- **The velocity is the game's.** The recipe above is the one of the samples of Jolt (`CharacterVirtualTest::HandleInput`):
+  the gravity of the step is added every frame, so that the character presses on the ground and falls when it leaves
+  it; on the ground the vertical velocity is reset to the one of the ground, in the air it accumulates. PhysX, Box2D
+  and Godot leave the gravity to the game the same way. After the update, `Velocity` is what the character took: the
+  part towards a slope too steep removed.
+- **Update after the step.** The velocity of a platform is the one of the step just done: updated after it, the
+  character follows the platform without lag (`UpdateGroundVelocity` reads the velocity of the platform again before
+  the recipe, for the frame the platform starts). Updated before the step, it is one step behind the platform. During
+  a step an update panics, as a query.
+- **It walks on everything**: a plane, a terrain, a mesh, the boxes, the hulls, the capsules, the dynamic and the
+  kinematic bodies. It keeps 2 cm from them (`CharacterPadding`): a model drawn at the capsule stands 2 cm above the
+  ground. The contacts are gathered 10 cm around the capsule: no body is entered, whatever the speed.
+- **Slopes.** Under `MaxSlopeAngle` a surface is a ground: the horizontal velocity is projected on it (the character
+  climbs at `speed × cos(angle)` along the slope, as in Jolt; Godot keeps the speed with `floor_constant_speed`).
+  Steeper, it is a wall: the character doesn't climb it, and slides down it under the gravity of the recipe
+  (`CharacterOnSteepGround`; the `ePREVENT_CLIMBING_AND_FORCE_SLIDING` of PhysX). Standing still (no horizontal
+  velocity) on a ground, the character doesn't creep down (the stop on slope of the samples of Jolt and of Godot).
+- **Steps.** A step lower than `StepHeight` is walked without jumping; higher, it is a wall. A step is walked up,
+  forward and down onto its floor, which must not be too steep where the character lands (the edge of a step is tested
+  15 cm further). A step of 0.6 m blocks a character of radius 0.3: the sphere of its capsule stops against the riser.
+- **Downhill**, the character sticks to the floor: leaving the ground without going up, it looks for the floor within
+  `StickToFloor` under it (0.5 m by default; 0 sticks to nothing) and lands on it (a slope, a step down). It walks down
+  a 30° slope at 3 m/s without a frame in the air. Over a crest it was going up: it leaves the ground for a frame, and
+  lands at the next one. Off a drop longer than `StickToFloor`, it falls.
+- **Platforms.** Standing on a kinematic body, `GroundVelocity` is the velocity of the point under the character over
+  the last step (its arc when the platform turns, as `CalculateCharacterGroundVelocity` of Jolt); the recipe adds it. A
+  platform going up lifts the character by its contact. Drive the platform by `SetKinematicTarget`: its velocity is
+  the one of its motion.
+- **Pushing.** A dynamic body met gets an impulse which brings it to the speed of the character along the contact (damped
+  by 0.9), at most `MaxStrength × dt` (100 N: a ball of 11 kg or a crate of 22 kg is pushed at the walking speed), and
+  never downwards; a crate of 8 t doesn't move and stops the character. A dynamic body which hits a character is
+  stopped by its inner kinematic body: it never goes through it. The weight of the character (`Mass × g`) presses a
+  dynamic body it stands on.
+- **Characters** block each other head on (they stop 2 paddings apart), slide along each other when they cross, and
+  never go through each other. The inner body of a character is the body a ray, a sweep or an overlap hits:
+  `world.CharacterOf(hit.Body)` gives the character.
+- **Filtering.** The character collides with the bodies its inner body collides with: its layer and its mask
+  (`world.SetFilter(hero.Body(), ...)`), the pairs ignored (`IgnoreCollision`). Give the characters a layer of their
+  own to let the rays of the game skip them. The inner body enters and leaves the triggers as a kinematic body does
+  (`EventTriggerEnter` and `EventTriggerExit` with the body; `CharacterOf` gives the character); a trigger never
+  blocks the character: its contacts and its sweeps skip the triggers.
+- **Teleport** places the character with its inner body and reads its contacts there; the next update pushes it out of
+  a body it was placed in. `RemoveCharacter` removes it with its inner body.
+- **A crouch**: write `Capsule.HalfHeight` between 2 updates; the inner body shares the capsule.
+- **Cost.** On a bumpy terrain, 11 µs per update for a character walking alone (24 characters: 0.27 ms per frame), 54 µs
+  in a crowd pushing against walls and crates (24: 1.3 ms; 200: 9.8 ms), measured on one core, then 13 % less (the
+  supports and the cores of GJK made once, see ALGORITHMS.md). An update is GJK on the 6 to 10 triangles under the
+  capsule and the 2 or 3 its sweeps hit.
 
 ### Collision filtering
 Who collides with whom is decided by 3 things, tested in the broad phase before any contact is computed.
@@ -236,7 +361,7 @@ how to tilt the foot.
 hit, ok := world.Raycast(knee, mgl64.Vec3{0, -0.8, 0}, filter)
 if ok {
 	ground := hit.Point // knee + hit.Fraction * translation
-	slope := hit.Normal // out of the ground; hit.Triangle is the triangle of a terrain (2*cell + t), else -1
+	slope := hit.Normal // out of the ground; hit.Triangle is the triangle of a terrain (2*cell + t) or of a mesh, else -1
 }
 ```
 A ray has no thickness: on stairs or on rubble, a sphere of the size of the sole gives a steadier answer.
@@ -316,14 +441,63 @@ world.AddBody(terrain)
 world.UpdateHeightfield(terrain, minX, minZ, maxX, maxZ)
 ```
 - A heightfield is static. The body is at the center of the grid, the heights along its Y axis.
+- The terrain is a surface, without thickness: a body is held while its center is above it. Placed with its center
+  under the surface, it falls under the terrain.
 - The terrain is made of triangles: a finer grid gives finer contacts (a 2048x2048 grid follows the ground better than
   512x512), the bodies slide on the flat parts without hitting the edges between the triangles.
 - `Holes[x*(zSamples-1)+z]`: a cell without triangles (a cave, a tunnel entrance).
 - `World.UpdateHeightfield` wakes up the bodies above the changed region, and computes their contacts again.
 
+### Decor meshes and convex hulls
+```go
+// the decor: the triangles of a model (indices 3 per triangle, counterclockwise seen from outside), built once
+mesh, err := actor.NewTriangleMesh(vertices, indices)
+rock := actor.NewRigidBody(actor.Transform{Position: place, Rotation: orientation}, mesh, actor.BodyTypeStatic, 0)
+world.AddBody(rock)
+
+// a dynamic object: the convex hull of the vertices of its model, 64 vertices at most
+hull, err := actor.NewConvexHull(vertices, 64)
+// the hull is centered on its center of mass: the body is there, not at the origin of the model
+crate := actor.NewRigidBody(actor.Transform{Position: place.Add(hull.CenterOfMass()), Rotation: mgl64.QuatIdent()}, hull, actor.BodyTypeDynamic, 300)
+```
+- A mesh is static, and a surface: its triangles are touched from the side of their normal (the right-hand rule on the
+  winding), a body whose center went through a wall is not pushed back. Give the triangles their outward winding, and
+  close the solids the bodies can fall into. The vertices closer than 0.1 mm are welded: a soup of triangles is fine.
+  A degenerate triangle (no area) is kept out, at its index.
+- A mesh is built outside `Step`: 100 000 triangles take 0.3 s. Build it once per model and share it between bodies (a
+  shape has no state); a mesh never changes, build another one for another decor.
+- `hit.Triangle` of a ray or a sweep on a mesh is the index of the triangle: `mesh.Triangle(hit.Triangle)` gives its
+  vertices, `mesh.Indices[3*hit.Triangle:]` its vertices in the model, for a material per triangle on your side.
+- A hull is a convex volume: the mass and the inertia come from its volume and the density. Its local space is
+  centered on its center of mass, `hull.CenterOfMass()` is the offset from the origin of the points. The limit of
+  vertices (256 at most) bounds the cost of a contact (a hull of 64 vertices costs as a box, 256 twice as much); when it
+  is reached, the hull is the one of the vertices the furthest out, the points left out are the closest to it. A
+  flat cloud (a quad, a line) has no hull: use a Box.
+- A hull slides, rolls and rests on a mesh or a terrain as the other shapes, with the same edges rules.
+
 ### Moving a body
 A shape has no state: several bodies can share the same shape. Each body keeps its AABB: after moving a body by hand
 (its `Transform`), call `UpdateAABB`.
+
+### Changing a body
+```go
+err := world.SetShape(crate, &actor.Box{HalfExtents: mgl64.Vec3{0.5, 0.5, 0.5}}) // a box twice as big, in place
+err = world.SetDensity(crate, 700)                                                // oak instead of pine
+```
+- **The body stays in the world** with its index, its contacts, its joints, its layers, the pairs it ignores and its
+  island; it wakes up, and so do the sleeping bodies around its old and its new shape: a crate resting on a plate
+  made thinner falls on it, a pile on a pedestal shrunk under it falls to the ground.
+- **The mass and the inertia follow**: those of the new shape at the density of the body (`SetShape`), or of its
+  shape at the new density (`SetDensity`). A static body keeps its infinite mass; `SetDensity` on it keeps the
+  density written, for the day it becomes dynamic.
+- **The body stays where it is.** The shapes are centered on their origin: a cube made a box twice as big is half in
+  the ground, and the spring of its contacts pushes it out over the next steps (at `ContactSpeed` at most). Place the
+  body where the new shape belongs before the change if you want no push: its `Transform` and `UpdateAABB`, or
+  `Teleport`. A hull is centered on its center of mass: `hull.CenterOfMass()` is the offset to add to the pose.
+- **A surface stays static.** A plane, a heightfield or a mesh on a dynamic or a kinematic body is refused
+  (`ErrShapeNotConvex`), no shape too (`ErrNoShape`), a density which is not positive on a dynamic body too
+  (`ErrMasslessBody`): the body is left as it is, never in silence.
+- Both calls run between two steps, like `AddBody`; they allocate nothing.
 
 ### Timestep & substeps
 ```go
@@ -352,18 +526,40 @@ With 8 substeps at 60 Hz, a stack of 10 boxes of 50 cm sinks by ~32 mm (Box2D v3
 more.
 
 ### Fast bodies
-The contacts with a static body are created before the body touches it (speculative contacts), from the distance it can
-travel during the step. Between 2 dynamic bodies, from 2 cm only: a fast body can enter another one during a step, the
-spring of the contact pushes it out.
-A fast body is also moved back to its first impact with a static body (continuous collision). Set `IsBullet` on a small
-fast body (a projectile) to stop it on the dynamic bodies too.
-A ball at 40 m/s does not go through a 4 cm wall at 60 Hz (nor at 80 m/s).
+The contacts with a static or a kinematic body are created before the body touches it (speculative contacts), from the
+distance it can travel during the step; so are the contacts of a fast body (a body which can move more than half of its
+smallest extent during the step) with every body. Between 2 slower dynamic bodies, from 2 cm only: a body can enter
+another one by what it moves in a step, the spring of the contact pushes it out.
+A fast body is also moved back to its first impact with any body it had no contact with (continuous collision):
+nothing marks a projectile, there is no bullet flag.
+A ball at 40 m/s does not go through a 4 cm wall at 60 Hz (nor at 80 m/s); 2 balls of 10 cm thrown at 20 m/s each
+bounce off each other; a plate of 1 cm at 30 m/s pushes the resting plate it meets.
 
 ### Sleep
 The bodies touching each other form an island. An island resting for 0.5 s (all its bodies under 0.05 m/s and 0.05 rad/s)
 falls asleep: it is not simulated anymore.
 The whole island wakes up with `AddForce`, `AddTorque` or `WakeUp` on one of its bodies, when a moving body touches it,
-or when a body under it is removed.
+or when a body under it is removed. A body asleep in a trigger stays in it ([Triggers](#triggers)).
+
+### Triggers
+A trigger (`IsTrigger`) is not solved: it detects the bodies which overlap it. `EventTriggerEnter` when a body starts to
+overlap it, `EventTriggerStay` at each step while one of them is awake, `EventTriggerExit` when they no longer overlap, or
+when one of them is removed (`RemoveBody`: the exit is sent with the events of the next step).
+- A body asleep in a trigger stays in it: no exit, and no stay while both rest. Counting the enters and the exits gives
+  the bodies in a zone.
+- A body in contact with a trigger is in it (as `World.Overlap`).
+- The game moves a static trigger, or a sleeping body: set its `Transform` and call `UpdateAABB` (or `Teleport`). The
+  overlap is tested again when the AABB of one of the bodies changed.
+- A kinematic body enters and leaves a static trigger, and a kinematic trigger detects the static and the kinematic
+  bodies: a door zone sees the platform which carries the player. 2 static bodies never pair.
+- Each awake body in a trigger costs a test per step; a body asleep in a trigger costs its place in the pairs of the
+  step, without test while nothing moves.
+
+### Collision events
+`EventCollisionEnter` when 2 bodies start to touch, `EventCollisionStay` at each step while one of them is awake,
+`EventCollisionExit` when they stop touching, or when one of them is removed (`RemoveBody`: the exit is sent with the
+events of the next step). A body asleep on the ground, or on another body, still touches it: no exit, and no stay
+while both rest. A body made a trigger ends its contacts and starts its trigger pairs.
 
 ### Determinism & threads
 The same scene gives the same result, bit for bit, whatever the number of `Workers`.
@@ -379,4 +575,12 @@ Call `World.Close()` when the world is not used anymore, to stop its workers.
 | Stacks wobble | Increase `Substeps` |
 | No bounce | Restitution on both bodies, impact faster than 1 m/s |
 | A body does not move | It may be asleep: call `WakeUp`. It may be locked along this axis: `LinearLock`, `AngularLock` |
-| A character falls over | Lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |
+| A character falls over | Use a `CharacterVirtual` (a capsule which never turns); for a dynamic body, lock its rotations around X and Z: `SetLocks(actor.NoAxes, actor.AxisX\|actor.AxisZ)` |
+| A character falls through the floor, or flies | Add the gravity of the step to its velocity every frame, and reset the vertical velocity on the ground (the recipe of [Characters](#characters)) |
+| A character creeps down a slope | It has a horizontal velocity: give it exactly 0 to stand still. Steeper than `MaxSlopeAngle`, a slope is slid down |
+| A character stops at a small step | `StepHeight` is 0, or lower than the step |
+| A character lags behind its platform | Update it after `World.Step`, and call `UpdateGroundVelocity` before reading `GroundVelocity` |
+| A character can't push a crate | `MaxStrength` (N) × dt is the impulse of a frame: 100 N moves 20 kg; a heavy crate stops the character by design |
+| A kinematic body doesn't move | Give it a target before each step: `SetKinematicTarget`. A velocity written on it is ignored |
+| A kinematic body goes through the bodies | It was teleported or placed by hand: move it by `SetKinematicTarget`, which pushes with the velocity of the motion |
+| A platform falls asleep with its riders | It had no target: a kinematic body without target rests. Give it a target each step while it must move |

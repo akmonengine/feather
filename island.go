@@ -9,6 +9,8 @@ import (
 // sleepIslands: the bodies touching each other form an island (as in Box2D). An island falls asleep when all
 // its bodies are resting, and wakes up entirely when one of its bodies wakes up.
 // A body can't sleep under a moving body anymore, and the bodies above a removed body wake up.
+// A kinematic body is in the island of the bodies it touches (as in Box2D and Jolt): on its way to a target it keeps
+// them awake, stopped it sleeps with them, and a target wakes them all up.
 type sleepIslands struct {
 	// union-find over the dynamic bodies of the solver
 	parent   []int
@@ -52,7 +54,7 @@ func (si *sleepIslands) update(s *solver, dt float64) {
 	// ========== 1. Timers ==========
 	for i := range s.states {
 		body := s.states[i].body
-		if body.Velocity.Len() < actor.DefaultSleepSpeed && body.AngularVelocity.Len() < actor.DefaultSleepSpeed {
+		if isResting(body) {
 			body.SleepTimer += dt
 		} else {
 			body.SleepTimer = 0

@@ -82,6 +82,8 @@ type Proxy struct {
 	Rotation mgl64.Mat3 // local to world
 	Inverse  mgl64.Mat3 // world to local
 	Shape    Supporter
+	// upright: the rotation is the identity, the supports skip it
+	upright bool
 }
 
 func NewProxy(body *actor.RigidBody) Proxy {
@@ -133,11 +135,16 @@ func NewProxyAt(transform actor.Transform, shape Supporter) Proxy {
 		2 * (x*y - w*z), 1 - 2*(x*x+z*z), 2 * (y*z + w*x),
 		2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2*(x*x+y*y),
 	}
-	return Proxy{Position: transform.Position, Rotation: rotation, Inverse: rotation.Transpose(), Shape: shape}
+	return Proxy{Position: transform.Position, Rotation: rotation, Inverse: rotation.Transpose(), Shape: shape, upright: q.V == mgl64.Vec3{} && q.W == 1}
 }
 
-// SupportWorld returns the farthest point of the shape in the direction, in world space
+// SupportWorld returns the farthest point of the shape in the direction, in world space. An upright shape (the
+// identity rotation: a standing capsule, a triangle of a surface) skips the two rotations, which would give the
+// same bits
 func (p *Proxy) SupportWorld(direction mgl64.Vec3) mgl64.Vec3 {
+	if p.upright {
+		return p.Position.Add(p.Shape.Support(direction))
+	}
 	return p.Position.Add(p.Rotation.Mul3x1(p.Shape.Support(p.Inverse.Mul3x1(direction))))
 }
 

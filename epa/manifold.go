@@ -59,13 +59,23 @@ func (p *polygon) add(v mgl64.Vec3) {
 // The deepest point has the separation of EPA, the other points are higher along the normal.
 // Points further than the margin are removed, and 4 points are kept at most
 func Manifold(a, b *actor.RigidBody, result Result, margin float64, m *constraint.Manifold) {
+	buffers := featuresPool.Get().(*features)
+	defer featuresPool.Put(buffers)
+	manifoldIn(a, b, result, margin, m, buffers)
+}
+
+// Manifold is Manifold with the buffers of the scratch
+func (s *Scratch) Manifold(a, b *actor.RigidBody, result Result, margin float64, m *constraint.Manifold) {
+	manifoldIn(a, b, result, margin, m, &s.features)
+}
+
+// manifoldIn: Manifold in the buffers
+func manifoldIn(a, b *actor.RigidBody, result Result, margin float64, m *constraint.Manifold, buffers *features) {
 	m.Reset(a, b)
 	normal := result.Normal
 	m.Normal = normal
 	separation := margin - result.Depth
 
-	buffers := featuresPool.Get().(*features)
-	defer featuresPool.Put(buffers)
 	featureA, featureB := &buffers.a, &buffers.b
 	feature(a, normal, featureA)
 	feature(b, normal.Mul(-1), featureB)

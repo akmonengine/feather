@@ -60,17 +60,12 @@ func narrowPhase(pairs []Pair, workersCount int, margin func(a, b *actor.RigidBo
 	return compactManifolds(manifolds, offsets, counts)
 }
 
-// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a heightfield
+// manifoldsOf: the count of manifolds a pair can have, MaxManifoldsPerPair against a surface (a heightfield, a mesh)
 func manifoldsOf(pair Pair) int {
-	if isHeightfield(pair.BodyA) || isHeightfield(pair.BodyB) {
+	if isSurface(pair.BodyA) || isSurface(pair.BodyB) {
 		return MaxManifoldsPerPair
 	}
 	return 1
-}
-
-func isHeightfield(body *actor.RigidBody) bool {
-	_, ok := body.Shape.(*actor.Heightfield)
-	return ok
 }
 
 // collidePair: triggers keep only the real overlaps
@@ -167,8 +162,8 @@ func compactManifolds(manifolds []constraint.Manifold, offsets, counts []int) []
 // - spheres & capsules: closest points of their segments (collision_capsule.go)
 // - other shapes: GJK/EPA, then the contact points are clipped (epa/manifold.go)
 //
-// Against a heightfield, a body can touch the terrain with several normals: Collide keeps the deepest patch,
-// CollideAll returns all of them
+// Against a surface (a heightfield, a triangle mesh), a body can touch it with several normals: Collide keeps the
+// deepest patch, CollideAll returns all of them
 func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
 	var manifolds [1]constraint.Manifold
 	found := CollideAll(a, b, margin, manifolds[:]) > 0
@@ -178,41 +173,77 @@ func Collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 
 // CollideAll writes in manifolds the contacts between a and b (MaxManifoldsPerPair at most), and returns their count
 func CollideAll(a, b *actor.RigidBody, margin float64, manifolds []constraint.Manifold) int {
+	return collideAllMoving(nil, a, b, margin, mgl64.Vec3{}, manifolds)
+}
+
+// contactScratch: the buffers of the contacts of a pair (GJK, EPA and the clipping of the features, the points of a
+// plane, the triangles of a surface), the own buffers of a character (CharacterVirtual). The pairs of a step pass nil:
+// they take each buffer from its sync.Pool when they need it. A pool emptied by the garbage collector gives new
+// buffers, which grow again: an update of a character, which allocated nothing, allocated then
+type contactScratch struct {
+	simplex   gjk.Simplex
+	epa       epa.Scratch
+	plane     planeBuffers
+	triangles triangleScratch
+}
+
+// newContactScratch: the buffers, the triangle of the surfaces made
+func newContactScratch() *contactScratch {
+	s := &contactScratch{plane: newPlaneBuffers()}
+	s.triangles.init()
+	s.triangles.epa = &s.epa
+	return s
+}
+
+// collideAllMoving: CollideAll for a body a which moves in the direction movement (a unit vector, or zero): on a
+// surface, the normal of a contact on an inactive edge follows the motion (contactNormal), as the contacts of a
+// character. The buffers are those of s, those of the pools if s is nil
+func collideAllMoving(s *contactScratch, a, b *actor.RigidBody, margin float64, movement mgl64.Vec3, manifolds []constraint.Manifold) int {
 	if len(manifolds) == 0 {
 		return 0
 	}
 	m := &manifolds[0]
 	m.Reset(a, b)
 
-	if field, ok := a.Shape.(*actor.Heightfield); ok {
-		return collideHeightfield(a, field, b, margin, false, manifolds)
+	// a surface against a surface never meets: both are static
+	if isSurface(a) {
+		return collideTriangles(s, a, b, margin, false, movement.Mul(-1), manifolds)
 	}
-	if field, ok := b.Shape.(*actor.Heightfield); ok {
-		return collideHeightfield(b, field, a, margin, true, manifolds)
+	if isSurface(b) {
+		return collideTriangles(s, b, a, margin, true, movement, manifolds)
 	}
-	if collide(a, b, margin, m) {
+	if collide(s, a, b, margin, m) {
 		return 1
 	}
 	return 0
 }
 
-// collide the convex shapes a & b
-func collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
+// collide the convex shapes a & b, in the buffers of s (of the pools if nil)
+func collide(s *contactScratch, a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool {
 	if plane, ok := a.Shape.(*actor.Plane); ok {
-		return collidePlane(plane, b, margin, false, m)
+		return collidePlane(s, plane, b, margin, false, m)
 	}
 	if plane, ok := b.Shape.(*actor.Plane); ok {
-		return collidePlane(plane, a, margin, true, m)
+		return collidePlane(s, plane, a, margin, true, m)
 	}
 
 	if isAnalyticPair(a.Shape, b.Shape) {
 		return collideAnalyticPair(a, b, margin, m)
 	}
 
+	if s != nil {
+		result, ok := penetration(a, b, margin, &s.simplex, &s.epa)
+		if !ok {
+			return false
+		}
+		s.epa.Manifold(a, b, result, margin, m)
+		return m.Count > 0
+	}
+
 	simplex := gjk.SimplexPool.Get().(*gjk.Simplex)
 	defer gjk.SimplexPool.Put(simplex)
 
-	result, ok := penetration(a, b, margin, simplex)
+	result, ok := penetration(a, b, margin, simplex, nil)
 	if !ok {
 		return false
 	}
@@ -223,12 +254,19 @@ func collide(a, b *actor.RigidBody, margin float64, m *constraint.Manifold) bool
 // penetration of a + margin into b (the convex shapes), false if they are further than the margin.
 // A rounded shape (sphere, capsule) is its core with a radius: GJK gives the distance and the closest points of the
 // cores, exact against a polytope (Bullet, Jolt), and the radii are added along their direction. EPA runs on the full
-// shapes only if the cores overlap, or are too close for their direction to be a normal
-func penetration(a, b *actor.RigidBody, margin float64, simplex *gjk.Simplex) (epa.Result, bool) {
+// shapes only if the cores overlap, or are too close for their direction to be a normal. EPA works in buffers, in those
+// of its pool if nil
+func penetration(a, b *actor.RigidBody, margin float64, simplex *gjk.Simplex, buffers *epa.Scratch) (epa.Result, bool) {
 	coreA, radiusA := gjk.NewCoreProxy(a)
 	coreB, radiusB := gjk.NewCoreProxy(b)
+	return penetrationOfCores(a, b, &coreA, radiusA, &coreB, radiusB, margin, simplex, buffers)
+}
+
+// penetrationOfCores: penetration, the cores of the shapes and their radii already made (a triangle of a surface
+// tests one body: its core is made once per pair, not per triangle)
+func penetrationOfCores(a, b *actor.RigidBody, coreA *gjk.Proxy, radiusA float64, coreB *gjk.Proxy, radiusB, margin float64, simplex *gjk.Simplex, buffers *epa.Scratch) (epa.Result, bool) {
 	if radiusA+radiusB > 0 {
-		if closest := gjk.Distance(&coreA, &coreB); !closest.Overlap && closest.Distance > normalEpsilon {
+		if closest := gjk.Distance(coreA, coreB); !closest.Overlap && closest.Distance > normalEpsilon {
 			depth := radiusA + radiusB + margin - closest.Distance
 			if depth < 0 {
 				return epa.Result{}, false
@@ -247,7 +285,13 @@ func penetration(a, b *actor.RigidBody, margin float64, simplex *gjk.Simplex) (e
 	if !gjk.GJKProxies(&proxyA, &proxyB, margin, simplex) {
 		return epa.Result{}, false
 	}
-	result, err := epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
+	var result epa.Result
+	var err error
+	if buffers != nil {
+		result, err = buffers.EPAProxies(&proxyA, &proxyB, simplex, margin)
+	} else {
+		result, err = epa.EPAProxies(&proxyA, &proxyB, simplex, margin)
+	}
 	if err != nil {
 		return epa.Result{}, false
 	}
@@ -260,15 +304,27 @@ type planeBuffers struct {
 	points []constraint.ContactPoint
 }
 
+// newPlaneBuffers: the buffers of collidePlane, for the 8 vertices of a box
+func newPlaneBuffers() planeBuffers {
+	return planeBuffers{plane: make(actor.PlaneContact, 0, 8), points: make([]constraint.ContactPoint, 0, 8)}
+}
+
 var planeContactsPool = sync.Pool{New: func() any {
-	return &planeBuffers{plane: make(actor.PlaneContact, 0, 8), points: make([]constraint.ContactPoint, 0, 8)}
+	buffers := newPlaneBuffers()
+	return &buffers
 }}
 
 // collidePlane keeps the order of the pair: if the plane is body B, the normal is reversed.
-// The points of the shape are reduced to 4 like the other contacts: the deepest first
-func collidePlane(plane *actor.Plane, object *actor.RigidBody, margin float64, planeIsB bool, m *constraint.Manifold) bool {
-	buffers := planeContactsPool.Get().(*planeBuffers)
-	defer planeContactsPool.Put(buffers)
+// The points of the shape are reduced to 4 like the other contacts: the deepest first. The buffers are those of s,
+// those of the pool if nil
+func collidePlane(s *contactScratch, plane *actor.Plane, object *actor.RigidBody, margin float64, planeIsB bool, m *constraint.Manifold) bool {
+	var buffers *planeBuffers
+	if s != nil {
+		buffers = &s.plane
+	} else {
+		buffers = planeContactsPool.Get().(*planeBuffers)
+		defer planeContactsPool.Put(buffers)
+	}
 	buffers.plane = object.Shape.CollideWithPlane(plane.Normal, plane.Distance, object.Transform, margin, buffers.plane[:0])
 	if len(buffers.plane) == 0 {
 		return false

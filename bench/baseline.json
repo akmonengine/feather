@@ -3,33 +3,33 @@
   "machine": "AMD Ryzen 7 5800X 8-Core Processor, 16 CPUs",
   "scenes": {
     "joint chain": {
-      "fingerprint": "df487b66cbb2b4cc",
+      "fingerprint": "e375fb3eb4ce24d4",
       "quality": {
         "energy gain": {
           "value": 0,
           "unit": "%"
         },
         "worst stretch": {
-          "value": 23.65572439277502,
+          "value": 9.119298737745858,
           "unit": "mm"
         }
       },
-      "stepMs": 0.22009185000000003,
+      "stepMs": 0.22301199000000002,
       "phasesMs": {
-        "broad phase": 0.018945903333333333,
-        "continuous": 0.006522506666666667,
-        "islands": 0.00038624333333333336,
-        "narrow phase": 0.00135221,
-        "prepare": 0.00715956,
-        "restitution": 0.0024266333333333332,
-        "substeps": 0.18228492333333332
+        "broad phase": 0.0192974,
+        "continuous": 0.006813083333333334,
+        "islands": 0.00043123666666666674,
+        "narrow phase": 0.0015468133333333333,
+        "prepare": 0.007279990000000001,
+        "restitution": 0.002465933333333333,
+        "substeps": 0.18380237333333332
       }
     },
     "locked bodies": {
-      "fingerprint": "de903bb2f7759ece",
+      "fingerprint": "442ffb0e1d20e289",
       "quality": {
         "least push": {
-          "value": -0.05361700907189492,
+          "value": -0.050598055941050234,
           "unit": "m"
         },
         "worst lean": {
@@ -41,7 +41,7 @@
           "unit": "mm"
         },
         "worst stretch": {
-          "value": 9.304773733705368,
+          "value": 9.136657420948604,
           "unit": "mm"
         },
         "worst turn off plane": {
@@ -49,15 +49,15 @@
           "unit": ""
         }
       },
-      "stepMs": 0.9530423916666667,
+      "stepMs": 1.0974901291666666,
       "phasesMs": {
-        "broad phase": 0.07955472499999999,
-        "continuous": 0.019992470833333335,
-        "islands": 0.002952229166666667,
-        "narrow phase": 0.23069107083333332,
-        "prepare": 0.09510173333333333,
-        "restitution": 0.020720166666666665,
-        "substeps": 0.5025578833333334
+        "broad phase": 0.08469075416666666,
+        "continuous": 0.029372766666666668,
+        "islands": 0.003589795833333333,
+        "narrow phase": 0.2770253041666667,
+        "prepare": 0.10668754999999999,
+        "restitution": 0.02166410833333333,
+        "substeps": 0.5727411625
       }
     },
     "pile of 500": {
@@ -68,15 +68,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.69534875,
+      "stepMs": 0.7004177111111111,
       "phasesMs": {
-        "broad phase": 0.09051061666666665,
-        "continuous": 0.006043966666666667,
-        "islands": 0.0022648777777777777,
-        "narrow phase": 0.17847557777777778,
-        "prepare": 0.0682592,
-        "restitution": 0.020380722222222224,
-        "substeps": 0.32546101111111114
+        "broad phase": 0.09606705555555554,
+        "continuous": 0.005705511111111111,
+        "islands": 0.0024900944444444443,
+        "narrow phase": 0.17642735555555555,
+        "prepare": 0.06974563333333333,
+        "restitution": 0.020286266666666667,
+        "substeps": 0.32840634444444444
       }
     },
     "pyramid": {
@@ -87,15 +87,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.06100135,
+      "stepMs": 0.06087862,
       "phasesMs": {
-        "broad phase": 0.004403163333333333,
-        "continuous": 0.00023557,
-        "islands": 0.00021229999999999998,
-        "narrow phase": 0.009503561666666665,
-        "prepare": 0.005879049999999999,
-        "restitution": 0.0010754766666666667,
-        "substeps": 0.039461013333333336
+        "broad phase": 0.004601518333333334,
+        "continuous": 0.00021938333333333332,
+        "islands": 0.000209,
+        "narrow phase": 0.00921067,
+        "prepare": 0.00593702,
+        "restitution": 0.0010863433333333334,
+        "substeps": 0.039382375000000004
       }
     },
     "queries scattered": {
@@ -110,15 +110,15 @@
           "unit": ""
         }
       },
-      "stepMs": 59.75905133333333,
+      "stepMs": 62.447808,
       "phasesMs": {
-        "all hits level 50 m": 14.695996000000001,
-        "capsule level 2 m": 15.354263333333334,
-        "overlap sphere 1 m": 7.1512243333333325,
-        "ray down 2 m": 3.9181373333333336,
-        "ray level 50 m": 9.039622333333334,
-        "sphere down 2 m": 6.602841000000001,
-        "sync queries": 2.893712666666667
+        "all hits level 50 m": 14.77555,
+        "capsule level 2 m": 16.204857333333333,
+        "overlap sphere 1 m": 7.315029,
+        "ray down 2 m": 3.977032,
+        "ray level 50 m": 9.608064,
+        "sphere down 2 m": 6.808702666666666,
+        "sync queries": 2.9357323333333336
       }
     },
     "queries terrain": {
@@ -133,15 +133,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 46.364793666666664,
+      "stepMs": 53.99426833333334,
       "phasesMs": {
-        "ray down on the terrain": 2.5992893333333336,
-        "ray of 1000 m across the terrain": 2.5271486666666667,
-        "sphere down on the terrain": 41.23835566666667
+        "ray down on the terrain": 3.423365,
+        "ray of 1000 m across the terrain": 2.8693519999999997,
+        "sphere down on the terrain": 47.701551333333335
       }
     },
     "rain on terrain": {
-      "fingerprint": "a0ca7a7320e1608e",
+      "fingerprint": "fb4b0670fc06c4b4",
       "quality": {
         "fell through": {
           "value": 0,
@@ -150,52 +150,52 @@
       },
       "draws": {
         "landing depth": {
-          "median": 17.218281823949532,
+          "median": 17.89686076639699,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 10.413571779183126,
-          "worst": 82.58796734171223
+          "tolerance": 11.151256954913668,
+          "worst": 47.96395980042037
         }
       },
-      "stepMs": 8.877046893333333,
+      "stepMs": 9.894548166666667,
       "phasesMs": {
-        "broad phase": 0.11768916,
-        "continuous": 3.3405569266666664,
-        "islands": 0.005727843333333333,
-        "narrow phase": 3.4047865966666664,
-        "prepare": 0.29774268000000004,
-        "restitution": 0.046472846666666665,
-        "substeps": 1.6427679066666667
+        "broad phase": 0.12317079,
+        "continuous": 3.8663490866666668,
+        "islands": 0.006995226666666667,
+        "narrow phase": 3.6217038133333337,
+        "prepare": 0.35218296666666665,
+        "restitution": 0.047496616666666665,
+        "substeps": 1.8031240566666669
       }
     },
     "slope pile": {
-      "fingerprint": "b6adc79f5ef0cde8",
+      "fingerprint": "ebee9691aa060267",
       "quality": {},
       "draws": {
         "landing depth": {
-          "median": 2.053984329581815,
+          "median": 2.210456217812524,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 1.6952357849386868,
-          "worst": 8.322796739766602
+          "tolerance": 1.165747096459242,
+          "worst": 8.322796739766714
         },
         "resting depth": {
-          "median": 0.1725802194769699,
+          "median": 0.14554989867798795,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 0.3105487207868407,
-          "worst": 0.7472149206435574
+          "tolerance": 0.11278823844551589,
+          "worst": 0.5109107633280985
         }
       },
-      "stepMs": 0.5205421291666666,
+      "stepMs": 0.5994101000000001,
       "phasesMs": {
-        "broad phase": 0.0761192,
-        "continuous": 0.026549345833333335,
-        "islands": 0.0008678833333333333,
-        "narrow phase": 0.0715856,
-        "prepare": 0.03613751666666667,
-        "restitution": 0.010129362499999999,
-        "substeps": 0.2956359125
+        "broad phase": 0.082532625,
+        "continuous": 0.034937358333333335,
+        "islands": 0.0012235125,
+        "narrow phase": 0.08759932916666666,
+        "prepare": 0.042588920833333335,
+        "restitution": 0.0110939125,
+        "substeps": 0.3368199041666667
       }
     },
     "solver2d ball and chain": {
@@ -210,15 +210,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.31214675666666664,
+      "stepMs": 0.31453573333333334,
       "phasesMs": {
-        "broad phase": 0.020797556666666665,
-        "continuous": 0.004592016666666666,
-        "islands": 0.0003969,
-        "narrow phase": 0.00023123666666666667,
-        "prepare": 0.007940486666666666,
-        "restitution": 0.0025251,
-        "substeps": 0.2753173033333333
+        "broad phase": 0.021276466666666664,
+        "continuous": 0.005579096666666667,
+        "islands": 0.00042987666666666663,
+        "narrow phase": 0.00025607,
+        "prepare": 0.007935850000000001,
+        "restitution": 0.0025125666666666667,
+        "substeps": 0.27528864
       }
     },
     "solver2d bridge": {
@@ -237,38 +237,38 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.5716243866666666,
+      "stepMs": 0.5867270866666666,
       "phasesMs": {
-        "broad phase": 0.006406896666666667,
-        "continuous": 0.0017383466666666665,
-        "islands": 0.0008251766666666667,
-        "narrow phase": 0.000047636666666666664,
-        "prepare": 0.014963296666666667,
-        "restitution": 0.008951076666666667,
-        "substeps": 0.53789056
+        "broad phase": 0.007899423333333332,
+        "continuous": 0.0018044866666666666,
+        "islands": 0.0009190766666666666,
+        "narrow phase": 0.00004963333333333334,
+        "prepare": 0.015226720000000001,
+        "restitution": 0.009307059999999999,
+        "substeps": 0.5504318133333334
       }
     },
     "solver2d card house": {
-      "fingerprint": "118e5849133d9d71",
+      "fingerprint": "23fa14fda802263f",
       "quality": {
         "levels": {
           "value": 3,
           "unit": ""
         },
         "worst drift": {
-          "value": 0.14162818993755702,
+          "value": 0.13354162921420484,
           "unit": "mm"
         }
       },
-      "stepMs": 0.08459638095238095,
+      "stepMs": 0.08905327619047618,
       "phasesMs": {
-        "broad phase": 0.0017992523809523809,
-        "continuous": 0.000547247619047619,
-        "islands": 0.0001906238095238095,
-        "narrow phase": 0.025572080952380952,
-        "prepare": 0.005574409523809523,
-        "restitution": 0.0009038761904761906,
-        "substeps": 0.04982627619047619
+        "broad phase": 0.001960295238095238,
+        "continuous": 0.0006018666666666667,
+        "islands": 0.0002086285714285714,
+        "narrow phase": 0.02774414761904762,
+        "prepare": 0.005847085714285715,
+        "restitution": 0.0009232952380952382,
+        "substeps": 0.051478671428571425
       }
     },
     "solver2d centered impact": {
@@ -283,15 +283,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.006988361111111111,
+      "stepMs": 0.00894856111111111,
       "phasesMs": {
-        "broad phase": 0.00034295,
-        "continuous": 0.00010066666666666667,
-        "islands": 0.00011433888888888887,
-        "narrow phase": 0.0009121166666666667,
-        "prepare": 0.0007290111111111111,
-        "restitution": 0.00029872777777777777,
-        "substeps": 0.004325644444444444
+        "broad phase": 0.0004703944444444444,
+        "continuous": 0.00012800000000000002,
+        "islands": 0.0001535,
+        "narrow phase": 0.0011600722222222222,
+        "prepare": 0.0009429555555555555,
+        "restitution": 0.00038700555555555555,
+        "substeps": 0.005448927777777778
       }
     },
     "solver2d circle stack": {
@@ -306,15 +306,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.0043214,
+      "stepMs": 0.004443641666666666,
       "phasesMs": {
-        "broad phase": 0.0008298229166666666,
-        "continuous": 0.00011043750000000001,
-        "islands": 0.00011383541666666667,
-        "narrow phase": 0.0003176875,
-        "prepare": 0.0005613187499999999,
-        "restitution": 0.00018441666666666666,
-        "substeps": 0.002071233333333333
+        "broad phase": 0.00087118125,
+        "continuous": 0.00010941875,
+        "islands": 0.00012127291666666666,
+        "narrow phase": 0.00032208541666666667,
+        "prepare": 0.0005773145833333333,
+        "restitution": 0.0001876875,
+        "substeps": 0.0021001479166666667
       }
     },
     "solver2d confined": {
@@ -333,19 +333,19 @@
           "unit": ""
         }
       },
-      "stepMs": 0.59223589,
+      "stepMs": 0.62159325,
       "phasesMs": {
-        "broad phase": 0.05154194333333333,
-        "continuous": 0.0036594766666666664,
-        "islands": 0.0018215333333333331,
-        "narrow phase": 0.11584889333333334,
-        "prepare": 0.09548596333333334,
-        "restitution": 0.010471023333333333,
-        "substeps": 0.31178197
+        "broad phase": 0.05546579,
+        "continuous": 0.0035981200000000002,
+        "islands": 0.0020239933333333336,
+        "narrow phase": 0.12046342,
+        "prepare": 0.10479641666666667,
+        "restitution": 0.010654786666666666,
+        "substeps": 0.3216453166666667
       }
     },
     "solver2d double domino": {
-      "fingerprint": "8c191c63323d47e2",
+      "fingerprint": "2a2779b9e8f22068",
       "quality": {
         "fallen": {
           "value": 15,
@@ -354,29 +354,29 @@
       },
       "draws": {
         "time of the last": {
-          "median": 7.233333333333313,
+          "median": 7.241666666666646,
           "unit": "s",
           "variants": 32,
-          "tolerance": 0.04999999999999982,
+          "tolerance": 0.06250000000000044,
           "worst": 7.349999999999979
         }
       },
-      "stepMs": 0.10574514375,
+      "stepMs": 0.1088928375,
       "phasesMs": {
-        "broad phase": 0.0019995947916666666,
-        "continuous": 0.0004542322916666666,
-        "islands": 0.00023536666666666665,
-        "narrow phase": 0.019646505208333335,
-        "prepare": 0.008866291666666666,
-        "restitution": 0.001902140625,
-        "substeps": 0.071482978125
+        "broad phase": 0.0022813072916666667,
+        "continuous": 0.00045727916666666663,
+        "islands": 0.00026416041666666666,
+        "narrow phase": 0.020021432291666665,
+        "prepare": 0.009129710416666666,
+        "restitution": 0.002000271875,
+        "substeps": 0.07454536875
       }
     },
     "solver2d far chain": {
-      "fingerprint": "920bc3620f9389f9",
+      "fingerprint": "b5f6970dbc7f0c8d",
       "quality": {
         "far deviation": {
-          "value": 1.0814722984127874e-7,
+          "value": 1.079942530743785e-7,
           "unit": "mm"
         },
         "finite": {
@@ -388,15 +388,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.6374967283333334,
+      "stepMs": 0.6394512283333333,
       "phasesMs": {
-        "broad phase": 0.04901382,
-        "continuous": 0.016537715,
-        "islands": 0.0007044716666666667,
-        "narrow phase": 0.007148178333333333,
-        "prepare": 0.01498872,
-        "restitution": 0.00485565,
-        "substeps": 0.544017615
+        "broad phase": 0.050001135,
+        "continuous": 0.023344856666666667,
+        "islands": 0.000740175,
+        "narrow phase": 0.008228735000000001,
+        "prepare": 0.015145771666666667,
+        "restitution": 0.0048663583333333335,
+        "substeps": 0.5365265283333333
       }
     },
     "solver2d far pyramid": {
@@ -416,15 +416,15 @@
           "worst": 116.7944523183155
         }
       },
-      "stepMs": 3.4349718183333335,
+      "stepMs": 3.4155556933333333,
       "phasesMs": {
-        "broad phase": 0.08412530333333333,
-        "continuous": 0.007053413333333333,
-        "islands": 0.0037678716666666666,
-        "narrow phase": 0.6581630033333333,
-        "prepare": 0.25687519666666664,
-        "restitution": 0.04229622,
-        "substeps": 2.3775142283333333
+        "broad phase": 0.08951543833333334,
+        "continuous": 0.006593758333333333,
+        "islands": 0.003941895,
+        "narrow phase": 0.6560169983333334,
+        "prepare": 0.2565347866666667,
+        "restitution": 0.04261444666666667,
+        "substeps": 2.3559591083333333
       }
     },
     "solver2d far recovery": {
@@ -439,22 +439,22 @@
           "unit": "m/s"
         }
       },
-      "stepMs": 0.49591346111111106,
+      "stepMs": 0.5086142055555556,
       "phasesMs": {
-        "broad phase": 0.006394630555555556,
-        "continuous": 0.0006849805555555556,
-        "islands": 0.0005735055555555555,
-        "narrow phase": 0.15683636944444443,
-        "prepare": 0.029888416666666664,
-        "restitution": 0.0040781555555555555,
-        "substeps": 0.2971797
+        "broad phase": 0.007088475,
+        "continuous": 0.0006917888888888889,
+        "islands": 0.0006035944444444444,
+        "narrow phase": 0.16135723333333332,
+        "prepare": 0.031161680555555554,
+        "restitution": 0.0041253194444444445,
+        "substeps": 0.3032203972222222
       }
     },
     "solver2d far stack": {
-      "fingerprint": "11ea1fce583a161e",
+      "fingerprint": "b3d0390ea3e0a953",
       "quality": {
         "far deviation": {
-          "value": 0.8869082560041711,
+          "value": 0.886908174954758,
           "unit": "mm"
         },
         "worst drift": {
@@ -462,15 +462,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.016295401666666667,
+      "stepMs": 0.01669714,
       "phasesMs": {
-        "broad phase": 0.0005315550000000001,
-        "continuous": 0.00012548333333333334,
-        "islands": 0.00013293666666666667,
-        "narrow phase": 0.003260023333333333,
-        "prepare": 0.0014563933333333332,
-        "restitution": 0.00044187,
-        "substeps": 0.010128463333333334
+        "broad phase": 0.000615855,
+        "continuous": 0.000127635,
+        "islands": 0.000139955,
+        "narrow phase": 0.003399483333333333,
+        "prepare": 0.0015074216666666666,
+        "restitution": 0.0004595816666666667,
+        "substeps": 0.010311103333333333
       }
     },
     "solver2d friction ramp": {
@@ -485,15 +485,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.027777786666666665,
+      "stepMs": 0.02921856,
       "phasesMs": {
-        "broad phase": 0.0009969466666666668,
-        "continuous": 0.00017273333333333332,
-        "islands": 0.00013646666666666666,
-        "narrow phase": 0.0105704,
-        "prepare": 0.0023008333333333335,
-        "restitution": 0.0006961533333333333,
-        "substeps": 0.01265182
+        "broad phase": 0.0011450000000000002,
+        "continuous": 0.00018513333333333332,
+        "islands": 0.00016126666666666667,
+        "narrow phase": 0.011161693333333333,
+        "prepare": 0.0024384666666666666,
+        "restitution": 0.0007389333333333333,
+        "substeps": 0.01316322
       }
     },
     "solver2d high mass ratio 1": {
@@ -517,109 +517,109 @@
           "worst": 138.8252610057865
         }
       },
-      "stepMs": 1.82044033,
+      "stepMs": 1.9166499700000001,
       "phasesMs": {
-        "broad phase": 0.015397880000000001,
-        "continuous": 0.0024659566666666664,
-        "islands": 0.0018550233333333333,
-        "narrow phase": 0.49505928666666665,
-        "prepare": 0.13516982000000002,
-        "restitution": 0.01625481,
-        "substeps": 1.15018284
+        "broad phase": 0.01826786,
+        "continuous": 0.0026056933333333332,
+        "islands": 0.0022142233333333336,
+        "narrow phase": 0.5235609133333333,
+        "prepare": 0.14516094,
+        "restitution": 0.01783967666666667,
+        "substeps": 1.2060733533333332
       }
     },
     "solver2d high mass ratio 2": {
-      "fingerprint": "35f80b29687cde2f",
+      "fingerprint": "17d467c15d1c48c4",
       "quality": {
         "bounce": {
-          "value": 2.0355465723505186,
+          "value": 1.9698686743722047,
           "unit": "m/s"
         },
         "slab sag": {
-          "value": 67.63919875990432,
+          "value": 67.25136634365825,
           "unit": "mm"
         },
         "small cubes drift": {
-          "value": 16.468452377556567,
+          "value": 17.817296209507198,
           "unit": "mm"
         },
         "small cubes into ground": {
-          "value": 530.0366269782514,
+          "value": 517.6818473019647,
           "unit": "mm"
         }
       },
-      "stepMs": 0.015596443333333333,
+      "stepMs": 0.016494306666666667,
       "phasesMs": {
-        "broad phase": 0.0005016399999999999,
-        "continuous": 0.0001576,
-        "islands": 0.0001263,
-        "narrow phase": 0.004176989999999999,
-        "prepare": 0.0012847833333333334,
-        "restitution": 0.0004263366666666666,
-        "substeps": 0.00869783
+        "broad phase": 0.0005804133333333334,
+        "continuous": 0.00015480666666666665,
+        "islands": 0.00013893333333333334,
+        "narrow phase": 0.004469506666666666,
+        "prepare": 0.00134159,
+        "restitution": 0.00044283333333333333,
+        "substeps": 0.009166323333333332
       }
     },
     "solver2d high mass ratio 3": {
-      "fingerprint": "16fc3d89762c7f2b",
+      "fingerprint": "32bed6809aa7f3dd",
       "quality": {
         "bounce": {
-          "value": 2.035546593114035,
+          "value": 1.969868836978326,
           "unit": "m/s"
         },
         "slab sag": {
-          "value": 67.63920297683335,
+          "value": 67.24738390279583,
           "unit": "mm"
         },
         "small cubes drift": {
-          "value": 16.468453893118642,
+          "value": 17.821486554040813,
           "unit": "mm"
         },
         "small cubes into ground": {
-          "value": 530.0366268830902,
+          "value": 517.6818552126193,
           "unit": "mm"
         }
       },
-      "stepMs": 0.01627555,
+      "stepMs": 0.01787919,
       "phasesMs": {
-        "broad phase": 0.00047926666666666664,
-        "continuous": 0.00014606666666666665,
-        "islands": 0.00012530333333333332,
-        "narrow phase": 0.00492815,
-        "prepare": 0.0012756566666666668,
-        "restitution": 0.0004244133333333333,
-        "substeps": 0.008671823333333334
+        "broad phase": 0.0005689800000000001,
+        "continuous": 0.0001452,
+        "islands": 0.00013636666666666668,
+        "narrow phase": 0.006021806666666667,
+        "prepare": 0.00134356,
+        "restitution": 0.00045063333333333335,
+        "substeps": 0.009069643333333332
       }
     },
     "solver2d joint grid": {
-      "fingerprint": "8c1a571cd246fa78",
+      "fingerprint": "3f9690b3dff51bba",
       "quality": {
         "finite": {
           "value": 1,
           "unit": ""
         },
         "max speed": {
-          "value": 29.678005033185606,
+          "value": 29.61888312944309,
           "unit": "m/s"
         }
       },
       "draws": {
         "worst gap": {
-          "median": 79.91985555188126,
+          "median": 80.24446346671454,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 3.5446750905452618,
-          "worst": 85.46939822389496
+          "tolerance": 2.0588018734757156,
+          "worst": 108.15144278745207
         }
       },
-      "stepMs": 4.101770872222223,
+      "stepMs": 4.167568188888889,
       "phasesMs": {
-        "broad phase": 0.6989104777777778,
-        "continuous": 0.045079122222222226,
-        "islands": 0.008062616666666666,
-        "narrow phase": 0.10386971111111111,
-        "prepare": 0.22165523888888888,
-        "restitution": 0.029008688888888887,
-        "substeps": 2.9808608666666663
+        "broad phase": 0.6918038666666667,
+        "continuous": 0.056684,
+        "islands": 0.010288244444444445,
+        "narrow phase": 0.10751988333333333,
+        "prepare": 0.23365088333333334,
+        "restitution": 0.030347894444444447,
+        "substeps": 3.014188538888889
       }
     },
     "solver2d overlap recovery": {
@@ -638,15 +638,15 @@
           "unit": "m/s"
         }
       },
-      "stepMs": 0.31637187333333333,
+      "stepMs": 0.3131749166666667,
       "phasesMs": {
-        "broad phase": 0.00493636,
-        "continuous": 0.00045361,
-        "islands": 0.00042744000000000007,
-        "narrow phase": 0.09771449,
-        "prepare": 0.01854371,
-        "restitution": 0.00249156,
-        "substeps": 0.18450917
+        "broad phase": 0.005369573333333334,
+        "continuous": 0.00045757,
+        "islands": 0.00043120333333333333,
+        "narrow phase": 0.09785309333333334,
+        "prepare": 0.01950180333333333,
+        "restitution": 0.0025782666666666664,
+        "substeps": 0.18674677333333334
       }
     },
     "solver2d pyramid": {
@@ -661,19 +661,19 @@
           "unit": "mm"
         }
       },
-      "stepMs": 1.1750501633333332,
+      "stepMs": 1.2664069466666665,
       "phasesMs": {
-        "broad phase": 0.0252278,
-        "continuous": 0.00128922,
-        "islands": 0.0012174533333333334,
-        "narrow phase": 0.31549095,
-        "prepare": 0.09302091666666668,
-        "restitution": 0.008838996666666666,
-        "substeps": 0.7172435966666667
+        "broad phase": 0.02772171666666667,
+        "continuous": 0.00158789,
+        "islands": 0.0014767633333333335,
+        "narrow phase": 0.32916048,
+        "prepare": 0.09662408666666666,
+        "restitution": 0.011342203333333334,
+        "substeps": 0.77432627
       }
     },
     "solver2d rush": {
-      "fingerprint": "c3d7fed02d4135f1",
+      "fingerprint": "fa2086f693949d26",
       "quality": {
         "max speed": {
           "value": 12.944602038140784,
@@ -682,29 +682,29 @@
       },
       "draws": {
         "final overlap": {
-          "median": 2.115334050644291,
+          "median": 2.1376571400363864,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 0.414584819145275,
-          "worst": 2.5749926407723223
+          "tolerance": 0.6183781580575698,
+          "worst": 3.0599492765966962
         },
         "final speed": {
-          "median": 0.22430994395373535,
+          "median": 0.20800663777451026,
           "unit": "m/s",
           "variants": 32,
-          "tolerance": 0.4801212922824684,
-          "worst": 1.2316129803361309
+          "tolerance": 0.286175640047562,
+          "worst": 0.6861658272995366
         }
       },
-      "stepMs": 0.06680301666666666,
+      "stepMs": 0.07139497,
       "phasesMs": {
-        "broad phase": 0.017867220000000003,
-        "continuous": 0.004094346666666667,
-        "islands": 0.0008140433333333333,
-        "narrow phase": 0.00008163333333333334,
-        "prepare": 0.007779333333333333,
-        "restitution": 0.00654039,
-        "substeps": 0.029011603333333334
+        "broad phase": 0.020713969999999998,
+        "continuous": 0.0039762,
+        "islands": 0.0010267533333333334,
+        "narrow phase": 0.00009946666666666667,
+        "prepare": 0.008146933333333333,
+        "restitution": 0.006789236666666666,
+        "substeps": 0.030446010000000003
       }
     },
     "solver2d single box": {
@@ -719,15 +719,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.002997588888888889,
+      "stepMs": 0.005444461111111111,
       "phasesMs": {
-        "broad phase": 0.00022744444444444442,
-        "continuous": 0.00007744444444444444,
-        "islands": 0.00010177777777777777,
-        "narrow phase": 0.00017077777777777778,
-        "prepare": 0.0003103888888888889,
-        "restitution": 0.0001725611111111111,
-        "substeps": 0.0018186222222222222
+        "broad phase": 0.0004331166666666667,
+        "continuous": 0.00012933333333333332,
+        "islands": 0.00018327777777777776,
+        "narrow phase": 0.000266,
+        "prepare": 0.0005651722222222222,
+        "restitution": 0.0002769,
+        "substeps": 0.0033888277777777776
       }
     },
     "solver2d stretched chain": {
@@ -750,15 +750,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.04360726,
+      "stepMs": 0.043379481666666664,
       "phasesMs": {
-        "broad phase": 0.0033470116666666667,
-        "continuous": 0.00040148833333333335,
-        "islands": 0.00022413833333333332,
-        "narrow phase": 0.00010278666666666666,
-        "prepare": 0.0019959183333333333,
-        "restitution": 0.00043622,
-        "substeps": 0.03681105666666667
+        "broad phase": 0.0033856433333333334,
+        "continuous": 0.00038864,
+        "islands": 0.00020358666666666665,
+        "narrow phase": 0.00011363333333333334,
+        "prepare": 0.0019641866666666665,
+        "restitution": 0.000427275,
+        "substeps": 0.03657348
       }
     },
     "solver2d vertical stack": {
@@ -773,15 +773,15 @@
           "unit": ""
         }
       },
-      "stepMs": 0.02214192,
+      "stepMs": 0.022106533333333334,
       "phasesMs": {
-        "broad phase": 0.0011675733333333332,
-        "continuous": 0.00018533666666666667,
-        "islands": 0.00016870333333333335,
-        "narrow phase": 0.00350281,
-        "prepare": 0.0021247,
-        "restitution": 0.0007701066666666666,
-        "substeps": 0.01353484
+        "broad phase": 0.0013727566666666667,
+        "continuous": 0.0002101,
+        "islands": 0.0001649,
+        "narrow phase": 0.0035674933333333337,
+        "prepare": 0.0021222666666666666,
+        "restitution": 0.00078755,
+        "substeps": 0.013235543333333334
       }
     },
     "solver2d warm start energy": {
@@ -792,15 +792,15 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.0037998066666666665,
+      "stepMs": 0.00388577,
       "phasesMs": {
-        "broad phase": 0.00033557,
-        "continuous": 0.00009076666666666667,
-        "islands": 0.00010963333333333335,
-        "narrow phase": 0.0003098033333333333,
-        "prepare": 0.0005864033333333334,
-        "restitution": 0.00015683333333333334,
-        "substeps": 0.0020723266666666665
+        "broad phase": 0.0003668733333333333,
+        "continuous": 0.00008963333333333333,
+        "islands": 0.0001169,
+        "narrow phase": 0.00031520666666666664,
+        "prepare": 0.00059258,
+        "restitution": 0.00016037,
+        "substeps": 0.0021129133333333337
       }
     },
     "spinning tops": {
@@ -819,45 +819,45 @@
           "unit": "mm"
         }
       },
-      "stepMs": 0.4575982833333333,
+      "stepMs": 0.44964708333333336,
       "phasesMs": {
-        "broad phase": 0.017041905555555556,
-        "continuous": 0.010158511111111112,
-        "islands": 0.000981622222222222,
-        "narrow phase": 0.02932755,
-        "prepare": 0.041461066666666664,
-        "restitution": 0.009315577777777778,
-        "substeps": 0.34743975
+        "broad phase": 0.017533533333333334,
+        "continuous": 0.00961046111111111,
+        "islands": 0.0010412444444444446,
+        "narrow phase": 0.028630177777777776,
+        "prepare": 0.04141895555555555,
+        "restitution": 0.009267427777777778,
+        "substeps": 0.34150290555555557
       }
     },
     "terrain piles": {
-      "fingerprint": "171ddf25f205ed46",
+      "fingerprint": "b23884faf0885dc4",
       "quality": {},
       "draws": {
         "landing depth": {
-          "median": 8.387453558916441,
+          "median": 7.228981890187681,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 5.102519961444935,
-          "worst": 38.89905371202081
+          "tolerance": 9.029772686571398,
+          "worst": 29.280296074383454
         },
         "resting depth": {
-          "median": 0.39821435581023923,
+          "median": 0.29688152007436436,
           "unit": "mm",
           "variants": 32,
-          "tolerance": 3.065757102671334,
-          "worst": 24.309573266263815
+          "tolerance": 0.12488629816916322,
+          "worst": 1.3423865310179806
         }
       },
-      "stepMs": 3.0284619412500002,
+      "stepMs": 3.1626479191666665,
       "phasesMs": {
-        "broad phase": 0.02969977166666667,
-        "continuous": 1.4339314841666668,
-        "islands": 0.0014310208333333334,
-        "narrow phase": 0.9080190854166666,
-        "prepare": 0.08607033624999999,
-        "restitution": 0.012563102916666668,
-        "substeps": 0.5447917120833333
+        "broad phase": 0.03233981416666667,
+        "continuous": 1.4324611783333334,
+        "islands": 0.0018735670833333333,
+        "narrow phase": 0.9542110433333333,
+        "prepare": 0.09691033666666667,
+        "restitution": 0.013233257916666666,
+        "substeps": 0.6033585795833333
       }
     }
   }

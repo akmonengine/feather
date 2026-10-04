@@ -575,12 +575,64 @@ func underTerrain(field *actor.Heightfield, b *actor.RigidBody) float64 {
 			}
 			depth = math.Max(depth, sunk(field, b.Transform.ToWorld(corner), 0))
 		}
+		depth = math.Max(depth, terrainInBox(field, b, shape))
 	case *actor.Sphere:
 		depth = sunk(field, b.Transform.Position, shape.Radius)
 	case *actor.Capsule:
 		bottom, top := shape.Segment(b.Transform)
 		for k := 0; k <= 50; k++ {
 			depth = math.Max(depth, sunk(field, bottom.Add(top.Sub(bottom).Mul(float64(k)/50)), shape.Radius))
+		}
+	}
+	return depth
+}
+
+// terrainInBox: how deep the terrain is in the box (identity transform of the terrain), 0 if it stays out. The corners
+// of a box can all be above the terrain while a ridge or a peak is in one of its faces. A point in the box is as deep
+// as its distance to the closest face; the terrain is made of planes, its deepest point in a face of the box is on an
+// edge of a triangle: the edges of the triangles under the box are followed, each from end to end
+func terrainInBox(field *actor.Heightfield, b *actor.RigidBody, box *actor.Box) float64 {
+	depth := 0.0
+	cellsZ := field.ZSamples - 1
+	for _, cell := range field.OverlapCells(b.AABB(), nil) {
+		for t := 0; t < 2; t++ {
+			triangle, _ := field.Triangle(int(cell)/cellsZ, int(cell)%cellsZ, t)
+			for e := 0; e < 3; e++ {
+				start, end := b.Transform.ToLocal(triangle[e]), b.Transform.ToLocal(triangle[(e+1)%3])
+				depth = math.Max(depth, segmentInBox(start, end, box.HalfExtents))
+			}
+		}
+	}
+	return depth
+}
+
+// segmentInBox: the deepest point of the segment in the box (in its local space): the highest value, over the segment,
+// of the distance to the closest face, 0 if the segment stays out. Along the segment the distance to each of the 6
+// faces is linear; the closest face changes where 2 of these distances are equal: the deepest point is at an end, or
+// at one of these crossings
+func segmentInBox(start, end, halfExtents mgl64.Vec3) float64 {
+	// the distance to the face i at the fraction f of the segment: at[i] + f*along[i]
+	var at, along [6]float64
+	for k := 0; k < 3; k++ {
+		at[2*k], along[2*k] = halfExtents[k]-start[k], start[k]-end[k]
+		at[2*k+1], along[2*k+1] = halfExtents[k]+start[k], end[k]-start[k]
+	}
+	closest := func(fraction float64) float64 {
+		distance := math.Inf(1)
+		for i := range at {
+			distance = math.Min(distance, at[i]+fraction*along[i])
+		}
+		return distance
+	}
+	depth := math.Max(0, math.Max(closest(0), closest(1)))
+	for i := range at {
+		for j := i + 1; j < len(at); j++ {
+			if along[i] == along[j] {
+				continue
+			}
+			if fraction := (at[j] - at[i]) / (along[i] - along[j]); fraction > 0 && fraction < 1 {
+				depth = math.Max(depth, closest(fraction))
+			}
 		}
 	}
 	return depth

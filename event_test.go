@@ -201,7 +201,7 @@ func TestEvents_RecordCollisions_NormalCollision(t *testing.T) {
 	}
 
 	// Pair should be recorded
-	pair := makePairKey(bodyA, bodyB)
+	pair := makeEventPair(bodyA, bodyB)
 	if !events.currentActivePairs[pair] {
 		t.Error("Normal collision pair should be recorded in currentActivePairs")
 	}
@@ -226,7 +226,7 @@ func TestEvents_RecordCollisions_TriggerCollision(t *testing.T) {
 	}
 
 	// Pair should still be recorded for event generation
-	pair := makePairKey(bodyA, bodyB)
+	pair := makeEventPair(bodyA, bodyB)
 	if !events.currentActivePairs[pair] {
 		t.Error("Trigger pair should be recorded in currentActivePairs")
 	}

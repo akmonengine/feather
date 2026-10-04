@@ -120,15 +120,15 @@ func (j *JointBase) solvePoint(s *solver, stateA, stateB *bodyState, useBias boo
 	applyLinear(stateA, stateB, rA, rB, impulse)
 }
 
-// applyLinear: -impulse at rA on A, +impulse at rB on B
+// applyLinear: -impulse at rA on A, +impulse at rB on B (only on the dynamic bodies, see jacobian.apply)
 func applyLinear(stateA, stateB *bodyState, rA, rB, impulse mgl64.Vec3) {
-	if stateA.body != nil {
+	if stateA.dynamic {
 		v, w, m := &stateA.velocity, &stateA.angularVelocity, &stateA.invMassAxes
 		v[0], v[1], v[2] = v[0]-impulse[0]*m[0], v[1]-impulse[1]*m[1], v[2]-impulse[2]*m[2]
 		torque := actor.MulMat3(&stateA.inverseInertia, rA.Cross(impulse))
 		w[0], w[1], w[2] = w[0]-torque[0], w[1]-torque[1], w[2]-torque[2]
 	}
-	if stateB.body != nil {
+	if stateB.dynamic {
 		v, w, m := &stateB.velocity, &stateB.angularVelocity, &stateB.invMassAxes
 		v[0], v[1], v[2] = v[0]+impulse[0]*m[0], v[1]+impulse[1]*m[1], v[2]+impulse[2]*m[2]
 		torque := actor.MulMat3(&stateB.inverseInertia, rB.Cross(impulse))
@@ -136,13 +136,13 @@ func applyLinear(stateA, stateB *bodyState, rA, rB, impulse mgl64.Vec3) {
 	}
 }
 
-// applyAngular: -impulse on A, +impulse on B
+// applyAngular: -impulse on A, +impulse on B (only on the dynamic bodies)
 func applyAngular(stateA, stateB *bodyState, impulse mgl64.Vec3) {
-	if stateA.body != nil {
+	if stateA.dynamic {
 		w, t := &stateA.angularVelocity, actor.MulMat3(&stateA.inverseInertia, impulse)
 		w[0], w[1], w[2] = w[0]-t[0], w[1]-t[1], w[2]-t[2]
 	}
-	if stateB.body != nil {
+	if stateB.dynamic {
 		w, t := &stateB.angularVelocity, actor.MulMat3(&stateB.inverseInertia, impulse)
 		w[0], w[1], w[2] = w[0]+t[0], w[1]+t[1], w[2]+t[2]
 	}

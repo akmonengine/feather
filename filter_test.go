@@ -627,12 +627,7 @@ func TestContinuousRespectsFilter(t *testing.T) {
 		w.Step(sceneDt)
 
 		// a motion through the wall, as if the solver had accelerated the ball
-		motion := sweep{start: actor.Transform{Position: mgl64.Vec3{0, 0, 0}, Rotation: mgl64.QuatIdent()}, end: actor.Transform{Position: mgl64.Vec3{10, 0, 0}, Rotation: mgl64.QuatIdent()}}
-		ball.Transform = motion.end
-		scratch := ccdPool.Get().(*ccdScratch)
-		scratch.core.Radius = coreFraction * 0.02
-		w.stopAtImpact(ball, &motion, 0.02, scratch)
-		ccdPool.Put(scratch)
+		moveThrough(w, ball, sweep{start: actor.Transform{Position: mgl64.Vec3{0, 0, 0}, Rotation: mgl64.QuatIdent()}, end: actor.Transform{Position: mgl64.Vec3{10, 0, 0}, Rotation: mgl64.QuatIdent()}})
 		if stopped := ball.Transform.Position.X() < 5; stopped != c.stopped {
 			t.Errorf("%s: the ball is at x=%.3f, stopped %v, want %v", c.name, ball.Transform.Position.X(), stopped, c.stopped)
 		}

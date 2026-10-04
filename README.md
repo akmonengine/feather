@@ -20,8 +20,29 @@ All shapes live in the `actor` package and implement `actor.ShapeInterface`.
 | `Plane` | `Normal`, `Distance` (static only) | analytic |
 | `Capsule` | `HalfHeight`, `Radius`, axis along local Y | analytic against planes, spheres and capsules; its segment against the other shapes (GJK distance + radius) |
 | `Heightfield` | a grid of heights (static only), 2 triangles per cell | GJK/EPA against each triangle under the body |
+| `TriangleMesh` | triangles with a tree of AABBs (static only), for the decor: `NewTriangleMesh(vertices, indices)` | GJK/EPA against each triangle under the body, as the heightfield |
+| `ConvexHull` | the convex hull of a cloud of points, by quickhull: `NewConvexHull(points, maxVertices)`, 256 vertices at most | GJK/EPA, its faces for the contact points; dynamic, with the mass and the inertia of its volume |
 
 Each shape also casts a ray on itself, in its local space (`CastRay`): the world queries are built on it.
+
+```go
+// the decor: a mesh of triangles, counterclockwise seen from outside, built once (outside Step)
+mesh, err := actor.NewTriangleMesh(vertices, indices) // vertices []mgl64.Vec3, indices []int32, 3 per triangle
+rock := actor.NewRigidBody(actor.Transform{Rotation: mgl64.QuatIdent()}, mesh, actor.BodyTypeStatic, 0)
+
+// a dynamic object: the hull of the vertices of its mesh, centered on its center of mass
+hull, err := actor.NewConvexHull(vertices, 64)
+crate := actor.NewRigidBody(actor.Transform{Position: hull.CenterOfMass(), Rotation: mgl64.QuatIdent()}, hull, actor.BodyTypeDynamic, 300)
+```
+A mesh and a heightfield are surfaces: their triangles are seen from the side of their normal, a body whose center went
+through is not pushed back. See the [physics guide](PHYSICS_GUIDE.md#decor-meshes-and-convex-hulls) and the
+[algorithms](ALGORITHMS.md#convex-hull).
+
+A body in the world changes its shape or its density in place: `world.SetShape(body, shape)` and
+`world.SetDensity(body, density)` keep its index, its pairs, its joints, its layers and its island, give it the mass and
+the inertia of the shape, wake it up with the sleeping bodies around it; a plane, a heightfield or a mesh on a dynamic
+or a kinematic body is refused (`ErrShapeNotConvex`). See the [physics guide](PHYSICS_GUIDE.md#changing-a-body) and the
+[algorithms](ALGORITHMS.md#changing-a-body).
 
 ```go
 body := actor.NewRigidBody(
@@ -92,7 +113,8 @@ world.SyncQueries() // after the game added, moved or reshaped bodies, if a quer
 - A ray is exact on each shape. A moving shape (a sphere, a capsule, a box) stops within 1 µm of the body it hits
   (0.1 mm between 2 boxes), never in it.
 - A ray or a shape which starts in a body hits it at the fraction 0, the normal against its direction.
-- The top side of a heightfield only is hit; a hole is not.
+- The top side of a heightfield only is hit; a hole is not. The side of the normal of the triangles of a mesh; its
+  `hit.Triangle` is the index of the triangle.
 - At the same fraction, the body of the lowest index in `World.Bodies` is hit: the results don't depend on the workers
   nor on the shape of the trees.
 - No allocation, no write: any number of goroutines can run queries together while nothing writes the world. A query
@@ -114,6 +136,118 @@ forces, the impulses, the contacts nor the joints move it, and its coordinate is
 a locked body has its exact inertia, the one of a body on an axle. A body without lock is simulated bit for bit as
 before. See the [physics guide](PHYSICS_GUIDE.md#axis-locks) and the
 [algorithms](ALGORITHMS.md#axis-locks).
+
+## Kinematic bodies
+A kinematic body goes where the game puts it and pushes the dynamic bodies it meets; nothing pushes it back: a moving
+platform, a character, the bones of a creature which follow its animation while its tail is simulated. It is the
+kinematic body of PhysX, Jolt, Box2D, Unity and Unreal.
+
+```go
+platform := actor.NewRigidBody(transform, &actor.Box{HalfExtents: mgl64.Vec3{2, 0.1, 2}}, actor.BodyTypeKinematic, 500)
+world.AddBody(platform)
+
+// each step: the pose the platform reaches at the end of the step; it goes there over the sub-steps
+next := platform.Transform
+next.Position = next.Position.Add(mgl64.Vec3{1, 0, 0}.Mul(dt))
+err := platform.SetKinematicTarget(next)      // actor.ErrNotKinematic on a body which is not kinematic
+world.Step(dt)                                   // the platform is at next, bit for bit; platform.Velocity is (next - previous) / dt
+
+world.Teleport(platform, start)                  // placed without velocity: it pushes nothing
+err = world.SetBodyType(bone, actor.BodyTypeDynamic)   // a ragdoll: the bone falls, with its contacts, its joints and its island
+err = world.SetBodyType(bone, actor.BodyTypeKinematic) // and follows its targets again; ErrStaticBody, ErrMasslessBody refuse
+err = world.SetShape(crate, &actor.Sphere{Radius: 0.3})  // another shape in place: mass and inertia follow, contacts, joints and island kept
+err = world.SetDensity(crate, 700)                       // another density in place: the mass and the inertia of the shape at 700 kg/m³
+```
+- One target per step: it is reached at the end of the step and dropped. Without target the body stays, with no
+  velocity (the kinematic actors of PhysX). Its velocity is the one of its motion: the contacts push with it.
+- Infinite mass for the solver: no force, no gravity, no impulse, no contact moves it. A dynamic body it meets takes its
+  velocity, friction included (a stack rides a platform, a leg pushes a tail). The contact exists before they touch,
+  from the speed of the kinematic body: a leg at 5 m/s doesn't enter the resting body on its path.
+- No contact between a kinematic body and a static or a kinematic body: no narrow phase, no collision event. A
+  kinematic body enters and leaves the triggers, static or not, and a kinematic trigger detects every body
+  ([Triggers](#triggers)).
+- On its way, a kinematic body keeps awake the bodies it touches; stopped, it sleeps with them; its next target wakes
+  them all up.
+- The planes and the heightfields stay static.
+
+See the [physics guide](PHYSICS_GUIDE.md#kinematic-bodies) and the [algorithms](ALGORITHMS.md#kinematic-bodies).
+
+## Triggers
+A trigger (`IsTrigger`) is not solved: it reports the bodies which overlap it, with the events of the world. A pair of
+a trigger and a body enters once, stays, and exits once: when the shapes no longer overlap, when one of the bodies
+leaves the world, never because one of them falls asleep. Counting the enters and the exits tells who is in a zone.
+
+```go
+zone := actor.NewRigidBody(transform, &actor.Box{HalfExtents: mgl64.Vec3{2, 1, 2}}, actor.BodyTypeStatic, 0)
+zone.IsTrigger = true
+world.AddBody(zone)
+
+occupants := 0
+world.Events.Subscribe(feather.EventTriggerEnter, func(feather.Event) { occupants++ })
+world.Events.Subscribe(feather.EventTriggerExit, func(feather.Event) { occupants-- })
+```
+- A body in contact with a trigger is in it: the overlap is the one of `World.Overlap`.
+- A body asleep in a trigger stays in it, without stay events while both rest (the overlap can't change). Its pair is
+  kept in the broad phase whatever the sleep, as the sensors of Box2D v3, and is tested again when the game moves one of
+  the bodies (its AABB changes), as the trigger pairs of PhysX.
+- `RemoveBody` on a body in a trigger, or on the trigger, ends their pairs: the exits are sent with the events of the
+  next step (or in the events running, if a listener removed the body).
+- A kinematic body enters and leaves a static trigger, and a kinematic trigger detects the static and the kinematic
+  bodies (as Box2D v3 and Unity), without any contact. 2 static bodies never pair.
+- A trigger is filtered like any body ([Collision filtering](#collision-filtering)).
+- The collision events follow the same rules: a contact ends when the bodies stop touching or one of them is removed
+  (`EventCollisionExit` at the next events), never because a body falls asleep, on the ground or on another body, and
+  sends no stay while both rest.
+
+See the [physics guide](PHYSICS_GUIDE.md#triggers) and the [algorithms](ALGORITHMS.md#triggers).
+
+## Characters
+A character is a capsule the game moves at a velocity: it walks on the ground, the terrains and the meshes, slides
+along the walls, climbs the slopes under its limit and the steps under its height, stays on the floor downhill, is
+carried by a moving platform, pushes the dynamic bodies with a bounded force, and is blocked by the heavy ones and by
+the other characters. It is virtual, as `CharacterVirtual` of Jolt and the mover of Box2D v3: no rigid body moves it,
+it moves itself between 2 steps with the queries of the world, so that it goes exactly where the game decides. It is
+named as Jolt names it (Jolt keeps `Character` for its character on a rigid body, which Feather doesn't have).
+
+```go
+hero := feather.NewCharacterVirtual(actor.Capsule{HalfHeight: 0.55, Radius: 0.3}, feet.Add(mgl64.Vec3{0, 0.85, 0}))
+hero.MaxSlopeAngle = 45 * math.Pi / 180   // the defaults are those of Jolt: 50°, a step of 0.4 m, 100 N, 70 kg, the floor kept within 0.5 m
+world.AddCharacter(hero)                   // its inner kinematic body stands in the world (hero.Body())
+
+// each frame, after Step: the velocity the character wants, then its update
+world.Step(dt)
+velocity := mgl64.Vec3{0, hero.Velocity.Y(), 0}             // in the air: the fall goes on
+if hero.GroundState() == feather.CharacterOnGround {        // on the ground: the velocity of the ground (a platform)
+	hero.UpdateGroundVelocity()
+	velocity = hero.GroundVelocity()
+}
+hero.Velocity = velocity.Add(world.Gravity.Mul(dt)).Add(input) // the gravity of the step, the input of the player
+hero.Update(dt)
+```
+- **Position** is the center of the capsule; **Velocity** is written by the game and read back after the update: the
+  part towards a slope too steep is removed, the rest is kept (a fall accumulates the gravity). The gravity is the
+  game's, as in Jolt, PhysX, Box2D and Godot.
+- **Slide.** The contacts within 10 cm of the capsule (inflated by a padding of 2 cm it keeps from everything) are
+  planes with the velocity of their body; the velocity is slid along them by time of impact, and a sweep checks the
+  path: the character never enters a body, and never gets stuck in a corner.
+- **Slopes and steps.** `MaxSlopeAngle`: steeper, a surface is a wall, not climbed, slid down. `StepHeight`: a step
+  lower than it is walked (up, forward, down onto the floor). Leaving the ground downhill without going up, the
+  character sticks to the floor within `StickToFloor` (0.5 m).
+- **Ground.** `GroundState` (in the air, not supported, on steep ground, on the ground), `GroundNormal`,
+  `GroundVelocity`, `GroundBody`, `GroundPosition`: the contacts in the lower sphere of the capsule hold it.
+- **Bodies.** A dynamic body met receives an impulse which brings it to the speed of the character, at most
+  `MaxStrength` × dt and never downwards; a heavy body stops the character. The weight `Mass` × g goes to a dynamic
+  ground. A dynamic body which runs into a character is stopped by its inner body (the solver): it never goes
+  through it. A kinematic platform carries the character (its velocity in `GroundVelocity`, its arc when it turns).
+- **Characters** find each other through their inner bodies: 2 characters block each other head on, slide along
+  each other when they cross, and never go through each other.
+- **Filtering.** The layer and the mask of the inner body (`world.SetFilter(hero.Body(), layer, mask)`), the pairs
+  ignored: the rules of the pairs. Its inner body enters and leaves the triggers (`EventTriggerEnter`,
+  `EventTriggerExit` with the body: `CharacterOf` gives the character); a trigger never blocks the character.
+- `Teleport` places the character and reads its contacts there; `RemoveCharacter` removes it with its inner body;
+  `CharacterOf` gives the character of a body hit by a ray.
+
+See the [physics guide](PHYSICS_GUIDE.md#characters) and the [algorithms](ALGORITHMS.md#characters).
 
 ## TGS Soft
 TGS Soft (or "Soft Step") is the solver of Box2D v3, described by Erin Catto in Solver2D.
@@ -255,6 +389,14 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
   https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/FHitResult)
 - John Amanatides & Andrew Woo, A Fast Voxel Traversal Algorithm for Ray Tracing (Eurographics 1987): the walk of a
   grid by a ray
+- Triggers, contacts & sleep: Box2D v3.1.1 (`src/sensor.c`: `b2SensorTask`, `b2SensorQueryCallback`;
+  `b2SensorEndTouchEvent`; docs/simulation.md, "Sensors do not consider sleep"; `src/solver_set.c`:
+  `b2TrySleepIsland`; `src/contact.c`: `b2DestroyContact`, `b2ContactEndTouchEvent`), PhysX (`ScTriggerInteraction.cpp`:
+  `onActivate`, `onDeactivate`, `PROCESS_THIS_FRAME`; `PxTriggerPair`, `eNOTIFY_TOUCH_LOST`), Jolt 5.6
+  (`Body::SetIsSensor`, `Body::SetCollideKinematicVsNonDynamic`, `Body::UpdateSleepStateInternal`,
+  `ContactListener::OnContactRemoved`), Godot 4 (`Area3D.body_exited`, `GodotAreaPair3D`, `JoltArea3D`), Unity
+  (`MonoBehaviour.OnTriggerStay`, `MonoBehaviour.OnTriggerExit`, `MonoBehaviour.OnCollisionStay`; Manual, Collider types
+  interaction)
 - Axis locks: Jolt 5.3 (`EAllowedDOFs`, `MotionProperties::GetInverseInertiaForRotation`), Rapier 0.22 (the inverse
   mass by axis, `effective_inv_mass`), Box3D & Box2D (`b3MotionLocks`, `b2MotionLocks`), PhysX 5.6
   (`PxRigidDynamicLockFlag`), Unity `Rigidbody.constraints`
@@ -264,19 +406,60 @@ cd bench && go run . -queries   # the cost of a ray, a sweep, an overlap
 - Dynamic AABB tree, collision margin & conservative advancement: Bullet 3.25 (`btDbvt` & `btDbvtBroadphase`; the margin
   of `btSphereShape` & `btCapsuleShape`, a point & a segment with their radius, added by `btGjkPairDetector`;
   `btContinuousConvexCollision`)
-- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html
+- PhysX speculative CCD & Unity "Continuous Speculative": https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/AdvancedCollisionDetection.html,
+  PhysX 5.6 (`Sc::BodySim::updateContactDistance` in `ScCCD.cpp`, `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`)
+- Continuous collision of the fast bodies: Box2D v3.1 (`b2SolveContinuous`, the fast body of `b2FinalizeBodiesTask`,
+  `src/solver.c`; the bullets of `docs/simulation.md`), Box3D (`b3SolveContinuous`, `safetyFactor`), Jolt 5.3
+  (`EMotionQuality::LinearCast`, `JobFindCCDContacts` & `JobResolveCCDContacts` in `PhysicsSystem.cpp`,
+  `mLinearCastThreshold`), PhysX 5.6 (the sweep-based CCD of `PxsCCD.cpp`, the guide Advanced Collision Detection)
+- Convex hull: Barber, Dobkin & Huhdanpaa, The Quickhull Algorithm for Convex Hulls (ACM TOMS, 1996); Dirk
+  Gregorius, Implementing QuickHull (GDC 2014: the tolerance, the merging of the faces); Jolt 5.3
+  (`ConvexHullBuilder`, `ConvexHullShape`: the inertia by the covariance of the tetrahedra, `GetSupportingFace`), Box3D
+  (`b3CreateHull`, `src/hull.c`: the initial tetrahedron, the thresholds, `b3RayCastHull`, commit 9f998c8), PhysX
+  (`QuickHullConvexHullLib`, `PxConvexMeshDesc::vertexLimit`), Bullet 3.25 (`btConvexHullComputer`); Jonathan Blow &
+  Atman Binstock, How to find the inertia tensor (or other mass properties) of a 3D solid body represented by a triangle
+  mesh (the covariance of the canonical tetrahedron)
+- Triangle mesh: Box3D (`b3CreateMesh`, `b3SplitBinnedSah`, `b3IdentifyEdges`, `b3RayCastMesh`, `b3ShapeCastMesh`,
+  `b3QueryMesh`, `src/mesh.c`; `b3ComputeMeshManifolds`, `src/mesh_contact.c`), Jolt 5.3 (`MeshShape`,
+  `AABBTreeBuilder`, `TriangleSplitterBinning`, `ActiveEdges`, `Indexify`, `RayTriangle.h`), PhysX (`BV4_AABBTree`,
+  `EdgeList::computeActiveEdges`, `PCMConvexVsMeshContactGeneration`), Bullet 3.25 (`btQuantizedBvh::buildTree`: the
+  balance of the split), Ericson 6.2.1 (top-down construction of a bounding volume hierarchy), Möller & Trumbore, Fast,
+  Minimum Storage Ray/Triangle Intersection (1997)
+- Characters: Jolt 5.3 (`CharacterVirtual`: `GetContactsAtPosition`, `DetermineConstraints`, `SolveConstraints`,
+  `MoveShape`, `UpdateSupportingContact`, `HandleContact`, `WalkStairs`, `StickToFloor`, `ExtendedUpdate`,
+  `CancelVelocityTowardsSteepSlopes`, `CalculateCharacterGroundVelocity`; `ActiveEdges::FixNormal`; the samples
+  `CharacterVirtualTest::HandleInput` & `OnContactSolve`), PhysX 5.11 (`PxController`, `PxControllerDesc`,
+  `SweepTest::moveCharacter` & `doSweepTest`, `Controller::rideOnTouchedObject` in
+  `physxcharacterkinematic/src/CctCharacterController.cpp`), Box2D v3.1 (`b2World_CastMover`, `b2World_CollideMover`,
+  `b2SolvePlanes`, `b2ClipVector`, `samples/sample_character.cpp`), Godot 4.4 (`CharacterBody3D::move_and_slide`,
+  `_move_and_slide_grounded`, `_snap_on_floor`, `_set_collision_direction`, `scene/3d/physics/character_body_3d.cpp`)
+- Kinematic bodies: PhysX 5.6 (`PxRigidDynamic::setKinematicTarget`, `Sc::BodySim::calculateKinematicVelocity` &
+  `updateKinematicPose` in `ScKinematics.cpp`, the guide Rigid Body Dynamics > Kinematic Actors,
+  https://nvidia-omniverse.github.io/PhysX/physx/5.6.0/docs/RigidBodyDynamics.html), Jolt 5.3 (`Body::MoveKinematic`,
+  `Body::SetMotionType`, `Body::sFindCollidingPairsCanCollide`, `MotionProperties::MoveKinematic`), Box2D v3.1 & Box3D
+  (`b2Body_SetTargetTransform`, `b2Body_SetType`, the kinematic tree of `broad_phase.c`, the kinematic bodies of
+  `constraint_graph.c`, the sleep of `b2FinalizeBodiesTask`)
 
 ## Acknowledgements
 Feather is written from the publications, the documentation and the source code of these projects:
 - [Box2D](https://github.com/erincatto/box2d), by Erin Catto: the TGS Soft solver (Solver2D, Soft Constraints),
   the graph coloring, the continuous collision, the category & mask bits of the collision filter
 - [Box3D](https://github.com/erincatto/box3d), by Erin Catto: the reference of the bench, the friction center and its
-  lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere)
-- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains,
-  the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks)
+  lever arms, the queries (an origin and a translation, the ray through a tree, the ray on a sphere), the thresholds of
+  quickhull and the ray on a hull, the tree of a mesh (the binned surface area heuristic, the leaves of 4 triangles,
+  the casts through it) and one generator of contacts for the meshes and the height fields
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics), by Jorrit Rouwe: the active edges of the terrains and of
+  the meshes, the contact patches, the body pair cache, the allowed degrees of freedom (the axis locks), the cast of a
+  fast body against every body and the relative cast of two fast bodies, the hull centered on its center of mass with
+  the inertia of its volume, the supporting face of a hull, the weld of the vertices of a mesh, the virtual character
+  (its contacts made planes, its solver by time of impact, its stairs, its floor, its padding, its strength)
 - [Bullet](https://github.com/bulletphysics/bullet3), by Erwin Coumans: the spinning friction (the spinning resistance),
   the dynamic AABB tree (`btDbvt`), the collision margin (the cores of the rounded shapes),
-  the conservative advancement of the time of impact
+  the conservative advancement of the time of impact, the balance of the splits of the tree of a mesh
+- [PhysX](https://github.com/NVIDIA-Omniverse/PhysX), by NVIDIA: the speculative CCD, the kinematic actors (a target
+  per step, reached at the end of the step, no velocity without target), the vertex limit of a convex hull, the
+  kinematic actor under a character controller
+- [Godot](https://github.com/godotengine/godot): a character standing still on a slope stays there (`floor_stop_on_slope`)
 
 ## Contributing Guidelines
 

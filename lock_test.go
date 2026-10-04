@@ -529,14 +529,10 @@ func TestContinuousKeepsTheLockedAxes(t *testing.T) {
 
 	// motions of a step through the ground, as if the solver had accelerated the box
 	w.Step(sceneDt)
-	scratch := ccdPool.Get().(*ccdScratch)
-	scratch.core.Radius = coreFraction * cubeHalf
 	for i := 0; i < 20; i++ {
 		turned := mgl64.QuatRotate(0.3*float64(i), mgl64.Vec3{1, float64(i), 2}.Normalize()).Normalize()
 		height := 3 + 0.1*float64(i)
-		motion := sweep{start: actor.Transform{Position: mgl64.Vec3{0.3, height, 0.4}, Rotation: turned}, end: actor.Transform{Position: mgl64.Vec3{0.3, -3, 1}, Rotation: turned}}
-		box.Transform = motion.end
-		w.stopAtImpact(box, &motion, cube().HalfExtents.Len(), scratch)
+		moveThrough(w, box, sweep{start: actor.Transform{Position: mgl64.Vec3{0.3, height, 0.4}, Rotation: turned}, end: actor.Transform{Position: mgl64.Vec3{0.3, -3, 1}, Rotation: turned}})
 		if y := box.Transform.Position.Y(); y < 0 || y > height {
 			t.Fatalf("the box is at y=%.3f, want it stopped above the ground", y)
 		}
@@ -544,7 +540,6 @@ func TestContinuousKeepsTheLockedAxes(t *testing.T) {
 			t.Errorf("the stopped box is at %v, want x=%v and the rotation %v bit for bit", box.Transform, start.Position.X(), turned)
 		}
 	}
-	ccdPool.Put(scratch)
 	box.Transform = start
 
 	simulate(w, 2, func() {
@@ -1002,7 +997,7 @@ func TestLockedInverse2(t *testing.T) {
 // tangents by the locked axis. frictionMass is the inverse of K = Tᵀ (MA⁻¹ + MB⁻¹) T (the bodies don't turn here)
 func TestLockedFrictionMass(t *testing.T) {
 	const inverseMass = 0.25
-	locked := bodyState{body: &actor.RigidBody{}, invMass: inverseMass, invMassAxes: mgl64.Vec3{inverseMass, inverseMass, 0}, linearLock: actor.AxisZ}
+	locked := bodyState{body: &actor.RigidBody{}, dynamic: true, invMass: inverseMass, invMassAxes: mgl64.Vec3{inverseMass, inverseMass, 0}, linearLock: actor.AxisZ}
 	static := bodyState{}
 	for _, normal := range []mgl64.Vec3{{0.3, 0.8, 0.52}, {0.7, 0.1, -0.7}, {0, 1, 0}} {
 		for _, order := range [][2]*bodyState{{&locked, &static}, {&static, &locked}} {
@@ -1217,18 +1212,13 @@ func TestContinuousTurnsAPartlyLockedBody(t *testing.T) {
 	addGround(w, 0.5)
 	box := addBody(w, mgl64.Vec3{0, 3, 0}, mgl64.QuatIdent(), cube(), actor.BodyTypeDynamic, 0.5, 0)
 	w.Step(sceneDt)
-	scratch := ccdPool.Get().(*ccdScratch)
-	defer ccdPool.Put(scratch)
-	scratch.core.Radius = coreFraction * cubeHalf
 	const turn = 1.2
 	for _, lock := range []actor.Axes{actor.AxisX, actor.AxisX | actor.AxisZ} {
 		box.AngularLock = lock
-		motion := sweep{
+		moveThrough(w, box, sweep{
 			start: actor.Transform{Position: mgl64.Vec3{0, 3, 0}, Rotation: mgl64.QuatIdent()},
 			end:   actor.Transform{Position: mgl64.Vec3{0, -3, 0}, Rotation: mgl64.QuatRotate(turn, mgl64.Vec3{0, 1, 0})},
-		}
-		box.Transform = motion.end
-		w.stopAtImpact(box, &motion, cube().HalfExtents.Len(), scratch)
+		})
 		y := box.Transform.Position.Y()
 		if y < 0 || y > 3 {
 			t.Fatalf("locks %d: the box is at y=%.3f, want it stopped above the ground", lock, y)

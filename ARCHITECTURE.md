@@ -8,21 +8,26 @@ feather/
 ├── graph.go            # graph coloring of the contacts and the joints, for the parallel solver
 ├── pool.go             # workers of the step
 ├── island.go           # sleep islands
+├── kinematic.go        # kinematic bodies: the motion to their target, SetBodyType, Teleport
+├── shape.go            # the shape or the density of a body changed in place: SetShape, SetDensity
+├── charactervirtual.go      # characters: Update (slide, ground, stick to the floor, stairs), the inner body
+├── charactervirtual_move.go # the move of a character: contacts made planes, solver by time of impact, sweep, push
 ├── joint.go            # joints: distance, ball, hinge, fixed
 ├── joint_configurable.go # configurable joint: each axis locked, limited or free
 ├── articulation.go     # the anchors of the trees of joints, solved together (Baraff 1996)
 ├── collision.go        # BroadPhase, NarrowPhase, Collide
 ├── collision_capsule.go# spheres & capsules: closest points of segments
-├── collision_heightfield.go # heightfields: triangles, inner edges, patches
+├── collision_triangles.go # heightfields & meshes: the triangles under the body (faces, edges), patches
 ├── ccd.go              # continuous collision: time of impact of the fast bodies
 ├── tree.go             # broad phase: dynamic AABB trees, the pairs kept from a step to the next
 ├── filter.go           # collision filtering: layers & masks, ignored pairs, linked bodies, the filter of the queries
 ├── query.go            # queries: Raycast, RaycastAll, SyncQueries, the guard, the traversal of the trees by a segment
 ├── query_sweep.go      # Sweep: conservative advancement on the cores, against a plane, a convex body, a triangle
 ├── query_overlap.go    # Overlap
-├── query_heightfield.go# a sweep & an overlap against the triangles of a heightfield
+├── query_triangles.go  # a sweep & an overlap against the triangles of a heightfield or of a mesh
 ├── event.go            # collision, trigger & sleep events
-├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield), their CastRay
+├── actor/              # RigidBody, Material, Transform, shapes (Sphere, Box, Plane, Capsule, Heightfield, TriangleMesh,
+│                       # ConvexHull), their CastRay; convexhull.go (quickhull), trianglemesh.go (the tree of a mesh)
 ├── constraint/         # Manifold, ContactPoint, friction & restitution mixing
 ├── gjk/                # GJK (overlap test with margin, distance)
 ├── epa/                # EPA (penetration depth) & contact points (manifold)
@@ -32,15 +37,19 @@ feather/
 ## World.Step
 ```
 Step(dt)
-├── wake the sleeping bodies touched by a moving body
+├── the kinematic bodies take the velocity of the motion to their target
+├── wake the sleeping bodies touched by a moving body (dynamic, or a kinematic body on its way)
 ├── Phase 1: collision detection (once per step)
 │   ├── AABBs enlarged by the distance each body can travel during dt
 │   ├── broad phase: pairs of overlapping AABBs (AABB trees) which pass the collision filters
 │   ├── narrow phase: manifold of each pair (parallel, Workers goroutines)
 │   ├── a sleeping body touched by an awake body wakes up: the detection runs again
-│   ├── events: pairs touching or overlapping (triggers are not solved)
+│   ├── events: pairs touching or overlapping (triggers are not solved: a pair with a trigger is tested whatever the
+│   │   sleep, its overlap kept while both bodies rest and their AABBs don't change; a contact whose bodies both rest is
+│   │   kept until they move apart or one is removed)
 │   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
-├── Phase 2: solver (substeps: articulations, then contacts and joints by color), then restitution
+├── Phase 2: solver (substeps: articulations, then contacts and joints by color; the kinematic bodies interpolated to
+│   their target), then restitution
 ├── continuous collision: the fast bodies are moved back to their first impact (with the bodies they collide with)
 └── Phase 3: sleep islands, the trees updated for the queries, then the events
 ```
@@ -49,7 +58,8 @@ Step(dt)
 | Pair | Method |
 |------|--------|
 | any shape - plane | `CollideWithPlane` of the shape |
-| any shape - heightfield | each triangle under the body: GJK + EPA, inner edges, patches (up to 8 manifolds) |
+| any shape - heightfield or mesh | each triangle under the body, seen from the side of its normal: the vertices of the body over its face, GJK + EPA for its edges; patches by normal (up to 8 manifolds). One generator for both surfaces (`collideTriangles`), which differ by the triangles they give: the cells of the grid, the leaves of the tree |
+| convex hull - any shape | GJK + EPA on its vertices (the support point among all of them), its faces for the contact points |
 | sphere / capsule - sphere / capsule | closest points of the segments (a sphere is a segment of length 0) |
 | sphere / capsule - other shape | GJK distance between the core (a point, a segment) and the shape, plus the radius; EPA only if the core is inside |
 | other pairs | GJK + EPA, then clipping of the contact points |
@@ -59,9 +69,10 @@ points were computed, the previous contact points are moved with the bodies, the
 The contacts of a pair are kept by its pair in the broad phase: no lookup.
 
 Contacts are kept up to a margin: `SpeculativeDistance` (2 cm), + the relative speed of the bodies * dt against a
-static body.
-Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield
-(the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
+static or a kinematic body, and for the pairs of a fast body (a body which can move more than half of its smallest
+extent during the step, `isFast`).
+Each manifold has a normal (from A to B) and up to 4 points. A pair has 1 manifold, up to 8 against a heightfield or a
+mesh (the manifolds of a pair follow each other). Each point has its own separation (< 0 when the bodies overlap).
 
 ## Collision filtering
 `filter.go`. A pair is emitted by the broad phase (`Tree.scan`) only if it passes 2 filters, in this order:
@@ -79,8 +90,8 @@ in the records of the broad phase (its stored AABBs still overlap) and is emitte
 | Where | What the filter does |
 |-------|----------------------|
 | broad phase | a filtered pair is not emitted: no narrow phase, no manifold, no contact |
-| triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event |
-| continuous collision | `stopAtImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
+| triggers | a trigger is a body like the others in the broad phase: a filtered pair sends no trigger event. A pair of a trigger and a dynamic or kinematic body is emitted whatever the sleep (ALGORITHMS.md#triggers) |
+| continuous collision | `findImpact` skips the bodies the fast body doesn't collide with (`World.ShouldCollide`) |
 | sleep | a filtered pair has no contact: it wakes nobody up and links no island. `RemoveBody` and `UpdateHeightfield` only wake the sleeping bodies which collide with the body |
 | queries | `QueryFilter{Mask, Excluded}.Accepts(body)`: the layer of the body is in the mask of the query, and the body is not excluded. The mask of the body is not read |
 
@@ -93,9 +104,9 @@ A body of empty mask (`actor.NoLayers`) collides with nothing but keeps its leaf
 
 | Query | Planes & heightfields (in no tree) | Trees (static, then dynamic) | A body |
 |---|---|---|---|
-| `Raycast`, `RaycastAll` | each one, first | the segment against the AABB of the nodes, the closest child first | `CastRay` of its shape, in its local space |
-| `Sweep` | each one, first | the same, the AABBs enlarged by the half sizes of the shape | conservative advancement on the cores (GJK distance) |
-| `Overlap` | each one | `Tree.queryCandidates` with the AABB of the shape | GJK distance of the cores against the radii |
+| `Raycast`, `RaycastAll` | each one, first | the segment against the AABB of the nodes, the closest child first | `CastRay` of its shape, in its local space (a mesh: the same walk through its own tree) |
+| `Sweep` | each one, first | the same, the AABBs enlarged by the half sizes of the shape | conservative advancement on the cores (GJK distance); a mesh: its triangles along the path, through its tree |
+| `Overlap` | each one | `Tree.queryCandidates` with the AABB of the shape | GJK distance of the cores against the radii; a mesh: its triangles under the shape |
 
 **The trees are up to date between 2 steps.** A step updates them at its start, for its pairs, and once more at its
 end, after the continuous collision and the sleep: the AABB stored for each body then contains its AABB. The end of a
@@ -115,9 +126,45 @@ care"). A query started while `Step` runs panics with `feather: query during Ste
 refuses a locked world the same way). The listeners of the events run after the trees are updated and the guard is
 lifted, on the goroutine of `Step`: they can run queries, and see the end of the step.
 
+## Kinematic bodies
+`kinematic.go`, see [ALGORITHMS.md](ALGORITHMS.md#kinematic-bodies). A kinematic body (`actor.BodyTypeKinematic`) is
+moved by a target pose per step (`RigidBody.SetKinematicTarget`), reached at the end of the step; its velocity is the
+one of this motion. Where it appears:
+
+| Where | What |
+|-------|------|
+| start of the step | `World.moveKinematics`: the velocity of the motion to the target, 0 without target |
+| broad phase | in the tree of the dynamic bodies, with a proxy of its own kind: it queries the static tree and the planes for the triggers only. A pair needs a dynamic body and an awake body which moves (`needsSolving`), or a trigger (`detectsTrigger`): no contact with a static or a kinematic body |
+| narrow phase | the speculative margin of its pairs follows the relative speed, as against a static body |
+| solver | a `bodyState` without mass (`dynamic` false): the rows read its velocity and its motion, never write it; colored as a static body |
+| sub-steps | `solver.moveKinematic`: position interpolated linearly, rotation along the shortest arc; the last sub-step is the target, bit for bit |
+| islands & sleep | in the island of the bodies it touches; resting when its velocity is exactly 0 (no target, or a target at its pose) |
+| continuous collision | never stopped; a fast dynamic body meeting it is held by their speculative contact, and stopped by the time of impact when they had none |
+| events, queries | the collision events with the dynamic bodies, the trigger events with every trigger (a static trigger, a kinematic trigger and the static or kinematic bodies); seen by the queries like any body |
+| `World.SetBodyType` | kinematic ↔ dynamic in place: index, proxy, pairs and contacts, joints, filters and island kept; a static body or a body without mass is refused with an error (`ErrStaticBody`, `ErrMasslessBody`), as `SetKinematicTarget` on a body which is not kinematic (`actor.ErrNotKinematic`): a misuse is never silent |
+| `World.Teleport` | any body placed without velocity, the sleeping bodies at the new place woken up |
+| `World.SetShape`, `World.SetDensity` | another shape or density in place (`shape.go`): index, proxy, joints, filters and island kept, the mass and the inertia of the shape at the density, the pairs computed again at the next step, the body and its sleeping neighbours woken up; a surface (plane, heightfield, mesh) on a dynamic or a kinematic body is refused (`ErrShapeNotConvex`), no shape too (`ErrNoShape`), a density which is not positive on a dynamic body too (`ErrMasslessBody`) |
+
+## Characters
+`charactervirtual.go`, `charactervirtual_move.go`, see [ALGORITHMS.md](ALGORITHMS.md#characters). A `CharacterVirtual` is a capsule moved
+by the game between 2 steps (`CharacterVirtual.Update`), with the queries of the world: no rigid body moves it (the
+`CharacterVirtual` of Jolt). Where it appears:
+
+| Where | What |
+|-------|------|
+| `World.AddCharacter` | an inner kinematic body at the capsule, in `World.Bodies` and in `World.characters` (by body): the queries, the dynamic bodies and the other characters see the character through it |
+| `CharacterVirtual.Update` | between 2 steps, as a query (it panics during a step). `cancelVelocityTowardsSteepSlopes`, `moveShape`, `updateSupportingContact`, the weight on a dynamic ground, `stickToFloor`, `walkStairs`, then `placeBody` |
+| `moveShape` | 5 loops at most: `collectContacts` (the candidates of `Tree.queryCandidates` for the padded capsule within the predictive distance, `World.ShouldCollide`, the contact generator with the direction of the motion, `collideAllMoving`), `removeConflictingContacts`, `determineConstraints`, `solveConstraints`, `sweep` |
+| contact generator | `collideAllMoving` gives the direction of the motion to `collideTriangles`: on an inactive edge the normal of EPA is kept when it brakes the motion less than the normal of the triangle (the hint of `ActiveEdges::FixNormal` of Jolt, `contactNormal`). The pairs of a step give no direction: their bits are unchanged |
+| `sweep` | `sweepQuery` with `treeQuery.character`: the bodies of the pair rules, the excluded ones (the inner body, the discarded contacts), the hits at the fraction 0 and the ones which enter by less than the collision tolerance ignored |
+| `placeBody` | the inner body at the capsule, without velocity, its leaf of the broad phase updated (`Tree.update` at its index, checked), woken with its island when it moved |
+| `World.RemoveBody` | forgets the character of the body |
+| the step | the inner body is a kinematic body without target: no velocity, no pair with a static or a kinematic body, in the island of the dynamic bodies it touches, which are stopped by it (infinite mass) |
+
 ## Solver
-See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the dynamic bodies (`bodyState`):
-the static and sleeping bodies share a state with no mass.
+See [ALGORITHMS.md](ALGORITHMS.md#solver). The solver works on copies of the awake dynamic and kinematic bodies
+(`bodyState`): the static and sleeping bodies share a state with no mass; a kinematic body has its own state, read by
+the rows (its velocity, its motion) and never written (no mass).
 
 The axis locks (`actor.Axes`, `RigidBody.LinearLock` & `AngularLock`) live in the state too: its inverse mass by axis
 is null along the locked axes, its inverse inertia in world space is the one of the body held around them (`lock.go`, see
@@ -129,10 +176,29 @@ else knows about the locks, apart from the integration (gravity, gyroscopic torq
   `World.Close()` stops them (they are also stopped when the World is garbage collected).
 - The broad phase, the narrow phase, the preparation of the contacts and the integration of the bodies:
   each body, pair or contact writes its result at its own index, the order of execution doesn't matter.
-- The pairs are sorted (index of the first body, then of the second body).
+- The order of the bodies is the one of `World.Bodies`: `AddBody` puts a body last, `RemoveBody` moves the following
+  bodies up by one (the trees, the pairs and the contacts follow, `Tree.removed`), a body added again is last whatever
+  its former index. The same bodies added and removed in the same order give the same result.
+- The pairs are sorted by the indices of their bodies (`Tree.sortPairs`: the first body by a counting sort, then the few
+  pairs of a body, its planes first, by an insertion sort). The pair search already gives them in the same order whatever
+  the workers (its chunks are read in their order): the sort makes it the order of a search from scratch, whatever the
+  history of the trees, and keeps the contacts of a body next to each other for the solver. It costs 4.4 ns per pair on
+  one goroutine: 3.8 µs for the 856 pairs of 500 bodies landing, 15 µs for the 3471 pairs of 2000 bodies, 0.1 to 0.2 %
+  of their step with 1 worker and 0.4 to 1 % with 8 (`go test -run xxx -bench SortPairs`, on a Ryzen 7 5800X).
+  Box2D states the rule (`contact.c` in v3.1, "Contacts and determinism": the contacts must exist in the same order
+  whatever the thread count, the Gauss-Seidel solver is order dependent) and now sorts the keys of its new pairs
+  (`b2UpdateBroadPhasePairs`, `broad_phase.c`, read on 02/10/2026: "Pairs arrive in deterministic order but scrambled
+  relative to body and shape order, sorting them here improves solver performance"); Jolt sorts the constraints and the
+  contacts of each island (`PhysicsSettings::mDeterministicSimulation`, on by default in 5.5.0: off, it runs "faster
+  but it will no longer be deterministic").
 - The solver is a Gauss-Seidel: a constraint uses the result of the previous one. The contacts and the joints are
   colored (like Box2D v3): the constraints of a color don't share any dynamic body, so a color is solved in parallel.
   The colors are always solved in the same order: the result is the same bit for bit, whatever the number of workers.
+- It is tested (`determinism_test.go`): the bits of the bodies and of the contacts after each of the 1000 steps of 200
+  bodies (a pile bouncing on chains and on linked boxes), and of a pile of 600 bodies, are the same between two runs and
+  with 1, 4 and 8 workers, also when bodies are removed and added again during the run. Each scene must reach the
+  parallel path of every stage, or its test fails. The result is the same on a given GOARCH only: Go may fuse
+  `x*y + z` into a single rounding on some architectures.
 - A step doesn't allocate memory after the first steps: the buffers are reused.
 
 ## Tests & benchmarks
@@ -191,17 +257,37 @@ restitution, continuous collision, islands), without allocation.
 ## Current limitations
 - The broad phase is a pair of dynamic AABB trees (static and dynamic bodies), the dynamic AABBs enlarged by a margin:
   a sleeping body costs nothing (the planes & the heightfields are not in the trees, they are tested with every awake body).
-- A heightfield is a surface: a body entirely under it is not pushed up.
-- The contacts are computed once per step: on a rough terrain, a corner of a tumbling body can slide over another
-  triangle during the step, and sink by a few mm before the next step.
+- A heightfield and a mesh are surfaces, without thickness: a triangle whose plane is above the center of a body is
+  ignored (as Jolt, Box3D and PhysX do). A body whose center went under the surface is not pushed up, even if it still
+  crosses it: it falls under the terrain, through the wall of the mesh. The continuous collision keeps the fast bodies
+  on the right side; a body must not be placed with its center under a terrain or in the solid of a mesh. A mesh is
+  static, in the static tree, and never changes: build another one.
+- A convex hull has 256 vertices at most, its support point is found among all of them (no hill climbing): a hull of
+  256 vertices against a box costs 16 µs per pair, a hull of 64 vertices 7 µs, as a box. A face of more than 8 vertices
+  gives 8 of them to the contact clipping (one out of k): a wide cylinder resting on its cap has 8 of its 16 corners as
+  candidates, 4 kept. When the vertex limit is reached, the points left out are the closest to the hull, outside it
+  (Jolt and Box3D stop the same way, PhysX expands the hull by its planes). A flat cloud is refused.
+- The contacts are computed once per step: on a rough terrain or on a mesh, a point of a tumbling body moves over
+  another triangle during the step, and has no contact with it before the next step. On hills folded by 18° between 2 triangles (the
+  median of the terrain of the bench), the deepest of 60 bodies dropped alone lands 8 mm deep (the median; under
+  0.3 mm on a flat terrain), and 3.7 mm with the contacts computed at each sub-step (480 Hz with 1 sub-step); at rest
+  it is 0.3 mm deep. Jolt, Box3D and PhysX compute their contacts once per step too.
+- A body has 8 manifolds at most against a terrain: the deepest ones.
 - The friction around the normal comes from the lever arms of the points: a ball spinning on itself on its single point
   of contact never stops (no sleep), unless its material has a `SpinningResistance` (0 by default).
-- A capsule resting across a bump of a terrain can stay a few mm in the terrain: the contact of a triangle comes from
-  the feature of the body above the triangle, the middle of the capsule is missed.
 - The restitution is applied once per step, with the approach velocity of the impact: a body not round (box,
   capsule), bouncy (`e` over 0.5) and spinning fast (10-20 rad/s) can bounce higher than it fell. Measured at 60 Hz
   with 8 substeps: up to +21 % of energy at `e = 1`, never up to `e = 0.5`. Jolt documents the same limit.
-- No kinematic bodies (moving platforms): a body is static or dynamic.
+- A kinematic body is moved by a target per step: a velocity written on it is overwritten by the step (Box2D and Jolt
+  move theirs by their velocity). A kinematic body pushing a dynamic body against a static body squeezes it, as in every
+  engine (PhysX documents it). The planes and the heightfields stay static.
+- A character is a standing capsule which never turns, with one padding and one supporting volume (its lower sphere),
+  up along +Y. Its inner body enters and leaves the triggers as a kinematic body, which never block it (its contacts
+  and its sweeps skip them). Pushing a body, it stands in the padding
+  of the body after its update (its plane moves at the velocity of the body) until the step moves the body: a frame
+  rendered between the two shows it up to 2 cm closer than the padding. Against a wall, every update tries a stair
+  walk and cancels it, as Jolt: an update costs 54 µs there, 11 µs on the open terrain (24 characters, before the
+  13 % taken off, see ALGORITHMS.md), and the cost is GJK on the triangles within reach.
 - The queries test every plane and every heightfield of the world: they are in no tree. A terrain cut in dozens of
   heightfields would need one.
 - `SyncQueries` costs a test per body, even for a static body which never moves: Feather doesn't know what the game
@@ -210,7 +296,18 @@ restitution, continuous collision, islands), without allocation.
   the pile is asleep.
 - A sweep doesn't turn the shape, gives its first hit only, and no depth when the shape starts in a body. The back
   side of a heightfield is never hit.
-- A fast body which is not a bullet goes through a dynamic body with all its axes locked: the continuous collision of
-  the other bodies only looks at the static ones.
-- The continuous collision stops the fast bodies against the static bodies (and the bullets against all the bodies),
-  not the other pairs: 2 fast dynamic bodies rely on their speculative contacts (2 cm) and on the spring of the contact.
+- The continuous collision leaves to the solver the dynamic and kinematic bodies the fast body has a contact with:
+  along the normal of the contact the speculative row holds them, but a fast body whose closest feature changes during
+  the step (a corner passed, a body which turns) can slip past its contact, as with every speculative contact. The
+  static bodies are always swept.
+- A fast body stopped by the continuous collision keeps its velocity and loses the rest of its step: it seems slower
+  for a step (the time stealing Jolt documents for its `LinearCast`), and its joints see the position it was moved to.
+  The impact of 2 fast bodies is found with the rotation of the other body ignored, and both are stopped there even if
+  one of them is stopped earlier by a third body (the other then stops short of a body which never came, as in Jolt).
+- A fast body changes the shocks: its contacts with the dynamic bodies are speculative up to its speed * dt, and stop
+  it in the substep it touches, where a slower body enters the other by up to its speed * dt and is pushed out by the
+  spring of the contact. Measured on the bench: the slab of `high mass ratio 2` (28 cm per step, fast) bounces at
+  1.97 m/s instead of 2.04 and its cubes drift by 17.8 mm instead of 16.5; a swinging chain of 20 capsules stretches by
+  9 mm instead of 24. Many fast bodies close to each other cost: their speculative contacts double the narrow phase of
+  a scene of 200 bodies where 42 are fast at every step (the step from 1.8 to 2.4 ms); a pile without a fast body
+  pays nothing measurable.

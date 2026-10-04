@@ -74,6 +74,14 @@ type polytope struct {
 
 var polytopePool = sync.Pool{New: func() any { return &polytope{} }}
 
+// Scratch: the buffers of EPAProxies and of Manifold, for a caller which keeps its own. The functions of the package
+// take theirs from a sync.Pool, which the garbage collector empties: a new buffer grows again, an allocation where
+// the same work allocated nothing before. A Scratch is used by one goroutine at a time
+type Scratch struct {
+	polytope polytope
+	features features
+}
+
 // EPA computes the penetration of A (+ margin) into B, from the tetrahedron of GJK
 func EPA(a, b *actor.RigidBody, simplex *gjk.Simplex, margin float64) (Result, error) {
 	proxyA, proxyB := gjk.NewProxy(a), gjk.NewProxy(b)
@@ -85,9 +93,21 @@ func EPAProxies(a, b *gjk.Proxy, simplex *gjk.Simplex, margin float64) (Result, 
 	if simplex.Count != 4 {
 		return Result{}, ErrNoConvergence
 	}
-
 	p := polytopePool.Get().(*polytope)
 	defer polytopePool.Put(p)
+	return p.penetration(a, b, simplex, margin)
+}
+
+// EPAProxies is EPAProxies with the buffers of the scratch
+func (s *Scratch) EPAProxies(a, b *gjk.Proxy, simplex *gjk.Simplex, margin float64) (Result, error) {
+	if simplex.Count != 4 {
+		return Result{}, ErrNoConvergence
+	}
+	return s.polytope.penetration(a, b, simplex, margin)
+}
+
+// penetration: EPA in the buffers of the polytope
+func (p *polytope) penetration(a, b *gjk.Proxy, simplex *gjk.Simplex, margin float64) (Result, error) {
 	p.vertices = p.vertices[:0]
 	p.faces = p.faces[:0]
 

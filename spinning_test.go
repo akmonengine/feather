@@ -495,8 +495,8 @@ func TestSolveSpinning(t *testing.T) {
 	normal := mgl64.Vec3{0, 1, 0}
 	bodyA, bodyB := &actor.RigidBody{}, &actor.RigidBody{}
 	newStates := func(spinA, spinB float64) (*bodyState, *bodyState) {
-		return &bodyState{body: bodyA, angularVelocity: mgl64.Vec3{0.3, spinA, 0}, inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})},
-			&bodyState{body: bodyB, angularVelocity: mgl64.Vec3{0, spinB, -0.7}, inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
+		return &bodyState{body: bodyA, dynamic: true, angularVelocity: mgl64.Vec3{0.3, spinA, 0}, inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})},
+			&bodyState{body: bodyB, dynamic: true, angularVelocity: mgl64.Vec3{0, spinB, -0.7}, inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
 	}
 	newConstraint := func(resistance float64) *contactConstraint {
 		c := &contactConstraint{normal: normal, pointsCount: 2, spinningResistance: resistance, twistMass: 1.0 / (2 + 4)}
@@ -569,8 +569,8 @@ func TestSolveSpinning(t *testing.T) {
 	// end with the same spin around the normal, and their angular velocity along the tangents is kept
 	tilted := mgl64.Vec3{0.36, 0.48, 0.8}
 	side := mgl64.Vec3{0.8, 0, -0.36}
-	stateA = &bodyState{body: bodyA, angularVelocity: tilted.Mul(1).Add(side), inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})}
-	stateB = &bodyState{body: bodyB, angularVelocity: tilted.Mul(4), inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
+	stateA = &bodyState{body: bodyA, dynamic: true, angularVelocity: tilted.Mul(1).Add(side), inverseInertia: mgl64.Diag3(mgl64.Vec3{2, 2, 2})}
+	stateB = &bodyState{body: bodyB, dynamic: true, angularVelocity: tilted.Mul(4), inverseInertia: mgl64.Diag3(mgl64.Vec3{4, 4, 4})}
 	c = newConstraint(1)
 	c.normal = tilted
 	c.solveSpinning(stateA, stateB)
