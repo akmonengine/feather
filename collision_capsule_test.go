@@ -567,3 +567,65 @@ func BenchmarkCapsuleCapsule(b *testing.B) {
 		})
 	}
 }
+
+// A tail: 9 capsules of 0.06 m radius and 0.09 m half height, 0.3 m apart along -X, the first kinematic, the others
+// held by balls (swing cone 60°, twist ±20°), over a box whose top is at y = 0
+const (
+	whipLinks      = 9
+	whipRadius     = 0.06
+	whipHalfHeight = 0.09
+	whipSpacing    = 0.3
+	// whipMaxPenetration (m): a resting contact sinks 5 mm at most; Box3D sinks the same tail 5.5 mm at worst
+	whipMaxPenetration = 0.005
+)
+
+// whipAt is the tail at height, in a world of 8 substeps
+func whipAt(height float64) (*World, []*actor.RigidBody) {
+	w := &World{Gravity: mgl64.Vec3{0, -9.81, 0}, Substeps: 8, Workers: 1, Events: NewEvents()}
+	w.AddBody(actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{0, -0.25, 0}, Rotation: mgl64.QuatIdent()},
+		&actor.Box{HalfExtents: mgl64.Vec3{10, 0.25, 10}}, actor.BodyTypeStatic, 1000))
+	alongX := mgl64.QuatRotate(math.Pi/2, mgl64.Vec3{0, 0, 1})
+	cone, twist := 60*math.Pi/180, 20*math.Pi/180
+	var links []*actor.RigidBody
+	for i := range whipLinks {
+		bodyType := actor.BodyTypeDynamic
+		if i == 0 {
+			bodyType = actor.BodyTypeKinematic
+		}
+		x := -whipSpacing/2 - whipSpacing*float64(i)
+		link := actor.NewRigidBody(actor.Transform{Position: mgl64.Vec3{x, height, 0}, Rotation: alongX},
+			&actor.Capsule{Radius: whipRadius, HalfHeight: whipHalfHeight}, bodyType, 1000)
+		w.AddBody(link)
+		if i > 0 {
+			joint := NewConfigurableJoint(links[i-1], link, mgl64.Vec3{x + whipSpacing/2, height, 0}, mgl64.Vec3{-1, 0, 0})
+			joint.TwistMotion, joint.TwistMin, joint.TwistMax = MotionLimited, -twist, twist
+			joint.SwingYMotion, joint.SwingLimitY = MotionLimited, cone
+			joint.SwingZMotion, joint.SwingLimitZ = MotionLimited, cone
+			w.AddJoint(joint)
+			w.IgnoreCollision(links[i-1], link, true)
+		}
+		links = append(links, link)
+	}
+	return w, links
+}
+
+// A tail whips the ground and lies on it: from 1.6 to 2.4 m, no link sinks more than a resting contact. A capsule
+// leaning on a face touches it by both ends of its segment: with a single point, it rocks on it and both its ends
+// sink, 3.5 cm at the tip
+func TestAWhippingTailStaysOnTheGround(t *testing.T) {
+	for k := range 9 {
+		height := 1.6 + 0.1*float64(k)
+		w, links := whipAt(height)
+		deepest := 0.0
+		for range 200 {
+			w.Step(sceneDt)
+			for _, link := range links[1:] {
+				bottom, top := link.Shape.(*actor.Capsule).Segment(link.Transform)
+				deepest = math.Max(deepest, whipRadius-math.Min(bottom.Y(), top.Y()))
+			}
+		}
+		if deepest > whipMaxPenetration {
+			t.Errorf("from %.1f m, a link sinks %.1f mm into the ground, want %.0f mm at most", height, deepest*1000, whipMaxPenetration*1000)
+		}
+	}
+}
