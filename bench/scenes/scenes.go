@@ -81,7 +81,7 @@ func (s Scene) Supported() bool {
 var All = []Scene{
 	singleBox, warmStartEnergy, highMassRatio1, highMassRatio2, highMassRatio3, frictionRamp, overlapRecovery,
 	verticalStack, pyramid, rush, doubleDomino, confined, cardHouse, circleStack, centeredImpact,
-	bridge, ballAndChain, jointGrid, stretchedChain,
+	bridge, ballAndChain, jointGrid, stretchedChain, hangingChains,
 	farPyramid, farStack, farRecovery, farChain,
 }
 

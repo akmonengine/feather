@@ -208,3 +208,57 @@ var stretchedChain = Scene{
 		return atMost(r, "final gap", r["rest gap"].Value+slop*1000, "the chain recovered its state at rest")
 	},
 }
+
+// hangingChains: chains of 5 capsules hanging from a kinematic body each, which sways around Z (±0.5 rad at 2 rad/s,
+// each chain at its own phase): ball joints with a cone of 0.6 rad, a twist of ±0.3 rad and a drive of 5 Hz towards
+// the rest, the bodies of a character's Physics Asset. No contact: the cost and the gaps of the joints alone
+var hangingChains = Scene{
+	Name:     "hanging chains",
+	capsules: true,
+	joints:   true,
+	Run: func(size Size, play Player) Result {
+		const (
+			links, spacing, radius, halfHeight = 5, 0.3, 0.05, 0.1
+			cone, twist, hertz, damping        = 0.6, 0.3, 5, 0.7
+			swing, pace                        = 0.5, 2
+		)
+		count := map[Size]int{Small: 20, Full: 200}[size]
+		w := newWorld()
+		m := material{friction: 0.6, density: 500}
+		sway := func(chain int, t float64) mgl64.Quat {
+			return mgl64.QuatRotate(swing*math.Sin(pace*t+float64(chain)), mgl64.Vec3{0, 0, 1})
+		}
+		var roots, bodies []*actor.RigidBody
+		var joints []link
+		for c := range count {
+			top := mgl64.Vec3{3 * float64(c%20), 2.5, -3 * float64(c/20)}
+			// the chain is built along its swaying root, at rest
+			rotation := sway(c, 0)
+			down := rotation.Rotate(mgl64.Vec3{0, -spacing, 0})
+			previous := addBody(w, top, rotation, capsule(halfHeight, radius), actor.BodyTypeKinematic, m)
+			roots = append(roots, previous)
+			for i := 1; i <= links; i++ {
+				body := addBody(w, top.Add(down.Mul(float64(i))), rotation, capsule(halfHeight, radius), actor.BodyTypeDynamic, m)
+				anchor := top.Add(down.Mul(float64(i) - 0.5))
+				limitedBall(w, previous, body, anchor, down, cone, twist, hertz, damping)
+				joints = append(joints, newLink(previous, body, anchor))
+				bodies = append(bodies, body)
+				previous = body
+			}
+		}
+		steps, gap := 0, 0.0
+		follow := func() {
+			for c, root := range roots {
+				driveKinematic(root, sway(c, float64(steps+1)*Dt))
+			}
+		}
+		follow()
+		play(w, 5, func() {
+			steps++
+			gap = math.Max(gap, worstGap(joints))
+			follow()
+		})
+		return Result{"worst gap": mm(gap), "finite": finiteMetric(bodies)}
+	},
+	Check: func(r Result) error { return holds(r, 0.15) },
+}
