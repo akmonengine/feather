@@ -19,8 +19,10 @@ import (
 
 // articulations: the joints of the trees, in the order of elimination, and the factorization of their mass matrix
 type articulations struct {
-	// joints in the order of elimination, the trees one after the other; tree[i] is the first joint of the tree of i
+	// joints in the order of elimination, the trees one after the other; trees: the first joint of each tree, then the
+	// count of joints (the trees share no dynamic body: they are solved apart, in parallel)
 	joints []*JointBase
+	trees  []int
 	// later: the neighbors of each joint eliminated after it (sharing a body, or filled by the elimination), from
 	// start[i] to start[i+1]
 	start []int
@@ -46,6 +48,7 @@ type articulations struct {
 func (s *solver) buildArticulations() {
 	a := &s.articulations
 	a.joints = a.joints[:0]
+	a.trees = a.trees[:0]
 	bodies := len(s.states)
 	a.bodyJoints = resizeSlices(a.bodyJoints, bodies)
 	a.visited = resizeBools(a.visited, bodies)
@@ -84,12 +87,15 @@ func (s *solver) buildArticulations() {
 					}
 				}
 				a.joints = a.joints[:first]
+			} else {
+				a.trees = append(a.trees, first)
 			}
 		}
 	}
 
 	// ========== fill ==========
 	n := len(a.joints)
+	a.trees = append(a.trees, n)
 	a.adjacency = resizeSlices(a.adjacency, n)
 	local := a.position
 	for _, joints := range a.bodyJoints[:bodies] {
@@ -196,14 +202,23 @@ func (s *solver) place(i int) {
 
 // solveArticulations: for each tree, K Δλ = -(ċ + bias), K = J M⁻¹ Jᵀ the mass matrix of the point constraints of all
 // its joints, factored from the leaves (block LDLᵀ). The soft spring acts on the whole system:
-// Δλ = -(K⁻¹ (ċ + bias) + γ λ) / (1 + γ)
+// Δλ = -(K⁻¹ (ċ + bias) + γ λ) / (1 + γ). The trees share no dynamic body: they are solved in parallel
 func (s *solver) solveArticulations(useBias bool) {
 	a := &s.articulations
-	n := len(a.joints)
-	if n == 0 {
+	if len(a.joints) == 0 {
 		return
 	}
-	for i, j := range a.joints {
+	s.articulationBias = useBias
+	s.pool.run(len(a.trees)-1, treesChunk, s.jobs.tree)
+}
+
+// solveTree solves the point constraints of a tree (solveArticulations)
+func (s *solver) solveTree(tree int) {
+	a := &s.articulations
+	first, end := a.trees[tree], a.trees[tree+1]
+	useBias := s.articulationBias
+	for i := first; i < end; i++ {
+		j := a.joints[i]
 		stateA, stateB := s.state(j.indexA), s.state(j.indexB)
 		rA, rB := j.currentAnchors(stateA, stateB)
 		a.anchorA[i], a.anchorB[i] = rA, rB
@@ -215,7 +230,8 @@ func (s *solver) solveArticulations(useBias bool) {
 		a.vector[i] = cdot
 		a.diag[i] = s.coupling(j, j, rA, rB, rA, rB)
 	}
-	for i, j := range a.joints {
+	for i := first; i < end; i++ {
+		j := a.joints[i]
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			k := a.later[t]
 			a.lower[t] = s.coupling(a.joints[k], j, a.anchorA[k], a.anchorB[k], a.anchorA[i], a.anchorB[i])
@@ -227,7 +243,7 @@ func (s *solver) solveArticulations(useBias bool) {
 	}
 
 	// ========== factor: A = L D Lᵀ, from the leaves ==========
-	for i := 0; i < n; i++ {
+	for i := first; i < end; i++ {
 		inverse := actor.Inv3(&a.diag[i])
 		if s.locked {
 			// the bodies of the joint may not answer along a direction
@@ -259,16 +275,16 @@ func (s *solver) solveArticulations(useBias bool) {
 	}
 
 	// ========== solve ==========
-	for i := 0; i < n; i++ {
+	for i := first; i < end; i++ {
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			k := a.later[t]
 			a.vector[k] = a.vector[k].Sub(actor.MulMat3(&a.lower[t], a.vector[i]))
 		}
 	}
-	for i := 0; i < n; i++ {
+	for i := first; i < end; i++ {
 		a.vector[i] = actor.MulMat3(&a.inverse[i], a.vector[i])
 	}
-	for i := n - 1; i >= 0; i-- {
+	for i := end - 1; i >= first; i-- {
 		for t := a.start[i]; t < a.start[i+1]; t++ {
 			transposed := actor.Transpose3(&a.lower[t])
 			a.vector[i] = a.vector[i].Sub(actor.MulMat3(&transposed, a.vector[a.later[t]]))
@@ -276,7 +292,8 @@ func (s *solver) solveArticulations(useBias bool) {
 	}
 
 	// ========== impulses ==========
-	for i, j := range a.joints {
+	for i := first; i < end; i++ {
+		j := a.joints[i]
 		row := rigid
 		if useBias {
 			row = j.spring

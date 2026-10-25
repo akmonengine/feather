@@ -48,8 +48,8 @@ Step(dt)
 │   │   sleep, its overlap kept while both bodies rest and their AABBs don't change; a contact whose bodies both rest is
 │   │   kept until they move apart or one is removed)
 │   └── warm start: each point takes the impulses of the closest point of the pair in the previous step
-├── Phase 2: solver (substeps: articulations, then contacts and joints by color; the kinematic bodies interpolated to
-│   their target), then restitution
+├── Phase 2: solver (substeps: articulations, a tree per task, then contacts and joints by color; the kinematic bodies
+│   interpolated to their target), then restitution
 ├── continuous collision: the fast bodies are moved back to their first impact (with the bodies they collide with)
 └── Phase 3: sleep islands, the trees updated for the queries, then the events
 ```

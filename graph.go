@@ -16,6 +16,10 @@ const (
 	// bodiesChunk: same for the bodies integration
 	bodiesChunk = 64
 
+	// treesChunk: the workers take the trees of the articulations by chunks of this size (a tree of a character has a
+	// handful of joints)
+	treesChunk = 4
+
 	// minParallelBodies: under this count of bodies, the step runs on a single goroutine
 	minParallelBodies = 256
 
