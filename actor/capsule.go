@@ -7,10 +7,6 @@ import (
 )
 
 const (
-	// capsuleSideFeatureTolerance: if the direction is perpendicular to the axis (~1.1°),
-	// the contact feature is the whole side line, otherwise a single point on a cap
-	capsuleSideFeatureTolerance = 0.02
-
 	capsuleDirectionEpsilon = 1e-12
 )
 
@@ -94,16 +90,16 @@ func (c *Capsule) Support(direction mgl64.Vec3) mgl64.Vec3 {
 	return end.Add(direction.Mul(c.Radius / length))
 }
 
-// GetContactFeature returns the side line (2 points) if the direction is perpendicular to the axis,
-// otherwise the support point on a cap
+// GetContactFeature returns both ends of the segment, each pushed by the radius toward the direction. The
+// manifold clips them against the other shape's feature and keeps those within the margin: a capsule leaning on a
+// face keeps 2 contacts, wherever its axis points, and does not rock on one — as Box3D clips the whole segment
+// against the face (b3CollideHullAndCapsule). A degenerate capsule (a sphere) returns its support point.
 func (c *Capsule) GetContactFeature(direction mgl64.Vec3, output *[8]mgl64.Vec3, count *int) {
 	length := direction.Len()
-	if c.HalfHeight > 0 && length >= capsuleDirectionEpsilon && math.Abs(direction.Y())/length < capsuleSideFeatureTolerance {
-		radial := mgl64.Vec3{direction.X(), 0, direction.Z()}
-		radial = radial.Mul(c.Radius / radial.Len())
-
-		output[0] = radial.Add(mgl64.Vec3{0, c.HalfHeight, 0})
-		output[1] = radial.Sub(mgl64.Vec3{0, c.HalfHeight, 0})
+	if c.HalfHeight > 0 && length >= capsuleDirectionEpsilon {
+		cap := direction.Mul(c.Radius / length)
+		output[0] = cap.Add(mgl64.Vec3{0, c.HalfHeight, 0})
+		output[1] = cap.Sub(mgl64.Vec3{0, c.HalfHeight, 0})
 		*count = 2
 		return
 	}
