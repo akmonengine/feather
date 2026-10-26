@@ -237,17 +237,19 @@ func TestCapsuleGetContactFeature(t *testing.T) {
 		t.Errorf("side feature = %v %v, want (0,±1,-0.5)", output[0], output[1])
 	}
 
-	// Cap contact: a single point.
+	// Cap contact: both ends of the segment, each pushed by the radius toward the direction; the lower one is the
+	// support point, the clipping and the margin drop the other.
 	c.GetContactFeature(mgl64.Vec3{0, -1, 0}, &output, &count)
-	if count != 1 || !vec3Equal(output[0], mgl64.Vec3{0, -1.5, 0}, 1e-12) {
-		t.Errorf("cap feature = %v (count %d), want (0,-1.5,0)", output[0], count)
+	if count != 2 || !vec3Equal(output[1], mgl64.Vec3{0, -1.5, 0}, 1e-12) || !vec3Equal(output[0], mgl64.Vec3{0, 0.5, 0}, 1e-12) {
+		t.Errorf("cap feature = %v %v (count %d), want (0,0.5,0) and (0,-1.5,0)", output[0], output[1], count)
 	}
 
-	// Oblique contact: a single support point.
+	// Oblique contact: both ends pushed toward the direction, the support point one of them — a capsule leaning on a
+	// face is clipped by it whole, as Box3D's b3CollideHullAndCapsule clips its segment.
 	d := mgl64.Vec3{1, 1, 0}
 	c.GetContactFeature(d, &output, &count)
-	if count != 1 || !vec3Equal(output[0], c.Support(d), 1e-12) {
-		t.Errorf("oblique feature = %v (count %d), want %v", output[0], count, c.Support(d))
+	if count != 2 || !vec3Equal(output[0], c.Support(d), 1e-12) {
+		t.Errorf("oblique feature = %v (count %d), want the support %v and the other end", output[0], count, c.Support(d))
 	}
 }
 

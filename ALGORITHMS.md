@@ -225,11 +225,17 @@ end
 - Tested against exact solutions: SAT for box-box, closest point for sphere-box (see `epa/epa_test.go`).
 
 ## Contact points
-From the normal of EPA, each body gives the feature facing the other body (a face for a box, a line or a point for a capsule):
+From the normal of EPA, each body gives the feature facing the other body (a face for a box, its segment for a capsule):
 
 - **Face contact**: a face is aligned with the normal (0.5°). The other feature is clipped by the side planes of this face (Sutherland-Hodgman).
 - **Parallel edges**: a box on an edge, a capsule along an edge. One edge is clipped by the other: 2 points.
 - **Otherwise** (crossing edges, a vertex, a sphere): the witness point of EPA.
+
+A capsule gives both ends of its segment, each pushed by its radius toward the other body, whatever its axis: against a
+face, the clipping keeps those within the margin. Leaning on a face, a capsule touches it by its 2 ends and does not rock
+on one, as Box3D clips the whole segment against the face (`b3CollideHullAndCapsule`); against an edge or a vertex, the
+deepest end is the feature. A single point unless the axis lies within 1.1° of the face let a tilted capsule rock on its
+contact: the tip of a whipping tail sank 3.5 cm, 3 mm with both ends (5.5 mm in Box3D, the same tail).
 
 The deepest point has the separation of EPA, the other points are higher along the normal.
 The points closer than the margin are kept, 4 at most: the deepest, the farthest from it, then the points adding the most
