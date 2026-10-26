@@ -50,6 +50,7 @@ var box3dValues = map[string][]box3dValue{
 	"ball and chain":   {{"worst gap", 235.321, 232.72}},
 	"joint grid":       {{"worst gap", 64.768, 319.21}},
 	"stretched chain":  {{"final gap", 12.2763, 12.2763}, {"rest gap", 5.46556, 5.46556}},
+	"hanging chains":   {{"worst gap", 0.7305, 0.7305}},
 	"far pyramid":      {{"worst drift", 0, 0}},
 	"far stack":        {{"worst drift", 0.105557, 0.105557}},
 	"far chain":        {{"worst gap", 49.4286, 49.4286}},

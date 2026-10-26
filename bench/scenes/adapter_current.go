@@ -58,3 +58,21 @@ func newWorld() *feather.World {
 		Events:   feather.NewEvents(),
 	}
 }
+
+// limitedBall links 2 bodies at the anchor (world space) by a ball joint whose X is along the axis: a cone (rad), a
+// twist of ±twist (rad) and a drive of hertz towards the rest
+func limitedBall(w *feather.World, a, b *actor.RigidBody, anchor, axis mgl64.Vec3, cone, twist, hertz, damping float64) {
+	joint := feather.NewConfigurableJoint(a, b, anchor, axis)
+	joint.TwistMotion, joint.TwistMin, joint.TwistMax = feather.MotionLimited, -twist, twist
+	joint.SwingYMotion, joint.SwingLimitY = feather.MotionLimited, cone
+	joint.SwingZMotion, joint.SwingLimitZ = feather.MotionLimited, cone
+	joint.EnableAngularDrive, joint.AngularDriveHertz, joint.AngularDriveDampingRatio = true, hertz, damping
+	w.AddJoint(joint)
+}
+
+// driveKinematic: the kinematic body turns to the rotation by the next step
+func driveKinematic(b *actor.RigidBody, rotation mgl64.Quat) {
+	if err := b.SetKinematicTarget(pose(b.Transform.Position, rotation)); err != nil {
+		panic(err)
+	}
+}

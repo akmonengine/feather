@@ -54,3 +54,11 @@ func newWorld() *feather.World {
 		Events:      feather.NewEvents(),
 	}
 }
+
+func limitedBall(w *feather.World, a, b *actor.RigidBody, anchor, axis mgl64.Vec3, cone, twist, hertz, damping float64) {
+	panic("scenes: no joint in v0.2.0")
+}
+
+func driveKinematic(b *actor.RigidBody, rotation mgl64.Quat) {
+	panic("scenes: no kinematic target in v0.2.0")
+}

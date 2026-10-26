@@ -496,6 +496,29 @@
         "substeps": 0.01316322
       }
     },
+    "solver2d hanging chains": {
+      "fingerprint": "7704e9224efec9f1",
+      "quality": {
+        "finite": {
+          "value": 1,
+          "unit": ""
+        },
+        "worst gap": {
+          "value": 0.4836847941125993,
+          "unit": "mm"
+        }
+      },
+      "stepMs": 1.7706373566666664,
+      "phasesMs": {
+        "broad phase": 0.027960613333333335,
+        "continuous": 0.007067313333333334,
+        "islands": 0.00271499,
+        "narrow phase": 0.00010886666666666667,
+        "prepare": 0.044121633333333334,
+        "restitution": 0.013792393333333331,
+        "substeps": 1.6735448533333332
+      }
+    },
     "solver2d high mass ratio 1": {
       "fingerprint": "c31e6f9bb620bc9b",
       "quality": {

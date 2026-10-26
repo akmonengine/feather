@@ -101,12 +101,13 @@ func (j *ConfigurableJoint) linearState(stateA, stateB *bodyState) (mgl64.Vec3, 
 
 func (j *ConfigurableJoint) warmStart(s *solver) {
 	stateA, stateB := s.state(j.indexA), s.state(j.indexB)
-	rA, rB, offset := j.linearState(stateA, stateB)
 
 	// ========== LINEAR ==========
 	if j.allLinearLocked() {
+		rA, rB := j.currentAnchors(stateA, stateB)
 		applyLinear(stateA, stateB, rA, rB, j.linearImpulse)
 	} else {
+		rA, rB, offset := j.linearState(stateA, stateB)
 		for k := range j.linearAxes {
 			impulse := j.linearImpulses[k][0] - j.linearImpulses[k][1] + j.linearDriveImpulses[k]
 			applyLinear(stateA, stateB, rA.Add(offset), rB, j.linearAxes[k].Mul(impulse))
@@ -140,6 +141,13 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 		j.solveSwing(s, stateA, stateB, frameA, frameB, useBias)
 	}
 
+	// ========== LINEAR ==========
+	// a locked point: the drive moves no locked axis
+	if j.allLinearLocked() {
+		j.solvePoint(s, stateA, stateB, useBias)
+		return
+	}
+
 	// ========== LINEAR DRIVE ==========
 	rA, rB, offset := j.linearState(stateA, stateB)
 	if j.EnableLinearDrive && j.LinearDriveHertz > 0 {
@@ -154,11 +162,6 @@ func (j *ConfigurableJoint) solve(s *solver, useBias bool) {
 		}
 	}
 
-	// ========== LINEAR ==========
-	if j.allLinearLocked() {
-		j.solvePoint(s, stateA, stateB, useBias)
-		return
-	}
 	for k := 0; k < 3; k++ {
 		axis := actor.Rotate(&frameA, unitAxes[k])
 		j.linearAxes[k] = axis
@@ -197,8 +200,9 @@ func (j *ConfigurableJoint) solveTwist(s *solver, stateA, stateB *bodyState, fra
 		j.twistImpulses[0] = j.solveAngularEquality(stateA, stateB, j.twistAxis, twist/rate, 1, j.twistImpulses[0], useBias)
 		return
 	}
-	j.twistImpulses[0] = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, (twist-j.TwistMin)/rate, 1, j.twistImpulses[0], useBias)
-	j.twistImpulses[1] = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, (j.TwistMax-twist)/rate, -1, j.twistImpulses[1], useBias)
+	mass := axialMass(stateA, stateB, j.twistAxis)
+	j.twistImpulses[0] = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, mass, (twist-j.TwistMin)/rate, 1, j.twistImpulses[0], useBias)
+	j.twistImpulses[1] = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, mass, (j.TwistMax-twist)/rate, -1, j.twistImpulses[1], useBias)
 }
 
 // swingAngles: rotation of the X axis of B around Y and around Z, from p (X of B seen in the frame A)
@@ -207,14 +211,36 @@ var swingAngles = [2]func(p mgl64.Vec3) float64{
 	func(p mgl64.Vec3) float64 { return math.Atan2(p.Y(), p.X()) },
 }
 
+// swingGradients: the gradients of swingAngles, exact: ∂atan2(a, b) = (b ∂a - a ∂b) / (a² + b²); none along the axis
+// of the rotation (p along Y or Z), where the angle is not defined
+var swingGradients = [2]func(p mgl64.Vec3) mgl64.Vec3{
+	func(p mgl64.Vec3) mgl64.Vec3 {
+		d := p.X()*p.X() + p.Z()*p.Z()
+		if d == 0 {
+			return mgl64.Vec3{}
+		}
+		return mgl64.Vec3{p.Z() / d, 0, -p.X() / d}
+	},
+	func(p mgl64.Vec3) mgl64.Vec3 {
+		d := p.X()*p.X() + p.Y()*p.Y()
+		if d == 0 {
+			return mgl64.Vec3{}
+		}
+		return mgl64.Vec3{-p.Y() / d, p.X() / d, 0}
+	},
+}
+
 func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, frameA, frameB mgl64.Quat, useBias bool) {
+	if j.SwingYMotion == MotionFree && j.SwingZMotion == MotionFree {
+		return
+	}
 	p := actor.RotateInverse(&frameA, actor.Rotate(&frameB, mgl64.Vec3{1, 0, 0}))
 
 	// both limited: elliptic cone
 	if j.SwingYMotion == MotionLimited && j.SwingZMotion == MotionLimited {
 		if c, axis, ok := swingLimit(p, j.SwingLimitY, j.SwingLimitZ); ok {
 			j.coneAxis = actor.Rotate(&frameA, axis)
-			j.coneImpulse = j.solveAngularLimit(s, stateA, stateB, j.coneAxis, c, -1, j.coneImpulse, useBias)
+			j.coneImpulse = j.solveAngularLimit(s, stateA, stateB, j.coneAxis, axialMass(stateA, stateB, j.coneAxis), c, -1, j.coneImpulse, useBias)
 		}
 		return
 	}
@@ -225,7 +251,7 @@ func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, fra
 		if motions[k] == MotionFree {
 			continue
 		}
-		angle, axis, rate, ok := angleRow(p, swingAngles[k])
+		angle, axis, rate, ok := angleRow(p, swingAngles[k](p), swingGradients[k](p))
 		if !ok {
 			continue
 		}
@@ -235,8 +261,9 @@ func (j *ConfigurableJoint) solveSwing(s *solver, stateA, stateB *bodyState, fra
 			j.swingImpulses[k][0] = j.solveAngularEquality(stateA, stateB, j.swingAxes[k], angle/rate, 1, j.swingImpulses[k][0], useBias)
 			continue
 		}
-		j.swingImpulses[k][0] = j.solveAngularLimit(s, stateA, stateB, j.swingAxes[k], (angle+limits[k])/rate, 1, j.swingImpulses[k][0], useBias)
-		j.swingImpulses[k][1] = j.solveAngularLimit(s, stateA, stateB, j.swingAxes[k], (limits[k]-angle)/rate, -1, j.swingImpulses[k][1], useBias)
+		mass := axialMass(stateA, stateB, j.swingAxes[k])
+		j.swingImpulses[k][0] = j.solveAngularLimit(s, stateA, stateB, j.swingAxes[k], mass, (angle+limits[k])/rate, 1, j.swingImpulses[k][0], useBias)
+		j.swingImpulses[k][1] = j.solveAngularLimit(s, stateA, stateB, j.swingAxes[k], mass, (limits[k]-angle)/rate, -1, j.swingImpulses[k][1], useBias)
 	}
 }
 

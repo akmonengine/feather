@@ -22,6 +22,13 @@ const (
 
 	// under this length, the axis of a distance joint is not reliable (m)
 	jointMinLength = 1e-9
+
+	// angleRateEpsilon: under this rate (rad per rad), an angle of a joint does not answer to a rotation: its row is skipped
+	angleRateEpsilon = 1e-12
+
+	// twistSingularity: under this qw² + qx² of the rotation of B in the frame A, B is swung by 180° and its twist is not
+	// defined
+	twistSingularity = 1e-12
 )
 
 // Joint links 2 bodies (see DistanceJoint, BallJoint, HingeJoint, FixedJoint)
@@ -157,12 +164,13 @@ func axialMass(stateA, stateB *bodyState, axis mgl64.Vec3) float64 {
 	return 1 / k
 }
 
-// solveAngularLimit: C >= 0 around the axis, with C = direction * (angle of B around the axis) + offset.
-// Returns the new accumulated impulse. Speculative when C > 0, soft when useBias.
-func (j *JointBase) solveAngularLimit(s *solver, stateA, stateB *bodyState, axis mgl64.Vec3, c float64, direction float64, accumulated float64, useBias bool) float64 {
+// solveAngularLimit: C >= 0 around the axis, with C = direction * (angle of B around the axis) + offset; mass: the
+// axialMass of the axis (both limits of an axis share it). Returns the new accumulated impulse. Speculative when C > 0,
+// soft when useBias.
+func (j *JointBase) solveAngularLimit(s *solver, stateA, stateB *bodyState, axis mgl64.Vec3, mass, c float64, direction float64, accumulated float64, useBias bool) float64 {
 	bias, row := j.limitRow(s, c, useBias)
 	cdot := direction * axis.Dot(stateB.angularVelocity.Sub(stateA.angularVelocity))
-	impulse := row.impulse(axialMass(stateA, stateB, axis), cdot, bias, accumulated)
+	impulse := row.impulse(mass, cdot, bias, accumulated)
 	newImpulse := math.Max(accumulated+impulse, 0)
 	applyAngular(stateA, stateB, axis.Mul(direction*(newImpulse-accumulated)))
 	return newImpulse
@@ -192,71 +200,80 @@ func rotationError(current, target mgl64.Quat) mgl64.Vec3 {
 
 // twistAngle: the rotation of B relative to A around the X axis, after the swing (swing-twist decomposition)
 func twistAngle(frameA, frameB mgl64.Quat) float64 {
+	relative := relativeTwist(frameA, frameB)
+	return 2 * math.Atan2(relative.V.X(), relative.W)
+}
+
+// relativeTwist: the rotation of the frame B in the frame A, its scalar part positive
+func relativeTwist(frameA, frameB mgl64.Quat) mgl64.Quat {
 	conjugate := mgl64.Quat{W: frameA.W, V: frameA.V.Mul(-1)}
 	relative := actor.MulQuat(&conjugate, &frameB)
 	if relative.W < 0 {
 		relative = relative.Scale(-1)
 	}
-	return 2 * math.Atan2(relative.V.X(), relative.W)
+	return relative
 }
 
-// angleRow: a rotation constraint on a function f(p) of the X axis of the frame B seen in the frame A (p, unit vector).
-// p moves as dp/dt = ω × p, so the rate of f is ω · (p × ∇f): returns f(p), the unit rotation axis p × ∇f
-// (orthogonal to p: no twist), and the rate of f per unit of angular velocity around this axis
-func angleRow(p mgl64.Vec3, f func(p mgl64.Vec3) float64) (float64, mgl64.Vec3, float64, bool) {
-	// gradient of f in the tangent plane of p
-	const epsilon = 1e-6
-	tangent1 := anyPerpendicular(p)
-	tangent2 := p.Cross(tangent1)
-	d1 := (f(p.Add(tangent1.Mul(epsilon)).Normalize()) - f(p.Sub(tangent1.Mul(epsilon)).Normalize())) / (2 * epsilon)
-	d2 := (f(p.Add(tangent2.Mul(epsilon)).Normalize()) - f(p.Sub(tangent2.Mul(epsilon)).Normalize())) / (2 * epsilon)
-	axis := p.Cross(tangent1.Mul(d1).Add(tangent2.Mul(d2)))
+// angleRow: a rotation constraint on an angle f of the X axis of the frame B seen in the frame A (p, unit vector), of
+// gradient ∇f at p. p moves as dp/dt = ω × p, so the rate of f is ω · (p × ∇f): returns f, the unit rotation axis
+// p × ∇f (orthogonal to p: no twist), and the rate of f per unit of angular velocity around this axis
+func angleRow(p mgl64.Vec3, f float64, gradient mgl64.Vec3) (float64, mgl64.Vec3, float64, bool) {
+	axis := p.Cross(gradient)
 	rate := axis.Len()
-	if rate < 1e-12 {
+	if rate < angleRateEpsilon {
 		return 0, mgl64.Vec3{}, 0, false
 	}
-	return f(p), axis.Mul(1 / rate), rate, true
+	return f, axis.Mul(1 / rate), rate, true
 }
 
 // swingLimit: p must stay in the elliptic cone of the 2 half angles.
-// Returns the distance to the cone (rad, > 0 inside) and the rotation axis moving p out of the cone
+// Returns the distance to the cone (rad, > 0 inside) and the rotation axis moving p out of the cone.
+// The cone is f(p) = θ e / r <= 1: θ = atan2(r, px) the angle of p from X, r = |(py, pz)|, e = |(py / limitZ, pz /
+// limitY)| (a rotation around Z moves X towards Y, a rotation around Y moves X towards -Z); its gradient, exact:
+// ∂f/∂px = ∂θ/∂px e / r, ∂f/∂py = ∂θ/∂r (py / r) e / r + θ ∂(e / r)/∂py, the same for pz
 func swingLimit(p mgl64.Vec3, limitY, limitZ float64) (float64, mgl64.Vec3, bool) {
-	cone := func(p mgl64.Vec3) float64 {
-		r := math.Hypot(p.Y(), p.Z())
-		if r < 1e-12 {
-			return 0
-		}
-		// rotation around Z moves X towards Y, rotation around Y moves X towards -Z
-		return math.Atan2(r, p.X()) / r * math.Hypot(p.Y()/limitZ, p.Z()/limitY)
-	}
-	if cone(p) == 0 {
+	x, y, z := p.X(), p.Y(), p.Z()
+	r := math.Hypot(y, z)
+	if r < angleRateEpsilon {
 		return 0, mgl64.Vec3{}, false
 	}
-	f, axis, rate, ok := angleRow(p, cone)
+	theta := math.Atan2(r, x)
+	e := math.Hypot(y/limitZ, z/limitY)
+	f := theta / r * e
+	if f == 0 {
+		return 0, mgl64.Vec3{}, false
+	}
+	d := r*r + x*x
+	ratio := e / r
+	// ∂(e / r)/∂c = ∂e/∂c / r - e c / r³, ∂e/∂c = c / (limit² e)
+	ratioRate := func(c, limit float64) float64 { return c/(limit*limit*e)/r - e*c/(r*r*r) }
+	gradient := mgl64.Vec3{
+		-r / d * ratio,
+		x/d*(y/r)*ratio + theta*ratioRate(y, limitZ),
+		x/d*(z/r)*ratio + theta*ratioRate(z, limitY),
+	}
+	f, axis, rate, ok := angleRow(p, f, gradient)
 	if !ok {
 		return 0, mgl64.Vec3{}, false
 	}
 	return (1 - f) / rate, axis, true
 }
 
-// twistRow: the twist angle, and its exact rate: d(twist)/dt = rate * (axis · (wB - wA)).
-// The rate of the twist is not along the axes X when B swings: it is measured by turning B a little around each axis.
-// A rotation of both frames together doesn't change the twist, so the rate depends on wB - wA only
+// twistRow: the twist angle, and its rate: d(twist)/dt = rate * (axis · (wB - wA)). With q = conj(frameA) frameB and ω
+// the relative angular velocity in the frame A, dq/dt = ½ (0, ω) q: the rate of the twist 2 atan2(qx, qw) is
+// (ωx s + ωy (qw qz + qx qy) + ωz (qx qz - qw qy)) / s, s = qw² + qx², exact. The rate of the twist is not along the
+// axes X when B swings. A rotation of both frames together doesn't change the twist, so the rate depends on wB - wA only
 func twistRow(frameA, frameB mgl64.Quat) (float64, mgl64.Vec3, float64) {
-	const epsilon = 1e-6
-	twist := twistAngle(frameA, frameB)
-	var gradient mgl64.Vec3
-	for k := 0; k < 3; k++ {
-		var delta mgl64.Vec3
-		delta[k] = epsilon
-		plus := twistAngle(frameA, integrateRotation(&frameB, delta))
-		minus := twistAngle(frameA, integrateRotation(&frameB, delta.Mul(-1)))
-		gradient[k] = math.Remainder(plus-minus, 2*math.Pi) / (2 * epsilon)
-	}
-	rate := gradient.Len()
-	if rate < 1e-12 {
+	q := relativeTwist(frameA, frameB)
+	twist := 2 * math.Atan2(q.V.X(), q.W)
+	s := q.W*q.W + q.V[0]*q.V[0]
+	if s < twistSingularity {
+		// B swung by 180°: the twist is not defined
 		return twist, actor.Rotate(&frameA, mgl64.Vec3{1, 0, 0}), 1
 	}
+	local := mgl64.Vec3{1, (q.W*q.V[2] + q.V[0]*q.V[1]) / s, (q.V[0]*q.V[2] - q.W*q.V[1]) / s}
+	gradient := actor.Rotate(&frameA, local)
+	rate := gradient.Len()
 	return twist, gradient.Mul(1 / rate), rate
 }
 
@@ -452,8 +469,9 @@ func (j *BallJoint) solve(s *solver, useBias bool) {
 	if j.EnableTwistLimit {
 		twist, axis, rate := twistRow(frameA, frameB)
 		j.twistAxis = axis
-		j.twistLowerImpulse = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, (twist-j.TwistMin)/rate, 1, j.twistLowerImpulse, useBias)
-		j.twistUpperImpulse = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, (j.TwistMax-twist)/rate, -1, j.twistUpperImpulse, useBias)
+		mass := axialMass(stateA, stateB, j.twistAxis)
+		j.twistLowerImpulse = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, mass, (twist-j.TwistMin)/rate, 1, j.twistLowerImpulse, useBias)
+		j.twistUpperImpulse = j.solveAngularLimit(s, stateA, stateB, j.twistAxis, mass, (j.TwistMax-twist)/rate, -1, j.twistUpperImpulse, useBias)
 	}
 
 	// ========== SWING LIMIT (elliptic cone) ==========
@@ -461,7 +479,7 @@ func (j *BallJoint) solve(s *solver, useBias bool) {
 		p := actor.RotateInverse(&frameA, actor.Rotate(&frameB, mgl64.Vec3{1, 0, 0}))
 		if c, axis, ok := swingLimit(p, j.SwingLimitY, j.SwingLimitZ); ok {
 			j.swingAxis = actor.Rotate(&frameA, axis)
-			j.swingImpulse = j.solveAngularLimit(s, stateA, stateB, j.swingAxis, c, -1, j.swingImpulse, useBias)
+			j.swingImpulse = j.solveAngularLimit(s, stateA, stateB, j.swingAxis, axialMass(stateA, stateB, j.swingAxis), c, -1, j.swingImpulse, useBias)
 		}
 	}
 
@@ -559,8 +577,8 @@ func (j *HingeJoint) solve(s *solver, useBias bool) {
 
 	// ========== LIMITS ==========
 	if j.EnableLimit {
-		j.lowerImpulse = j.solveAngularLimit(s, stateA, stateB, j.axis, angle-j.LowerAngle, 1, j.lowerImpulse, useBias)
-		j.upperImpulse = j.solveAngularLimit(s, stateA, stateB, j.axis, j.UpperAngle-angle, -1, j.upperImpulse, useBias)
+		j.lowerImpulse = j.solveAngularLimit(s, stateA, stateB, j.axis, mass, angle-j.LowerAngle, 1, j.lowerImpulse, useBias)
+		j.upperImpulse = j.solveAngularLimit(s, stateA, stateB, j.axis, mass, j.UpperAngle-angle, -1, j.upperImpulse, useBias)
 	}
 
 	// ========== AXIS: B turns only around the axis of A ==========

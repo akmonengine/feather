@@ -103,9 +103,24 @@ func (s spring) impulse3(inverseMass *mgl64.Mat3, velocity, bias, accumulated mg
 
 // skewTerm is [rX]x I [rY]x: the angular part of the mass matrix of a point constraint
 func skewTerm(inertia *mgl64.Mat3, rX, rY mgl64.Vec3) mgl64.Mat3 {
-	sx, sy := skew(rX), skew(rY)
-	t := actor.Mul3(&sx, inertia)
-	return actor.Mul3(&t, &sy)
+	// skew(rX) × inertia × skew(rY), the products by the zeros of the skew matrices left out: the same sums, in the same
+	// order, as actor.Mul3 of the full matrices
+	m := inertia
+	x, y, z := rX[0], rX[1], rX[2]
+	var t mgl64.Mat3
+	for c := 0; c < 9; c += 3 {
+		t[c] = -z*m[c+1] + y*m[c+2]
+		t[c+1] = z*m[c] + -x*m[c+2]
+		t[c+2] = -y*m[c] + x*m[c+1]
+	}
+	X, Y, Z := rY[0], rY[1], rY[2]
+	var product mgl64.Mat3
+	for r := 0; r < 3; r++ {
+		product[r] = t[3+r]*Z + t[6+r]*-Y
+		product[3+r] = t[r]*-Z + t[6+r]*X
+		product[6+r] = t[r]*Y + t[3+r]*-X
+	}
+	return product
 }
 
 // bodyState is the copy of a body of the solver during a step: an awake dynamic body, or an awake kinematic body (it
@@ -239,6 +254,8 @@ type solver struct {
 	substep, substeps int
 	// locked: an awake body has a locked axis (the mass matrix of the joints can be singular: lockedInverse)
 	locked bool
+	// articulationBias: the trees of the current stage are solved with their spring (solveTree)
+	articulationBias bool
 
 	// static bodies (and sleeping ones) share this state: no mass, they never move
 	static bodyState
@@ -261,6 +278,7 @@ type solverJobs struct {
 	storeImpulses     func(i int)
 	finalize          func(i int)
 	state             func(i int)
+	tree              func(i int)
 }
 
 func (s *solver) initJobs() {
@@ -281,6 +299,7 @@ func (s *solver) initJobs() {
 		storeImpulses:     s.storeImpulsesConstraint,
 		finalize:          s.finalizeBody,
 		state:             s.stateOf,
+		tree:              s.solveTree,
 		color: func(i int) {
 			s.solveItem(s.color[i])
 		},

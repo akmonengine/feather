@@ -563,7 +563,8 @@ the ground.
 ## Joints
 The joints are solved like the contacts (as in Box2D v3): warm starting, soft constraints in `Push` (60 Hz, damping ratio 2
 by default), rigid constraints in `Relax`. They are colored with the contacts and solved with them, in parallel; the
-articulations below are solved before the colors, on a single goroutine.
+articulations below are solved before the colors, a tree per task: the trees share no dynamic body, so they are solved
+in parallel and give the same bits with any count of workers (`TestSwayingChainsAreDeterministic`).
 
 ### Articulations
 The point constraints (the anchors kept together) of the joints linking dynamic bodies are solved together, exactly, by
@@ -592,7 +593,12 @@ joint (as in PhysX).
   `p × ∇f`. This axis is orthogonal to `p`: it doesn't twist B, and it also follows the cone when B slides along its
   border (the limit changes with the direction).
 - **Twist** (ball): swing-twist decomposition of the rotation of B relative to A. The rate of the twist isn't exactly
-  `ω · x`: it is measured numerically, to follow the twist when B also swings.
+  `ω · x` when B also swings: with `q` the rotation of B in the frame A and `ω` in the frame A, `dq/dt = ½ (0, ω) q`, so
+  the rate of `2 atan2(qx, qw)` is `(ωx s + ωy (qw qz + qx qy) + ωz (qx qz - qw qy)) / s`, `s = qw² + qx²`.
+- **The rates are exact**: the gradients of the twist, of the swings (`∂atan2(a, b) = (b ∂a - a ∂b) / (a² + b²)`) and
+  of the cone are written out (`TestTheRatesOfTheAnglesAreTheirDerivatives` compares them to the derivatives), as the
+  Jacobians of Box3D (`spherical_joint.c`) and of Jolt (`SwingTwistConstraintPart`): measured by central differences,
+  they cost 7 twists and 5 cones per row, 37 % of a step of 1 000 limited and driven joints.
 - **Distance**: 1 row along the axis between the anchors, rigid, or a spring with the limits.
 - **Fixed & drive**: 3 angular rows, `K = IA + IB`, the error is the rotation vector between the frames.
 - **Configurable**: each axis chooses its row. Linear: 1 row along the axis of A (locked, or 2 limits), all locked = the

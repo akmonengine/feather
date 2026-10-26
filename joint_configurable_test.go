@@ -1,7 +1,9 @@
 package feather
 
 import (
+	"fmt"
 	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/akmonengine/feather/actor"
@@ -180,5 +182,60 @@ func TestConfigurableDoesNotAllocate(t *testing.T) {
 	simulate(w, 0.2, nil)
 	if allocs := testing.AllocsPerRun(10, func() { w.Step(sceneDt) }); allocs > 0 {
 		t.Errorf("%.1f allocations per step", allocs)
+	}
+}
+
+// The rates of the angles of a joint are their derivatives: on random frames, turning B by a small rotation changes the
+// twist, a swing angle and the cone function as their rate along their axis says (central differences of 1e-6 rad, within
+// 1e-6 relative)
+func TestTheRatesOfTheAnglesAreTheirDerivatives(t *testing.T) {
+	const (
+		step      = 1e-6
+		tolerance = 1e-6
+	)
+	r := rand.New(rand.NewSource(7))
+	randomRotation := func() mgl64.Quat {
+		return mgl64.QuatRotate(r.Float64()*math.Pi, mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}.Normalize())
+	}
+	xOf := func(frameA, frameB mgl64.Quat) mgl64.Vec3 {
+		return actor.RotateInverse(&frameA, actor.Rotate(&frameB, mgl64.Vec3{1, 0, 0}))
+	}
+	cone := func(p mgl64.Vec3) float64 {
+		r := math.Hypot(p.Y(), p.Z())
+		return math.Atan2(r, p.X()) / r * math.Hypot(p.Y()/0.4, p.Z()/0.7)
+	}
+	// derivative: the change of f when B turns by ±step around the world direction, over 2 step
+	derivative := func(frameA, frameB mgl64.Quat, direction mgl64.Vec3, f func(frameA, frameB mgl64.Quat) float64) float64 {
+		plus := f(frameA, integrateRotation(&frameB, direction.Mul(step)))
+		minus := f(frameA, integrateRotation(&frameB, direction.Mul(-step)))
+		return math.Remainder(plus-minus, 2*math.Pi) / (2 * step)
+	}
+	check := func(name string, want, got float64) {
+		t.Helper()
+		if math.Abs(want-got) > tolerance*math.Max(1, math.Abs(want)) {
+			t.Fatalf("%s: rate %.9f, the derivative is %.9f", name, got, want)
+		}
+	}
+	for range 2000 {
+		frameA, frameB := randomRotation(), randomRotation()
+		direction := mgl64.Vec3{r.NormFloat64(), r.NormFloat64(), r.NormFloat64()}.Normalize()
+
+		_, axis, rate := twistRow(frameA, frameB)
+		check("twist", derivative(frameA, frameB, direction, twistAngle), rate*axis.Dot(direction))
+
+		p := xOf(frameA, frameB)
+		for k := range swingAngles {
+			if _, axis, rate, ok := angleRow(p, swingAngles[k](p), swingGradients[k](p)); ok {
+				// the axis of the row is in the frame A
+				swing := func(frameA, frameB mgl64.Quat) float64 { return swingAngles[k](xOf(frameA, frameB)) }
+				check(fmt.Sprintf("swing %d", k), derivative(frameA, frameB, direction, swing), rate*actor.Rotate(&frameA, axis).Dot(direction))
+			}
+		}
+		if c, axis, ok := swingLimit(p, 0.7, 0.4); ok && math.Abs(1-cone(p)) > 1e-3 {
+			// c = (1 - f) / rate, f changes by rate (axis · ω)
+			rate := (1 - cone(p)) / c
+			coneOf := func(frameA, frameB mgl64.Quat) float64 { return cone(xOf(frameA, frameB)) }
+			check("cone", derivative(frameA, frameB, direction, coneOf), rate*actor.Rotate(&frameA, axis).Dot(direction))
+		}
 	}
 }
